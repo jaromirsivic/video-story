@@ -161,8 +161,11 @@ VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_recording.py test
 
 - `ALREADY_RUNNING`: a control window is open; finish or close it, or run
   `video-story sessions` to see it.
-- `WINDOW_EXITED`: the window process ended; read `ui.log` and `recording.log` in
-  `<recording_folder>/.work/<session>/`.
+- `WINDOW_EXITED`: the window process ended; read `ui.log` (window output, stays in
+  `<recording_folder>/.work/<session>/`) and `recording.log` (next to the frames).
+- `PROCESSING_FAILED`: transcription or finalisation failed; the recorded files stay in
+  `<recording_folder>/.work/<session>/` and `video-story transcribe <that folder>` can
+  retry the transcription.
 - No audio device: the Record button reports the error; choose another input in
   Settings or check the operating system's input devices.
 - Linux: `XDG_SESSION_TYPE=wayland` is refused; log in to an X11 session. Transparent

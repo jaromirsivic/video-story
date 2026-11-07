@@ -4,9 +4,14 @@ Layout inside the Recording Folder::
 
     <recording_folder>/
       .work/<session_id>/      # while recording / processing
-        state.json, lock, audio.wav, recording.log, frames/
+        state.json, lock, ui.log, audio.wav, recording.log, frames/
       <session_id>/            # after "Process Recording"
         manifest.json, audio.wav, transcript.txt, transcript.json, recording.log, frames/
+
+``state.json``, ``lock`` and ``ui.log`` never leave the work directory: ``state.json`` is
+the agent's contract, and ``ui.log`` is the stdout/stderr of the detached window process,
+which keeps it open for as long as the window lives. On Windows an open file blocks the
+rename of its directory, so finalisation moves the recording entry by entry instead.
 """
 
 from __future__ import annotations
@@ -29,9 +34,13 @@ AUDIO_16K_FILE_NAME = "audio16k.wav"
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = "lock"
 LOG_FILE_NAME = "recording.log"
+UI_LOG_FILE_NAME = "ui.log"
 MANIFEST_FILE_NAME = "manifest.json"
 TRANSCRIPT_TXT_NAME = "transcript.txt"
 TRANSCRIPT_JSON_NAME = "transcript.json"
+
+# Files that stay in the work directory when a recording is finalised or discarded.
+WORK_ONLY_FILES = frozenset({STATE_FILE_NAME, LOCK_FILE_NAME, UI_LOG_FILE_NAME})
 
 _SESSION_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
 
@@ -135,19 +144,19 @@ class SessionPaths:
         self.frames_dir(self.work_dir).mkdir(parents=True, exist_ok=True)
 
     def finalize(self) -> Path:
-        """Move the work directory to its final location (same volume => rename)."""
+        """Move the recording into its final directory (same volume => renames).
+
+        Every entry of the work directory except ``state.json``, ``lock`` and ``ui.log``
+        is moved; ``frames/`` goes as one rename. The work directory itself stays, so
+        ``wait``/``status`` keep reading ``state.json`` at its documented location.
+        """
         if self.final_dir.exists():
             raise FileExistsError(f"final directory already exists: {self.final_dir}")
-        self.final_dir.parent.mkdir(parents=True, exist_ok=True)
-        state = self.state_path.read_bytes() if self.state_path.exists() else None
-        lock = self.lock_path
-        if lock.exists():
-            lock.unlink()
-        _replace_with_retry(self.work_dir, self.final_dir)
-        # Keep state.json readable at its documented location for `wait`/`status`.
-        if state is not None:
-            self.work_dir.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_bytes(state)
+        self.final_dir.mkdir(parents=True, exist_ok=False)
+        for entry in sorted(self.work_dir.iterdir()):
+            if entry.name in WORK_ONLY_FILES:
+                continue
+            _replace_with_retry(entry, self.final_dir / entry.name)
         return self.final_dir
 
     def discard(self, keep_state: bool = True) -> None:
@@ -161,9 +170,8 @@ class SessionPaths:
         if not keep_state:
             shutil.rmtree(self.work_dir, ignore_errors=False)
             return
-        keep = {STATE_FILE_NAME, LOCK_FILE_NAME, "ui.log"}
         for entry in self.work_dir.iterdir():
-            if entry.name in keep:
+            if entry.name in WORK_ONLY_FILES:
                 continue
             if entry.is_dir():
                 shutil.rmtree(entry, ignore_errors=False)
@@ -179,8 +187,9 @@ class SessionPaths:
 
 
 def _replace_with_retry(src: Path, dst: Path, attempts: int = 10, delay: float = 0.3) -> None:
-    """``os.replace`` with retries: on Windows a directory cannot be renamed while any
-    file inside is open (log handlers, indexers, antivirus)."""
+    """``os.replace`` with retries: on Windows a file or directory cannot be renamed
+    while it (or, for a directory, anything inside it) is open: log handlers, the
+    search indexer, antivirus scanners."""
     for attempt in range(attempts):
         try:
             os.replace(src, dst)
@@ -271,6 +280,8 @@ __all__ = [
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",
     "LOG_FILE_NAME",
+    "UI_LOG_FILE_NAME",
+    "WORK_ONLY_FILES",
     "MANIFEST_FILE_NAME",
     "STATE_FILE_NAME",
     "TRANSCRIPT_JSON_NAME",

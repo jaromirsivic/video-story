@@ -21,6 +21,7 @@ from video_story.core.cursor import cursor_from_json
 from video_story.core.manifest import Manifest, read_manifest
 from video_story.core.naming import FrameName, parse_frame_filename
 from video_story.core.session import (
+    UI_LOG_FILE_NAME,
     SessionPaths,
     SessionState,
     Status,
@@ -125,7 +126,7 @@ def launch_control_window(config: Config, config_file: Path | None = None) -> La
         "--session",
         session_id,
     ]
-    pid = spawn_detached(args, paths.work_dir / "ui.log", cwd=Path.cwd())
+    pid = spawn_detached(args, paths.work_dir / UI_LOG_FILE_NAME, cwd=Path.cwd())
     state.pid = pid
     write_state(paths.state_path, state)
     log.info("control window started: session %s pid %s", session_id, pid)

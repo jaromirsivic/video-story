@@ -221,6 +221,34 @@ def test_session_id_and_paths(tmp_path: Path):
     )
 
 
+def test_finalize_with_open_ui_log(tmp_path: Path):
+    """The detached window process keeps ``ui.log`` open as its stdout; on Windows that
+    blocks renaming the work directory, so finalisation must move the entries instead
+    and leave ``ui.log`` (and ``state.json``) behind."""
+    paths = SessionPaths(tmp_path, "20260101-000000")
+    paths.create_work_dirs()
+    (paths.work_dir / "audio.wav").write_bytes(b"x")
+    (paths.work_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    paths.frames_dir(paths.work_dir).joinpath("0_000_screen1.png").write_bytes(b"y")
+    paths.lock_path.write_text("1", encoding="utf-8")
+    write_state(
+        paths.state_path,
+        SessionState(session_id=paths.session_id, status=Status.PROCESSING, recording_folder="x"),
+    )
+    with open(paths.work_dir / "ui.log", "ab") as ui_log:  # held open like the child's stdout
+        ui_log.write(b"window output\n")
+        ui_log.flush()
+        final = paths.finalize()
+    assert final == tmp_path / paths.session_id
+    assert sorted(p.name for p in final.iterdir()) == ["audio.wav", "frames", "manifest.json"]
+    assert (final / "frames" / "0_000_screen1.png").read_bytes() == b"y"
+    assert sorted(p.name for p in paths.work_dir.iterdir()) == ["lock", "state.json", "ui.log"]
+    assert read_state(paths.state_path).status is Status.PROCESSING
+    assert paths.current_dir == final
+    with pytest.raises(FileExistsError):
+        paths.finalize()
+
+
 def test_session_discard(tmp_path: Path):
     paths = SessionPaths(tmp_path, "20260101-000000")
     paths.create_work_dirs()
