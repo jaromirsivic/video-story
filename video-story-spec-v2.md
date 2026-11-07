@@ -59,8 +59,8 @@ Dotčené části: ovládací okno nahrávání (Video Story), Video Story Edito
    - **po nahrávání** (editor otevřený volbou Video Editor ze Stop dialogu): agent čeká na téže relaci (`wait --session <id>`) a po Process dostane výsledek s rozsahem,
    - **samostatně** (editor otevřený pokynem „Edit Video Story“ bez předchozího nahrávání): uživatel vybere kteroukoli dřívější nahrávku, upraví crop a stiskne Process; agent, který editor otevřel, obdrží id nahrávky a rozsah a zpracuje ji znovu (typicky chce zopakovat nebo upřesnit dřívější akci). Pro tento případ skill `video-story-edit` po otevření editoru **čeká** na pokyn (kap. 8), dosud se jen otevřel a skončil.
 5. Agent zpracuje **jen vyříznutou část**: přepis omezený na segmenty protínající [In, Out] (časy se nemění, zůstávají na časové ose nahrávky), snímky jen z tohoto rozsahu. Části mimo rozsah agent ignoruje.
-6. Pokud uživatel editor zavře bez stisku Process:
-   - po nahrávání (stav `editing`): **K potvrzení (návrh)** relace skončí jako `processed` s **celým rozsahem** (nahrávka ani čekání agenta se neztratí); alternativa je `cancelled`,
+6. Pokud uživatel editor zavře křížkem **bez stisku Process**, agent **nic nezpracovává** (rozhodnutí autora):
+   - po nahrávání (stav `editing`): relace skončí finálním stavem `cancelled` se zprávou „editor closed without Process; recording kept“ a s `recording_dir` – nahrávka zůstává uložená ve finální složce (lze ji později otevřít přes Edit Video Story), ale čekající agent se dozví, že nemá nic dělat, a jen to oznámí jednou větou,
    - samostatně: agent dostane výsledek `closed` bez rozsahu a nic nezpracovává.
 
 ## 7. Uložení hranic cropu k nahrávce
@@ -74,7 +74,7 @@ Dotčené části: ovládací okno nahrávání (Video Story), Video Story Edito
 
 ### 8.1 Stavy relace nahrávání
 
-- Nový nefinální stav **`editing`**: zpracování dokončeno, nahrávka je ve finální složce, editor je otevřený a čeká se na Process. `wait` ho vrací jako nefinální (agent volá `wait` znovu).
+- Nový nefinální stav **`editing`**: zpracování dokončeno, nahrávka je ve finální složce, editor je otevřený a čeká se na Process. `wait` ho vrací jako nefinální (agent volá `wait` znovu). Zavření editoru bez Process ukončí relaci stavem `cancelled` (s `recording_dir`, nahrávka zůstává), agent nic nezpracovává.
 - Stav `processed` dostává nová pole: `crop: {"start_ms": …, "end_ms": …}` (vždy; bez editoru = celý rozsah) a `processed_via: "stop_dialog" | "editor"`.
 
 ### 8.2 Samostatně spuštěný editor
@@ -98,7 +98,7 @@ Dotčené části: ovládací okno nahrávání (Video Story), Video Story Edito
 2. Po stisku Draw on Screen je aktivní obdélník; paleta má 8 barev, výchozí červená; kresba je v snímcích i v `drawings` sidecaru.
 3. V náhledu editoru kolečko myši přibližuje k bodu pod kurzorem až na 800 % a oddaluje zpět na „celý v náhledu“; přiblížený obraz lze posouvat tažením; kurzor a kresby sedí v každém měřítku; crop ani export se tím nemění.
 4. Stop dialog nabízí Video Editor; po volbě proběhne zpracování a otevře se editor s touto nahrávkou; `state.json` je `editing` a `wait` čeká dál.
-5. Zelené tlačítko Process v editoru: uloží crop, přepne relaci na `processed` s `crop`, agent čekající na `wait` dostane rozsah a zpracuje jen segmenty a snímky uvnitř; editor zůstane otevřený.
+5. Zelené tlačítko Process v editoru: uloží crop, přepne relaci na `processed` s `crop`, agent čekající na `wait` dostane rozsah a zpracuje jen segmenty a snímky uvnitř; editor zůstane otevřený. Zavření editoru křížkem bez Process po nahrávání ukončí relaci jako `cancelled`; agent nic nezpracuje a nahrávka zůstává uložená.
 6. Samostatný editor: po „Edit Video Story“ agent čeká; výběr starší nahrávky, úprava cropu, Process → agent dostane id a rozsah a zpracuje jen tento úsek; zavření editoru bez Process agent oznámí a nic nezpracuje.
 7. Crop se ukládá do `crop.json` při každé změně a po opětovném otevření nahrávky je obnoven.
 8. Stávající funkce (Process Recording ze Stop dialogu, Render, retence, Delete All) fungují beze změny; jednotkové testy a CI na Windows, Linuxu a macOS procházejí. Ověření na Windows ručně podle rozšířeného akceptačního checklistu.
@@ -114,5 +114,4 @@ Dotčené části: ovládací okno nahrávání (Video Story), Video Story Edito
 3. Krok zoomu 1,25× na dílek kolečka, posun tažením, dvojklik = celý náhled – kap. 4.4–4.5.
 4. Při otevření editoru z nahrávání, když už editor běží: načíst nahrávku do běžící instance – kap. 5.3.
 5. Po stisku Process editor zůstává otevřený – kap. 6.3.
-6. Zavření editoru bez Process po nahrávání = `processed` s celým rozsahem (ne `cancelled`) – kap. 6.6.
-7. Rozhraní pro agenta: stav `editing`, pole `crop`, `wait --editor`, `transcript_in_range` – kap. 8 (technický návrh, lze upravit).
+6. Rozhraní pro agenta: stav `editing`, pole `crop`, `wait --editor`, `transcript_in_range` – kap. 8 (technický návrh, lze upravit).
