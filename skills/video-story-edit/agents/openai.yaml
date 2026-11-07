@@ -1,0 +1,7 @@
+interface:
+  display_name: "Video Story Editor"
+  short_description: "Edit a Video Story recording: crop and render it to MP4 with subtitles"
+  default_prompt: "Use $video-story-edit to open the Video Story Editor for my latest recording."
+
+policy:
+  allow_implicit_invocation: true

@@ -38,6 +38,12 @@ RETENTION_MIN_DAYS = 1
 RETENTION_MAX_DAYS = 3650
 RETENTION_DEFAULT_DAYS = 30
 
+EXPORT_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow")
+EXPORT_PRESET_DEFAULT = "medium"
+EXPORT_CRF_DEFAULT = 18
+EXPORT_AUDIO_BITRATE_K_DEFAULT = 192
+EXPORT_FPS = 24
+
 IMAGE_FORMATS = ("png", "jpeg")
 WHISPER_BACKENDS = ("pywhispercpp", "whisper-cli")
 MODEL_FILE_NAME = "ggml-small.bin"
@@ -94,6 +100,10 @@ class Config:
     audio_input: str | None = None
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
     retention_days: int = RETENTION_DEFAULT_DAYS
+    export_preset: str = EXPORT_PRESET_DEFAULT
+    export_crf: int = EXPORT_CRF_DEFAULT
+    export_audio_bitrate_k: int = EXPORT_AUDIO_BITRATE_K_DEFAULT
+    editor_draw_cursor: bool = True
     whisper_model_path: Path | None = None
     whisper_backend: WhisperBackend = "pywhispercpp"
     whisper_cli_path: Path | None = None
@@ -144,6 +154,17 @@ def _require_int(data: dict[str, Any], key: str, lo: int, hi: int, default: int)
     if not lo <= value <= hi:
         raise ConfigError(key, f"must be between {lo} and {hi} (got {value})")
     return value
+
+
+def _require_bool(data: dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ConfigError(key, "must be true or false")
 
 
 def _optional_path(data: dict[str, Any], key: str) -> Path | None:
@@ -203,6 +224,12 @@ def config_from_dict(data: dict[str, Any]) -> Config:
         retention_days=_require_int(
             data, "retention_days", RETENTION_MIN_DAYS, RETENTION_MAX_DAYS, RETENTION_DEFAULT_DAYS
         ),
+        export_preset=_choice(data, "export_preset", EXPORT_PRESETS, EXPORT_PRESET_DEFAULT),
+        export_crf=_require_int(data, "export_crf", 0, 51, EXPORT_CRF_DEFAULT),
+        export_audio_bitrate_k=_require_int(
+            data, "export_audio_bitrate_k", 32, 512, EXPORT_AUDIO_BITRATE_K_DEFAULT
+        ),
+        editor_draw_cursor=_require_bool(data, "editor_draw_cursor", True),
         whisper_model_path=_optional_path(data, "whisper_model_path"),
         whisper_backend=_choice(data, "whisper_backend", WHISPER_BACKENDS, "pywhispercpp"),  # type: ignore[arg-type]
         whisper_cli_path=_optional_path(data, "whisper_cli_path"),
@@ -277,6 +304,11 @@ __all__ = [
     "CAPTURE_INTERVAL_MAX_MS",
     "CAPTURE_INTERVAL_MIN_MS",
     "CONFIG_FILE_NAME",
+    "EXPORT_AUDIO_BITRATE_K_DEFAULT",
+    "EXPORT_CRF_DEFAULT",
+    "EXPORT_FPS",
+    "EXPORT_PRESETS",
+    "EXPORT_PRESET_DEFAULT",
     "IMAGE_FORMATS",
     "JPEG_QUALITY_DEFAULT",
     "JPEG_QUALITY_MAX",

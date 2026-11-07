@@ -62,6 +62,10 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `audio_input` | `null` | device name; `null` means the system default input |
 | `auto_stop_minutes` | 120 | recording stops and is processed automatically after this time |
 | `retention_days` | 30 | recordings older than this (by their start time) are deleted when the control window starts, 1 to 3650 |
+| `export_preset` | `medium` | libx264 preset for MP4 export (`ultrafast` ... `slow`) |
+| `export_crf` | 18 | libx264 quality (lower is better, 0 to 51) |
+| `export_audio_bitrate_k` | 192 | AAC bitrate in kb/s |
+| `editor_draw_cursor` | `true` | draw the recorded cursor into the preview and the exported video |
 | `whisper_model_path` | `null` | `null` means `models/ggml-small.bin` |
 | `whisper_backend` | `pywhispercpp` | or `whisper-cli` with `whisper_cli_path` pointing to a whisper.cpp binary |
 | `whisper_threads` | min(8, CPUs) | CPU threads for transcription |
@@ -74,21 +78,26 @@ and the launcher scripts). Registering it means making that directory visible to
 host. `scripts/install-hosts.ps1` (Windows) and `scripts/install-hosts.sh` (Linux)
 create the links described below.
 
+There are two skills: `video-story` (recording) and `video-story-edit` (the editor and
+MP4 export). Register both the same way; the install scripts do.
+
 ### Claude Code
 
-Personal skills live in `~/.claude/skills/<name>/`. Link the skill directory there:
+Personal skills live in `~/.claude/skills/<name>/`. Link the skill directories there:
 
 ```powershell
 # Windows (junction, no administrator rights needed)
 cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story" "D:\git\video-story\skills\video-story"
+cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story-edit" "D:\git\video-story\skills\video-story-edit"
 ```
 
 ```bash
 # Linux
 ln -s ~/video-story/skills/video-story ~/.claude/skills/video-story
+ln -s ~/video-story/skills/video-story-edit ~/.claude/skills/video-story-edit
 ```
 
-Start a new Claude Code session and say "Start Video Story". The repository is also a
+Start a new Claude Code session and say "Start Video Story" or "Edit Video Story". The repository is also a
 Claude Code plugin (`.claude-plugin/plugin.json`) and a one-plugin marketplace
 (`.claude-plugin/marketplace.json`); installing it that way copies the repository into
 the plugin cache, so prefer the link while the model and the virtual environment live
@@ -126,7 +135,8 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
 
 Tools: `video_story_start`, `video_story_wait`, `video_story_status`,
 `video_story_describe`, `video_story_get_transcript`, `video_story_list_frames`,
-`video_story_get_frame`, `video_story_config`, `video_story_doctor`.
+`video_story_get_frame`, `video_story_config`, `video_story_doctor`, `video_story_edit`,
+`video_story_export`.
 
 ### ChatGPT
 
@@ -148,6 +158,13 @@ Format, JPEG Quality, Audio Input, Auto Stop Recording, Keep Recordings) and off
 which asks for confirmation and then removes every recording except the open session.
 
 ## 4. Verify
+
+Editor and export:
+
+```bash
+uv run video-story edit                                   # opens the Video Story Editor (newest recording selected)
+uv run video-story export --session <id> --screen screen1 # MP4 + SRT without the window
+```
 
 ```bash
 uv run video-story doctor

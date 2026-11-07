@@ -187,3 +187,20 @@ Odhad náročnosti: E1 je nejmenší a nejdůležitější (export bez GUI), E2�
 8. **Ořez uvnitř segmentu přepisu.** Když crop protne titulek, navrhuji segment zachovat s oříznutými časy (text celý). Alternativa: zahodit segmenty, které nejsou celé uvnitř. Souhlasíš s ořezáním?
 9. **Rozsah seznamu nahrávek.** Jen zpracované nahrávky (`<id>/manifest.json`). Nahrávky bez přepisu (selhalo zpracování, zůstaly v `.work`) nenabízet. Souhlasíš?
 10. **FFmpeg.** Editor i export vyžadují FFmpeg (včetně `libx264`, `aac`); použije se stejná detekce/stažení jako pro přepis (`doctor --fix`). Stažené sestavení BtbN je obsahuje. Je to v pořádku (jiná možnost není rozumná)?
+
+## 13. Stav implementace (7. 11. 2026)
+
+Odpovědi na otázky: všechny návrhy z kapitoly 12 odsouhlaseny beze změn.
+
+| Milník | Stav |
+| --- | --- |
+| E1 export | hotovo: `export/plan.py`, `srt.py`, `cursor.py`, `ffmpeg_export.py`; CLI `export`, MCP `video_story_export`; testy `tests/unit/test_export.py`, `test_export_ffmpeg.py` (ffprobe, dekódované snímky, kurzor, zrušení). Ověřeno reálným exportem nahrávky `20261107-122147` (2560×1600, h264 24 fps, AAC, 44,08 s, SRT). |
+| E2–E5 editor | hotovo: `editor/` (okno, seznam nahrávek, model a pohled časové osy, miniatury, křivka zvuku, náhled, přehrávač, render dialog); testy `tests/unit/test_editor.py`. Okno ověřeno na ploše Windows (dvě videostopy, zvuk, kurzor v náhledu, Render). |
+| E6 skill a integrace | hotovo: `skills/video-story-edit`, CLI `edit [--detach] [--session]`, MCP `video_story_edit`, `host/editor_launcher.py` (zámek `.work/editor.lock`, `NO_RECORDINGS`, `ALREADY_RUNNING`), instalační skripty pro oba skilly, dokumentace, akceptační checklist (sekce „Editor and export“). |
+| E7 Linux/macOS | neprovedeno (čeká na schválení): jednotkové a exportní testy běží v CI na všech třech systémech, okno editoru tam ověřeno není. |
+
+Odchylky od návrhu:
+
+- **Kurzor v exportu bez `sendcmd`.** Filtr `overlay` v FFmpeg 7.1 nepřijímá změny `x`/`y` za běhu (volby nejsou označené jako runtime), takže `sendcmd` příkazy ignoruje. Místo toho se poloha kurzoru vyjadřuje výrazem nad indexem snímku `n` – vyvážený strom `if(lt(n,N),a,b)` pro každou osu (`cursor_expressions`), vyhodnocovaný s `eval=frame`. Pro dlouhé nahrávky (desetitisíce klíčových snímků) jde graf přes `-filter_complex_script`, kratší inline. Režie je neměřitelná.
+- Zvuk se do výstupu bere `-ss`/`-t` jako vstupní volby (`-to` jako vstupní volba je v starších FFmpeg nedostupná); délka výstupu se drží `-t` a `apad`.
+- Nastavení editoru (`export_preset`, `export_crf`, `export_audio_bitrate_k`, `editor_draw_cursor`) jsou jen v `config.json`.

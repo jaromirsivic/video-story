@@ -30,6 +30,10 @@ frames/0_500_screen1.json  {"time_ms": 500, "screen": "screen1", "cursor": {"scr
                                           "to": {"screen": "screen1", "x": 750, "y": 675}}]}
 ```
 
+## Editing and exporting
+
+Say "Edit Video Story" and the **Video Story Editor** opens: a list of the stored recordings on the left (newest selected), a preview with Play/Stop and subtitles under it, and a timeline with one video track per screen plus the audio track. Zoom the timeline, drag the In/Out handles (or press `I`/`O`) to crop the start and the end, click a screen track to choose what is exported and press **Render**: the selected screen becomes an MP4 (H.264 + AAC, constant 24 fps, screen resolution, cursor drawn in) with an SRT subtitle file next to it. `video-story export --session <id> --screen screen2 --start-ms 10000 --end-ms 60000` does the same without the window. The editor is verified on Windows; Linux and macOS follow.
+
 ## Quick start
 
 ```bash

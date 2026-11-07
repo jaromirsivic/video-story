@@ -28,3 +28,23 @@ person with the window on screen.
 7. The agent reads the transcript, calls `frames --at <ms>` and opens the screenshot of
    the screen the cursor was on; the rectangle is visible in frames taken while drawn.
 8. `video-story sessions` lists the recording as `processed`.
+
+## Editor and export (Edit Video Story)
+
+| # | Criterion | Automated evidence | Manual check |
+| --- | --- | --- | --- |
+| E1 | Export: MP4 is H.264 + AAC, constant 24 fps, the screen's image resolution, cropped to [start, end]; SRT next to it with shifted, clipped segments; cursor drawn only on its screen | `tests/unit/test_export.py` (frame plan boundaries, concat list, cursor keyframes, SRT), `tests/unit/test_export_ffmpeg.py` (ffprobe: codecs, 24/1, size, duration; decoded frame colours; cursor pixels; cancel) | `video-story export --session <id> --screen screen2 --start-ms 5000 --end-ms 20000`; open the MP4 in a player, load the SRT |
+| E2 | Editor opens via the agent ("Edit Video Story"), lists stored recordings newest first with the newest selected; `--session` preselects | `tests/unit/test_editor_launcher.py` (lock held by another process, NO_RECORDINGS/UNKNOWN_SESSION, MCP tool `video_story_edit`), `tests/unit/test_editor.py` (recordings model, default selection) | Say "Edit Video Story" in a new Claude Code session; the editor opens with the latest recording |
+| E3 | Preview plays with audio, time display, subtitles under the preview (default on, toggle); keyboard transport | `tests/unit/test_editor.py` (subtitle text at a time, player fallback clock) | Space plays with sound; subtitles follow the speech; uncheck Subtitles |
+| E4 | Timeline: one video track per screen with thumbnails, one audio track with the waveform, zoom, In/Out handles and `I`/`O`, crop shared by all screens, track click selects the exported screen | `tests/unit/test_editor.py` (timeline model math, I/O keys, Reset Crop, track selection) | Zoom with Ctrl+wheel, drag the handles, click screen2 |
+| E5 | Render asks for the MP4 path (default `<recording folder>/<id>_<screenN>.mp4`), shows progress with Cancel, reports MP4 and SRT paths; the editor stays open | `tests/unit/test_editor.py` (Render passes the selected screen and crop to the export) | Render a cropped range of screen2; check the file and the SRT |
+| E6 | Platforms | Windows 11: unit tests, real export of recording 20261107-122147, editor window verified on screen (7 Nov 2026). Linux and macOS: unit and export tests run in CI; the editor window is not yet verified there (planned milestone E7). | |
+
+### Manual editor script (5 minutes)
+
+1. In the agent: "Edit Video Story". The editor opens; the newest recording is selected.
+2. Press Space; the preview plays with sound and the subtitle under it follows the speech.
+3. Move the playhead to 5 s and press `I`, to 30 s and press `O`; the timeline darkens outside.
+4. Click the `screen2` track; the preview switches to the second screen.
+5. Press **Render**, keep the default path, wait for the progress dialog, open the MP4.
+6. Check that the SRT next to it starts at 00:00:00,000 and contains the spoken sentences.

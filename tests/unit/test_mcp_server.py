@@ -347,6 +347,56 @@ def test_doctor_import_failure(monkeypatch: pytest.MonkeyPatch):
 # server -----------------------------------------------------------------------
 
 
+# export -----------------------------------------------------------------------
+
+
+def test_export_tool_resolves_relative_output_and_maps_oserror(
+    recording: SessionPaths, config_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The engine itself is exercised in test_export_ffmpeg.py; here it is replaced."""
+    from video_story.export import ExportResult, ffmpeg_export
+
+    requests = []
+
+    def fake_export(request, config, progress=None, cancel=None):
+        requests.append(request)
+        if request.output.name == "fail.mp4":
+            raise PermissionError(13, "Access is denied", str(request.output))
+        return ExportResult(
+            output=request.output,
+            srt=None,
+            screen_id=request.screen_id,
+            start_ms=0,
+            end_ms=900,
+            duration_ms=900,
+            width=64,
+            height=32,
+            fps=24,
+            frames_used=4,
+            ffmpeg="ffmpeg",
+        )
+
+    monkeypatch.setattr(ffmpeg_export, "export_recording", fake_export)
+    result = mcp_server.tool_export(
+        recording.session_id, output="clips/relative.mp4", config_file=config_file
+    )
+    assert result["ok"] is True
+    assert requests[-1].output == recording.recording_folder / "clips" / "relative.mp4"
+    absolute = recording.recording_folder.parent / "elsewhere.mp4"
+    assert mcp_server.tool_export(
+        recording.session_id, output=str(absolute), config_file=config_file
+    )["ok"]
+    assert requests[-1].output == absolute
+    assert mcp_server.tool_export(recording.session_id, config_file=config_file)["ok"]
+    assert requests[-1].output == recording.recording_folder / f"{SESSION_ID}_screen1.mp4"
+
+    failed = mcp_server.tool_export(
+        recording.session_id, output="fail.mp4", config_file=config_file
+    )
+    assert failed["ok"] is False and failed["code"] == "OUTPUT_ERROR"
+    assert "Access is denied" in failed["message"] and "fail.mp4" in failed["message"]
+
+
 def test_create_server_registers_tools(config_file: Path, recording: SessionPaths):
     server = mcp_server.create_server(config_file)
     assert server.name == "video-story"
@@ -357,6 +407,8 @@ def test_create_server_registers_tools(config_file: Path, recording: SessionPath
         "video_story_config",
         "video_story_describe",
         "video_story_doctor",
+        "video_story_edit",
+        "video_story_export",
         "video_story_get_frame",
         "video_story_get_transcript",
         "video_story_list_frames",

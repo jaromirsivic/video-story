@@ -1,7 +1,8 @@
 """MCP server exposing Video Story to Claude Desktop, Codex and ChatGPT.
 
 The tools mirror the CLI one to one (``start``, ``wait``, ``status``, ``describe``,
-``get_transcript``, ``list_frames``, ``get_frame``, ``config``, ``doctor``). Every tool
+``get_transcript``, ``list_frames``, ``get_frame``, ``config``, ``export``, ``doctor``).
+Every tool
 returns a JSON-serialisable dict; expected failures are reported as
 ``{"ok": false, "code": ..., "message": ...}`` instead of raising, so the agent can read
 the reason and react. ``get_frame`` additionally returns the screenshot as MCP image
@@ -69,6 +70,8 @@ status is "processed", call video_story_describe or video_story_get_transcript t
 timed transcript, video_story_list_frames to find the screenshots taken at a moment of the
 transcript and video_story_get_frame to look at one of them. "discarded", "cancelled" and
 "failed" are final too: there is nothing to read then, tell the user what happened.
+video_story_export renders a processed recording (one screen, optional time range) to an
+MP4 video with subtitles when the user asks for a video of what they recorded.
 All times are milliseconds since the recording started. Cursor coordinates are pixels of
 that screen's image with the origin in the top-left corner; when get_frame downscales an
 image, divide the cursor coordinates by the returned "scale" to find it in the image.
@@ -408,6 +411,61 @@ def tool_config(
     return _guard(run)
 
 
+def tool_export(
+    session: str,
+    output: str | None = None,
+    screen: str = "screen1",
+    start_ms: int = 0,
+    end_ms: int | None = None,
+    draw_cursor: bool = True,
+    write_srt: bool = True,
+    config_file: Path | None = None,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Render one screen of a recording to MP4 (+ SRT); mirror of ``video-story export``.
+
+    A relative ``output`` is resolved against the recording folder (never against the
+    server's working directory). File-system failures (an output path under an
+    existing file, a read-only folder, a full disk) come back as ``OUTPUT_ERROR``.
+    """
+    from video_story.export import ExportError, ExportRequest
+    from video_story.export.ffmpeg_export import export_recording
+    from video_story.host.cli import default_export_output
+
+    def run() -> dict[str, Any]:
+        paths = _paths(_load(config_file), session)
+        if output:
+            target = Path(output).expanduser()
+            if not target.is_absolute():
+                target = paths.recording_folder / target
+        else:
+            target = default_export_output(paths, screen)
+        request = ExportRequest(
+            paths=paths,
+            output=target,
+            screen_id=screen,
+            start_ms=int(start_ms),
+            end_ms=None if end_ms is None else int(end_ms),
+            draw_cursor=bool(draw_cursor),
+            write_srt=bool(write_srt),
+        )
+        try:
+            return export_recording(request, _load(config_file), progress=progress).to_dict()
+        except ExportError as exc:
+            raise SessionError(exc.code, str(exc)) from exc
+        except OSError as exc:  # anything the export engine did not map itself
+            raise SessionError("OUTPUT_ERROR", f"cannot write {target}: {exc}") from exc
+
+    return _guard(run)
+
+
+def tool_edit(session: str | None = None, config_file: Path | None = None) -> dict[str, Any]:
+    """Open the Video Story Editor in its own process; mirror of ``video-story edit --detach``."""
+    from video_story.host.editor_launcher import launch_editor
+
+    return _guard(lambda: launch_editor(_load(config_file), session, config_file))
+
+
 def tool_doctor(config_file: Path | None = None) -> dict[str, Any]:
     """Environment diagnostics (ffmpeg, whisper model, screens, audio)."""
     try:
@@ -506,6 +564,60 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         value as a string; "true"/"false"/numbers/"null" are converted) or "path"."""
         return tool_config(action, key, value, config_file)
 
+    async def video_story_export(
+        session_id: str,
+        output: str | None = None,
+        screen: str = "screen1",
+        start_ms: int = 0,
+        end_ms: int | None = None,
+        draw_cursor: bool = True,
+        write_srt: bool = True,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Render a processed recording to an MP4 video (H.264 + AAC, constant 24 fps,
+        the screen's resolution) with ffmpeg, plus an SRT subtitle file next to it made
+        from the transcript. screen selects the screen ("screen1" by default); start_ms
+        and end_ms crop the recording timeline (end_ms omitted = end of the recording);
+        output defaults to <recording_folder>/<session_id>_<screen>.mp4, a relative
+        output is resolved against the recording folder and ".mp4" is appended when
+        the name has another extension. draw_cursor draws the mouse pointer at its
+        recorded positions. Takes a while for long recordings; progress is reported
+        while it runs. Errors come back as {"ok": false, "code": ...}, e.g.
+        OUTPUT_ERROR when the output path cannot be written."""
+
+        async def report(fraction: float, text: str) -> None:
+            if ctx is not None:
+                await ctx.report_progress(fraction * 100, 100, text)
+
+        def progress(fraction: float, text: str) -> None:
+            try:
+                anyio.from_thread.run(report, fraction, text)
+            except Exception:  # a client that rejects notifications must not end the export
+                log.debug("progress notification failed", exc_info=True)
+
+        return await anyio.to_thread.run_sync(
+            lambda: tool_export(
+                session_id,
+                output,
+                screen,
+                start_ms,
+                end_ms,
+                draw_cursor,
+                write_srt,
+                config_file,
+                progress=progress,
+            )
+        )
+
+    def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
+        """Open the Video Story Editor window for the user: a list of the stored
+        recordings, a preview with subtitles, a timeline per screen with In/Out crop
+        handles and a Render button that writes an MP4 (+ SRT). session_id preselects
+        a recording (default: the newest). Returns at once; the user works in the
+        window and nothing comes back. ALREADY_RUNNING: the editor is already open;
+        NO_RECORDINGS: nothing to edit yet."""
+        return tool_edit(session_id, config_file)
+
     def video_story_doctor() -> dict[str, Any]:
         """Check the environment: Python, platform support, FFmpeg, whisper model, screens
         and audio input."""
@@ -519,6 +631,8 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     server.add_tool(video_story_list_frames)
     server.add_tool(video_story_get_frame, structured_output=False)
     server.add_tool(video_story_config)
+    server.add_tool(video_story_export)
+    server.add_tool(video_story_edit)
     server.add_tool(video_story_doctor)
     return server
 
@@ -560,6 +674,8 @@ __all__ = [
     "tool_config",
     "tool_describe",
     "tool_doctor",
+    "tool_edit",
+    "tool_export",
     "tool_get_frame",
     "tool_get_transcript",
     "tool_list_frames",

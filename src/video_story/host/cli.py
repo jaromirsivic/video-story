@@ -293,6 +293,60 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def default_export_output(paths: SessionPaths, screen: str) -> Path:
+    """``<recording_folder>/<session_id>_<screen>.mp4`` when no output is given."""
+    return paths.recording_folder / f"{paths.session_id}_{screen}.mp4"
+
+
+def cmd_export(args: argparse.Namespace) -> dict[str, Any]:
+    """Render a recording (one screen, optional range) to MP4 + SRT with ffmpeg."""
+    from video_story.export import ExportError, ExportRequest
+    from video_story.export.ffmpeg_export import export_recording
+    from video_story.host.runner import SessionError, resolve_session
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.session)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    output = Path(args.output) if args.output else default_export_output(paths, args.screen)
+    request = ExportRequest(
+        paths=paths,
+        output=output,
+        screen_id=args.screen,
+        start_ms=args.start_ms,
+        end_ms=args.end_ms,
+        draw_cursor=not args.no_cursor,
+        write_srt=not args.no_srt,
+    )
+
+    def progress(fraction: float, text: str) -> None:
+        log.info("%3d%% %s", int(fraction * 100), text)
+
+    try:
+        result = export_recording(request, cfg, progress=progress)
+    except ExportError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    return result.to_dict()
+
+
+def cmd_edit(args: argparse.Namespace) -> dict[str, Any]:
+    """Open the Video Story Editor (``--detach``: in its own process, return at once)."""
+    from video_story.host.editor_launcher import launch_editor
+    from video_story.host.runner import SessionError
+
+    cfg = _load(args)
+    try:
+        if args.detach:
+            return launch_editor(cfg, args.session, _config_file(args))
+        from video_story.editor.app import run_editor
+
+        code = run_editor(args.session, _config_file(args))
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    return {"session_id": args.session, "exit_code": code}
+
+
 def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     """Headless recording for development and integration tests (no window)."""
     from video_story.capture.recorder import Recorder
@@ -405,6 +459,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
     p.add_argument("directory", help="session id or recording directory")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("export", help="render a recording to MP4 (+ SRT) with ffmpeg")
+    p.add_argument("--session", required=True, help="session id or recording directory")
+    p.add_argument("--screen", default="screen1", help="screen id to render (default screen1)")
+    p.add_argument("--start-ms", type=int, default=0, help="start of the range (default 0)")
+    p.add_argument("--end-ms", type=int, help="end of the range (default: end of recording)")
+    p.add_argument("--output", help="MP4 path (default <recording_folder>/<session>_<screen>.mp4)")
+    p.add_argument("--no-cursor", action="store_true", help="do not draw the mouse pointer")
+    p.add_argument("--no-srt", action="store_true", help="do not write subtitles next to it")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("edit", help="open the Video Story Editor (agents: use --detach)")
+    p.add_argument("--detach", action="store_true", help="start the editor and return at once")
+    p.add_argument("--session", help="recording to select (default: the newest)")
+    p.set_defaults(func=cmd_edit)
 
     p = sub.add_parser("config", help="read or change config.json")
     p.add_argument("action", choices=["get", "set", "path", "reset"])

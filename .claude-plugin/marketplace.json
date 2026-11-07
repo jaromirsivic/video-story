@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "video-story",
-      "description": "Record a narrated screen session, transcribe it offline and act on the transcript with matching screenshots.",
+      "description": "Record a narrated screen session, transcribe it offline, act on the transcript with matching screenshots, and render recordings to MP4.",
       "version": "0.1.0",
       "source": "./",
       "category": "productivity"

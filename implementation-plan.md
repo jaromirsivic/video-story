@@ -406,6 +406,7 @@ Rozšíření ze 7. 11. 2026 (na žádost autora po prvním ručním ověření)
 - Retence: `retention_days` (výchozí 30, v Nastavení jako **Keep Recordings**); starší nahrávky (podle času v id relace) se mažou na pozadí při startu okna. V Nastavení přibyla tlačítka **Open Folder** a **Delete All Recordings...** (potvrzovací dialog; relace otevřeného okna se nemaže).
 - Výchozí hodnoty: Auto Stop Recording 120 min (dříve 30), Capture Interval 500 ms (dříve 250 ms podle zadání).
 - Oprava finalizace na Windows: oddělený okenní proces drží otevřený `ui.log`, proto se nahrávka přesouvá po položkách a `state.json`, `lock` i `ui.log` zůstávají v `.work/<id>`.
+- Editor nahrávek (Edit Video Story, export do MP4 + SRT): samostatný plán a stav v `implementation-plan-editor.md`.
 
 ---
 

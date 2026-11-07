@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-Register the Video Story skill with Claude Code and/or Codex on Windows (junctions).
+Register the Video Story skills (video-story, video-story-edit) with Claude Code and/or Codex on Windows (junctions).
 .EXAMPLE
 & .\scripts\install-hosts.ps1 -Claude
 & .\scripts\install-hosts.ps1 -Claude -Codex
@@ -15,12 +15,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$skill = Join-Path $root 'skills\video-story'
-if (-not (Test-Path -LiteralPath (Join-Path $skill 'SKILL.md'))) { throw "Skill directory not found: $skill" }
+$skillNames = @('video-story', 'video-story-edit')
+foreach ($name in $skillNames) {
+    if (-not (Test-Path -LiteralPath (Join-Path $root "skills\$name\SKILL.md"))) { throw "Skill directory not found: skills\$name" }
+}
 if (-not ($Claude -or $Codex)) { throw 'Pass -Claude and/or -Codex.' }
 
-function Set-SkillLink([string]$HostName, [string]$SkillsDir) {
-    $link = Join-Path $SkillsDir 'video-story'
+function Set-SkillLink([string]$HostName, [string]$SkillsDir, [string]$Name) {
+    $skill = Join-Path $root "skills\$Name"
+    $link = Join-Path $SkillsDir $Name
     if ($Remove) {
         if (Test-Path -LiteralPath $link) {
             # A junction is removed with rmdir; its target stays untouched.
@@ -45,8 +48,10 @@ function Set-SkillLink([string]$HostName, [string]$SkillsDir) {
     Write-Host "$HostName`: $link -> $skill"
 }
 
-if ($Claude) { Set-SkillLink 'Claude Code' (Join-Path $env:USERPROFILE '.claude\skills') }
-if ($Codex) { Set-SkillLink 'Codex' (Join-Path $env:USERPROFILE '.codex\skills') }
+foreach ($name in $skillNames) {
+    if ($Claude) { Set-SkillLink 'Claude Code' (Join-Path $env:USERPROFILE '.claude\skills') $name }
+    if ($Codex) { Set-SkillLink 'Codex' (Join-Path $env:USERPROFILE '.codex\skills') $name }
+}
 
 if (-not $Remove) {
     Write-Host ''
@@ -54,5 +59,5 @@ if (-not $Remove) {
     $cfg = @{ mcpServers = @{ 'video-story' = @{ command = 'uv'; args = @('run', '--project', $root, 'video-story', 'mcp') } } }
     Write-Host ($cfg | ConvertTo-Json -Depth 5)
     Write-Host ''
-    Write-Host 'Start a new chat in the host and say: Start Video Story'
+    Write-Host 'Start a new chat in the host and say: Start Video Story (or Edit Video Story)'
 }
