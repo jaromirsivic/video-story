@@ -14,7 +14,9 @@ transcription (whisper.cpp through `pywhispercpp`, CPU only).
 | Audio | any input device | PortAudio (`portaudio` package) and an input device (PipeWire/PulseAudio/ALSA) |
 | Display | Windows 10/11, any number of screens, per-monitor DPI supported | X11 session (Wayland is not supported yet) with `python-xlib` (installed by uv) |
 
-macOS support is planned; the platform layer refuses to record there.
+| macOS 13+ | | screens and cursor through CoreGraphics (no extra packages); on first use macOS asks for **Screen Recording** and **Microphone** permission for the terminal or host application; FFmpeg from Homebrew (`brew install ffmpeg`) or `video-story doctor --fix` is not available on macOS yet, so install it manually |
+
+macOS is verified on the GitHub Actions macOS runner (CI), not yet on a physical Mac.
 
 ## 1. Get the code and the model
 

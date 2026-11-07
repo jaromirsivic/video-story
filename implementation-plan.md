@@ -1,6 +1,6 @@
 # Video Story – implementační plán
 
-Stav: **implementováno a ověřeno na Windows a Linuxu (X11)** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15. Zadání je v [video-story-spec.md](video-story-spec.md).
+Stav: **implementováno; ověřeno na Windows a Linuxu (X11) lokálně a na macOS přes GitHub Actions** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15. Zadání je v [video-story-spec.md](video-story-spec.md).
 
 Tento plán je česky (vznikl před rozhodnutím). Vše ostatní v repozitáři – README, instalace, skill, UI, hlášky, logy, CLI nápověda, kód a komentáře – je anglicky.
 
@@ -395,7 +395,8 @@ Původní otázky:
 | M3 kreslení | hotovo | `tests/unit/test_overlay.py`, `tests/integration/test_overlay_capture.py` (kresba je ve snímku obou monitorů) |
 | M4 přepis a doctor | hotovo | `tests/unit/test_transcribe.py`, `tests/unit/test_doctor.py`, `tests/integration/test_transcription.py` (čeština, offline, ~4 s na 14 s zvuku) |
 | M5 hostitelé | skill + Claude plugin + MCP server hotovo; Claude Code skill ověřen (junction), Codex a Claude Desktop jen zdokumentováno | `skills/video-story/SKILL.md`, `.claude-plugin/`, `src/video_story/host/mcp_server.py`, `docs/installation.md` |
-| M6 Linux a dokumentace | hotovo pro Fedora 44 / X11 (Xvfb + openbox): všechny sady prošly; macOS neimplementováno | `tests/manual/acceptance.md` |
+| M6 Linux a dokumentace | hotovo pro Fedora 44 / X11 (Xvfb + openbox): všechny sady prošly | `tests/manual/acceptance.md` |
+| M7 macOS přes GitHub Actions | `platform/macos.py` (ctypes CoreGraphics, body vs. pixely přes `pixel_ratio`), CI matice Ubuntu/Windows/macOS zelená (7. 11. 2026): obrazovky, kurzor, záznam, zachycení overlay na macOS runneru; fyzický Mac s Retinou a mikrofonem zatím neověřen | `.github/workflows/ci.yml`, veřejné anotace běhu, `tests/unit/test_core.py::test_pixel_ratio_mapping` |
 
 Odchylky od původního návrhu: žádná pauza při Stop dialogu (rozhodnutí 7), nástroje kreslení rozšířeny (rozhodnutí 8), položka Auto Stop Recording (rozhodnutí 6), vše v repozitáři anglicky (rozhodnutí 12). Konfigurace `config.json` v kořeni repozitáře; `models/` a `bin/` mimo Git.
 
