@@ -150,10 +150,25 @@ class SessionPaths:
             self.state_path.write_bytes(state)
         return self.final_dir
 
-    def discard(self) -> None:
-        """Delete every file of this recording (work directory)."""
-        if self.work_dir.exists():
+    def discard(self, keep_state: bool = True) -> None:
+        """Delete every file of this recording.
+
+        ``state.json`` (and the lock) are kept by default so that an agent waiting on
+        the session still sees its status; the window returns to the Record state.
+        """
+        if not self.work_dir.exists():
+            return
+        if not keep_state:
             shutil.rmtree(self.work_dir, ignore_errors=False)
+            return
+        keep = {STATE_FILE_NAME, LOCK_FILE_NAME, "ui.log"}
+        for entry in self.work_dir.iterdir():
+            if entry.name in keep:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=False)
+            else:
+                entry.unlink()
 
     def remove_work_dir_if_empty(self) -> None:
         try:

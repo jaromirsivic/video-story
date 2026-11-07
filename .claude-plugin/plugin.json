@@ -1,0 +1,9 @@
+{
+  "name": "video-story",
+  "version": "0.1.0",
+  "description": "Record a narrated screen session (microphone, every screen, cursor), transcribe it offline and act on the timed transcript with matching screenshots.",
+  "author": { "name": "Jaromir Sivic" },
+  "license": "MIT",
+  "keywords": ["screen recording", "transcript", "whisper", "narration", "screenshots", "cursor"],
+  "skills": "./skills/"
+}

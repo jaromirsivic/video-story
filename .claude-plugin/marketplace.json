@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "video-story-local",
+  "description": "Local marketplace exposing the Video Story plugin from this repository.",
+  "owner": { "name": "Jaromir Sivic" },
+  "plugins": [
+    {
+      "name": "video-story",
+      "description": "Record a narrated screen session, transcribe it offline and act on the transcript with matching screenshots.",
+      "version": "0.1.0",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

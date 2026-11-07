@@ -1,0 +1,7 @@
+interface:
+  display_name: "Video Story"
+  short_description: "Record a narrated screen session and act on the transcript and frames"
+  default_prompt: "Use $video-story to start Video Story, wait for my recording and then do what I asked."
+
+policy:
+  allow_implicit_invocation: true

@@ -225,7 +225,19 @@ def test_session_discard(tmp_path: Path):
     paths = SessionPaths(tmp_path, "20260101-000000")
     paths.create_work_dirs()
     (paths.work_dir / "audio.wav").write_bytes(b"x")
+    write_state(
+        paths.state_path,
+        SessionState(
+            session_id="20260101-000000", status=Status.READY, recording_folder=str(tmp_path)
+        ),
+    )
     paths.discard()
+    assert paths.work_dir.exists() and paths.state_path.exists()
+    assert (
+        not (paths.work_dir / "audio.wav").exists()
+        and not paths.frames_dir(paths.work_dir).exists()
+    )
+    paths.discard(keep_state=False)
     assert not paths.work_dir.exists()
 
 

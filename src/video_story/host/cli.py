@@ -72,11 +72,33 @@ def attach_file_log(path: Path) -> logging.Handler:
     return handler
 
 
+def _config_file(args: argparse.Namespace) -> Path | None:
+    return Path(args.config) if args.config else None
+
+
+def _load(args: argparse.Namespace) -> Config:
+    return load_config(_config_file(args))
+
+
+def _session_paths(args: argparse.Namespace, cfg: Config) -> SessionPaths:
+    from video_story.host.runner import SessionError, active_session, resolve_session
+
+    if args.session:
+        try:
+            return resolve_session(cfg, args.session)
+        except SessionError as exc:
+            raise CliError(exc.code, str(exc)) from exc
+    running = active_session(cfg)
+    if running is not None:
+        return running[0]
+    raise CliError("NO_SESSION", "no active session; pass --session ID", EXIT_USAGE)
+
+
 # Commands --------------------------------------------------------------------
 
 
 def cmd_config(args: argparse.Namespace) -> dict[str, Any]:
-    path = Path(args.config) if args.config else config_path()
+    path = _config_file(args) or config_path()
     if args.action == "path":
         return {"path": str(path), "exists": path.exists()}
     if args.action == "get":
@@ -141,15 +163,135 @@ def cmd_screens(_args: argparse.Namespace) -> dict[str, Any]:
 def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.host.doctor import run_doctor
 
-    return run_doctor(load_config(Path(args.config) if args.config else None), fix=args.fix)
+    return run_doctor(_load(args), fix=args.fix)
 
 
 def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.host.doctor import run_doctor
 
-    return run_doctor(
-        load_config(Path(args.config) if args.config else None), fix=True, download_model=True
+    return run_doctor(_load(args), fix=True, download_model=True)
+
+
+def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Open the control window. Returns at once with --detach, else waits for the end."""
+    from video_story.host.runner import (
+        SessionError,
+        launch_control_window,
+        wait_for_session,
     )
+
+    cfg = _load(args)
+    try:
+        info = launch_control_window(cfg, _config_file(args))
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    result = info.to_dict()
+    if args.detach:
+        result["next"] = f"video-story wait --session {info.session_id} --timeout 240"
+        return result
+    paths = SessionPaths(cfg.recording_folder, info.session_id)
+    result.update(wait_for_session(paths, timeout_s=args.timeout if args.timeout else 10**9))
+    return result
+
+
+def cmd_ui(args: argparse.Namespace) -> dict[str, Any]:
+    """Internal: the GUI process started by ``run``."""
+    from video_story.ui.app import run_ui
+
+    code = run_ui(args.session, _config_file(args))
+    return {"session_id": args.session, "exit_code": code}
+
+
+def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.runner import SessionError, wait_for_session
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    try:
+        return wait_for_session(paths, timeout_s=args.timeout)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.runner import SessionError, session_status
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    try:
+        return session_status(paths)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_sessions(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.core.session import list_sessions
+    from video_story.host.runner import session_status
+
+    cfg = _load(args)
+    items = []
+    for paths in list_sessions(cfg.recording_folder)[: args.limit]:
+        try:
+            status = session_status(paths)
+        except Exception as exc:
+            status = {"session_id": paths.session_id, "status": "unknown", "message": str(exc)}
+        items.append(status)
+    return {"recording_folder": str(cfg.recording_folder), "sessions": items}
+
+
+def cmd_describe(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.runner import describe_recording
+
+    cfg = _load(args)
+    return describe_recording(_session_paths(args, cfg))
+
+
+def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.runner import SessionError, frames_at
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    try:
+        return frames_at(paths, args.at, screen=args.screen, window_ms=args.window)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
+    """Re-run transcription for an existing recording directory."""
+    from video_story.core.manifest import read_manifest, write_manifest
+    from video_story.core.session import now_iso
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.pipeline import transcribe_recording
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    base = paths.current_dir
+    if not paths.audio_path(base).exists():
+        raise CliError("NO_AUDIO", f"no audio.wav in {base}")
+
+    def progress(fraction: float, text: str) -> None:
+        log.info("%3d%% %s", int(fraction * 100), text)
+
+    started = time.monotonic()
+    result = transcribe_recording(paths, cfg, base_dir=base, progress=progress)
+    manifest_path = paths.manifest_path(base)
+    if manifest_path.exists():
+        manifest = read_manifest(manifest_path)
+        manifest.transcript = result.info
+        manifest.finished_at = manifest.finished_at or now_iso()
+        write_manifest(manifest_path, manifest)
+    return {
+        "recording_dir": str(base),
+        "transcript_txt": str(paths.transcript_txt_path(base)),
+        "transcript_json": str(paths.transcript_json_path(base)),
+        "language": result.transcript.language,
+        "segments": len(result.transcript.segments),
+        "seconds": round(time.monotonic() - started, 1),
+    }
 
 
 def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
@@ -158,7 +300,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.core.manifest import write_manifest
     from video_story.platform import get_platform
 
-    cfg = load_config(Path(args.config) if args.config else None)
+    cfg = _load(args)
     if args.interval:
         cfg = cfg.with_values(capture_interval_ms=args.interval)
     if args.folder:
@@ -206,16 +348,51 @@ def build_parser() -> argparse.ArgumentParser:
         prog="video-story",
         description="Video Story: record narrated screen sessions for AI agents.",
     )
-    parser.add_argument(
-        "--log-level", default="INFO", help="DEBUG, INFO, WARNING or ERROR (stderr)"
-    )
-    parser.add_argument(
-        "--config", help="path to config.json (default: plugin installation directory)"
-    )
+    parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING or ERROR")
+    parser.add_argument("--config", help="path to config.json (default: plugin directory)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("version", help="show the plugin version")
     p.set_defaults(func=cmd_version)
+
+    p = sub.add_parser("run", help="open the control window (agents: use --detach, then wait)")
+    p.add_argument("--detach", action="store_true", help="return immediately with the session id")
+    p.add_argument(
+        "--timeout", type=float, help="without --detach: give up waiting after N seconds"
+    )
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("wait", help="wait until a session is final or the timeout elapses")
+    p.add_argument("--session", help="session id or recording directory (default: active)")
+    p.add_argument("--timeout", type=float, default=240.0, help="seconds (default 240)")
+    p.set_defaults(func=cmd_wait)
+
+    p = sub.add_parser("status", help="current state of a session")
+    p.add_argument("--session")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("sessions", help="list recent sessions in the recording folder")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_sessions)
+
+    p = sub.add_parser("describe", help="paths, manifest and transcript of a recording")
+    p.add_argument("--session")
+    p.set_defaults(func=cmd_describe)
+
+    p = sub.add_parser("frames", help="frames matching a moment of the timeline")
+    p.add_argument("--session")
+    p.add_argument("--at", type=int, required=True, help="milliseconds since the recording start")
+    p.add_argument(
+        "--screen",
+        default="cursor",
+        help="cursor (screen the cursor was on), all, or a screen id like screen2",
+    )
+    p.add_argument("--window", type=int, default=0, help="also list frames within +/- N ms")
+    p.set_defaults(func=cmd_frames)
+
+    p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
+    p.add_argument("directory", help="session id or recording directory")
+    p.set_defaults(func=cmd_transcribe)
 
     p = sub.add_parser("config", help="read or change config.json")
     p.add_argument("action", choices=["get", "set", "path", "reset"])
@@ -235,6 +412,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("setup", help="prepare the environment: FFmpeg and the whisper model")
     p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("ui", help=argparse.SUPPRESS)
+    p.add_argument("--session", required=True)
+    p.set_defaults(func=cmd_ui)
 
     p = sub.add_parser("record", help="headless recording for development and tests")
     p.add_argument("--seconds", type=float, default=3.0)
