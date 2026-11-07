@@ -16,7 +16,7 @@ from typing import Any
 
 from video_story import __version__
 from video_story.capture.audio_recorder import AudioError, list_input_devices
-from video_story.core.config import Config, config_path
+from video_story.core.config import MODEL_FILE_NAME, Config, config_path
 from video_story.core.screens import assign_screen_ids
 from video_story.host.downloads import DownloadError, download_file, file_digest
 from video_story.platform import get_platform
@@ -29,9 +29,11 @@ from video_story.transcribe.ffmpeg import (
 
 log = logging.getLogger(__name__)
 
-MODEL_SHA1 = "55356645c2b361a969dfd0ef2c5a50d530afd8d5"
-MODEL_SIZE = 487_601_967
-MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+# Whisper large-v3-turbo, 5-bit quantised (ggml); checksum as published by Hugging Face.
+MODEL_SHA256 = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
+MODEL_SIZE = 574_041_195
+MODEL_SIZE_TEXT = "548 MB"
+MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
 MIN_PYTHON = (3, 12)
 SETUP_HINT = "Run `video-story setup`."
 
@@ -174,14 +176,17 @@ def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
 
 
 def model_status(path: Path) -> tuple[bool, str]:
-    """``(ok, detail)`` for the model file: present and SHA-1 verified."""
+    """``(ok, detail)`` for the model file: present and SHA-256 verified."""
     if not path.is_file():
         return False, f"model not found: {path}"
     size = path.stat().st_size
-    digest = file_digest(path, "sha1")
-    if digest != MODEL_SHA1:
-        return False, f"model {path} has SHA-1 {digest}, expected {MODEL_SHA1} ({size} bytes)"
-    return True, f"ggml-small.bin OK ({size} bytes, SHA-1 verified) at {path}"
+    digest = file_digest(path, "sha256")
+    if digest != MODEL_SHA256:
+        return (
+            False,
+            f"model {path} has SHA-256 {digest}, expected {MODEL_SHA256} ({size} bytes)",
+        )
+    return True, f"{MODEL_FILE_NAME} OK ({size} bytes, SHA-256 verified) at {path}"
 
 
 def check_model(config: Config, download_model: bool, report: DoctorReport) -> Check:
@@ -190,7 +195,7 @@ def check_model(config: Config, download_model: bool, report: DoctorReport) -> C
     if not ok and download_model:
         try:
             log.info("Downloading whisper model to %s", path)
-            download_file(MODEL_URL, path, expected_sha1=MODEL_SHA1)
+            download_file(MODEL_URL, path, expected_sha256=MODEL_SHA256)
         except DownloadError as exc:
             return Check("model", False, f"download failed: {exc}", "Retry `video-story setup`.")
         ok, detail = model_status(path)
@@ -201,7 +206,7 @@ def check_model(config: Config, download_model: bool, report: DoctorReport) -> C
         "model",
         False,
         detail,
-        f"{SETUP_HINT} It downloads ggml-small.bin (466 MB) from Hugging Face, "
+        f"{SETUP_HINT} It downloads {MODEL_FILE_NAME} ({MODEL_SIZE_TEXT}) from Hugging Face, "
         "or set whisper_model_path to an existing copy.",
     )
 
@@ -284,7 +289,8 @@ def run_doctor(config: Config, fix: bool = False, download_model: bool = False) 
 
 
 __all__ = [
-    "MODEL_SHA1",
+    "MODEL_SHA256",
+    "MODEL_SIZE_TEXT",
     "MODEL_SIZE",
     "MODEL_URL",
     "Check",

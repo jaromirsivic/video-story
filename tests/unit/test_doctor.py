@@ -41,7 +41,7 @@ DEVICES = [
 
 
 def _model_file(tmp_path: Path, content: bytes = b"model-bytes") -> Path:
-    path = tmp_path / "models" / "ggml-small.bin"
+    path = tmp_path / "models" / "ggml-large-v3-turbo-q5_0.bin"
     path.parent.mkdir(parents=True)
     path.write_bytes(content)
     return path
@@ -51,7 +51,7 @@ def _model_file(tmp_path: Path, content: bytes = b"model-bytes") -> Path:
 def healthy(tmp_path: Path, monkeypatch) -> tuple[Config, FakePlatform]:
     platform = FakePlatform()
     model = _model_file(tmp_path)
-    monkeypatch.setattr(doctor, "MODEL_SHA1", hashlib.sha1(b"model-bytes").hexdigest())
+    monkeypatch.setattr(doctor, "MODEL_SHA256", hashlib.sha256(b"model-bytes").hexdigest())
     monkeypatch.setattr(doctor, "get_platform", lambda: platform)
     monkeypatch.setattr(doctor, "list_input_devices", lambda: DEVICES)
     monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: tmp_path / "ffmpeg")
@@ -86,9 +86,9 @@ def test_doctor_all_green(healthy, tmp_path: Path):
     assert "screen1 1920x1080 (primary)" in checks["screens"]["detail"] and platform.prepared
     assert "USB Mic" in checks["audio"]["detail"]
     assert checks["ffmpeg"]["detail"].startswith("ffmpeg 7.1")
-    assert "SHA-1 verified" in checks["model"]["detail"]
+    assert "SHA-256 verified" in checks["model"]["detail"]
     assert report["ffmpeg"] == str(tmp_path / "ffmpeg")
-    assert report["model"] == str(tmp_path / "models" / "ggml-small.bin")
+    assert report["model"] == str(tmp_path / "models" / "ggml-large-v3-turbo-q5_0.bin")
     assert report["config_path"] == str(tmp_path / "config.json")
     assert (tmp_path / "rec").is_dir() and not (tmp_path / "rec" / ".write-test").exists()
 
@@ -98,7 +98,7 @@ def test_doctor_reports_missing_pieces(healthy, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(doctor, "get_platform", lambda: FakePlatform(supported=False))
     monkeypatch.setattr(doctor, "list_input_devices", lambda: [])
     monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: None)
-    (tmp_path / "models" / "ggml-small.bin").write_bytes(b"corrupt")
+    (tmp_path / "models" / "ggml-large-v3-turbo-q5_0.bin").write_bytes(b"corrupt")
     report = doctor.run_doctor(cfg)
     checks = _by_name(report)
     assert report["ok"] is False
@@ -106,7 +106,7 @@ def test_doctor_reports_missing_pieces(healthy, tmp_path: Path, monkeypatch):
     assert checks["screens"]["ok"] is True, "screens are still reported when possible"
     assert checks["audio"]["ok"] is False
     assert checks["ffmpeg"]["ok"] is False and "setup" in checks["ffmpeg"]["hint"]
-    assert checks["model"]["ok"] is False and "SHA-1" in checks["model"]["detail"]
+    assert checks["model"]["ok"] is False and "SHA-256" in checks["model"]["detail"]
     assert "setup" in checks["model"]["hint"]
     assert report["ffmpeg"] is None and report["model"] is None
 
@@ -153,19 +153,19 @@ def test_doctor_fix_downloads_ffmpeg_only_when_asked(healthy, tmp_path: Path, mo
 
 def test_doctor_downloads_model_only_when_asked(healthy, tmp_path: Path, monkeypatch):
     cfg, _ = healthy
-    model = tmp_path / "models" / "ggml-small.bin"
+    model = tmp_path / "models" / "ggml-large-v3-turbo-q5_0.bin"
     model.unlink()
     downloads: list[tuple[str, Path, str | None]] = []
 
-    def fake_download(url, dest, *, expected_sha1=None, **kwargs):
-        downloads.append((url, dest, expected_sha1))
+    def fake_download(url, dest, *, expected_sha256=None, **kwargs):
+        downloads.append((url, dest, expected_sha256))
         dest.write_bytes(b"model-bytes")
 
     monkeypatch.setattr(doctor, "download_file", fake_download)
     assert _by_name(doctor.run_doctor(cfg, fix=True))["model"]["ok"] is False
     assert downloads == [], "fix alone never downloads the model"
     report = doctor.run_doctor(cfg, download_model=True)
-    assert downloads == [(doctor.MODEL_URL, model, doctor.MODEL_SHA1)]
+    assert downloads == [(doctor.MODEL_URL, model, doctor.MODEL_SHA256)]
     assert _by_name(report)["model"]["ok"] is True and report["model"] == str(model)
     # A valid model is never re-downloaded.
     doctor.run_doctor(cfg, download_model=True)

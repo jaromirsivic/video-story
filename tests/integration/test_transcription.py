@@ -51,8 +51,9 @@ def _check_transcript(transcript, label: str) -> None:
     for seg in transcript.segments:
         print(f"  {seg.start_ms:6d} -> {seg.end_ms:6d}  {seg.text}")
     assert transcript.language == "cs"
-    # whisper.cpp splits this 14 s sample into two sentence groups with both backends.
-    assert len(transcript.segments) >= 2, transcript.segments
+    # large-v3-turbo keeps this 14 s sample as one segment; small split it in two.
+    assert len(transcript.segments) >= 1, transcript.segments
+    assert "zkou" in transcript.text.lower() and "sch" in transcript.text.lower()
     last = 0
     for seg in transcript.segments:
         assert 0 <= seg.start_ms <= seg.end_ms <= 15000, seg
@@ -72,7 +73,8 @@ def test_pywhispercpp_pipeline_on_czech_sample(session):
 
     _check_transcript(result.transcript, "pywhispercpp")
     assert 13000 <= result.audio_duration_ms <= 15000
-    assert result.info.backend == "pywhispercpp" and result.info.model == "ggml-small"
+    assert result.info.backend == "pywhispercpp"
+    assert result.info.model == "ggml-large-v3-turbo-q5_0"
     assert result.info.segments == len(result.transcript.segments)
     assert not paths.audio_16k_path(paths.work_dir).exists()
     stored = read_transcript(paths.transcript_json_path(paths.work_dir))

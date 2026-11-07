@@ -5,7 +5,7 @@
 Video Story is a plugin and skill for Claude Code, Codex and Claude Desktop (and ChatGPT through a remote MCP server). While you work, you narrate what you are doing or what you want done. Video Story records your microphone, takes periodic screenshots of every connected screen and tracks the cursor. When you stop, the audio is transcribed offline with whisper.cpp and the agent receives a timed transcript together with the frames, so it can connect what you said with what was on screen and where the cursor was.
 
 - Windows, Linux (X11) and macOS are supported. Windows and Linux were verified on real machines; macOS is verified on the GitHub Actions macOS runner (screens, cursor, recording, drawing capture) and still needs a hands-on check on a Mac with a microphone and a Retina display.
-- Everything runs locally: no audio or images leave the machine.
+- Everything runs locally: no audio or images leave the machine. The transcription model is Whisper large-v3-turbo q5_0 (whisper.cpp, 548 MB, downloaded by `video-story setup`).
 - The plugin UI and all messages are in English; the transcript keeps the language you spoke.
 
 ## How it works
@@ -13,7 +13,7 @@ Video Story is a plugin and skill for Claude Code, Codex and Claude Desktop (and
 1. Say "Start Video Story" to your agent. A small window stays on top of other windows.
 2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (rectangle by default, brush, arrow, 8 colors) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
 3. Press **Stop** and choose **Process Recording**, **Video Editor** (process, then crop the recording in the editor and press its green **Process** button so the agent acts only on that range), **Continue Recording** or **Discard Recording**. Recording continues until you decide.
-4. The audio is transcribed on your CPU (Whisper small, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position and the drawings visible at that moment.
+4. The audio is transcribed on your CPU (Whisper large-v3-turbo, 5-bit quantised, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position and the drawings visible at that moment.
 5. Recordings older than the configured retention (30 days by default) are deleted when Video Story starts; **Settings** also offers **Open Folder** and **Delete All Recordings**.
 
 Recording layout (`<recording_folder>/<YYYYMMDD-HHMMSS>/`):

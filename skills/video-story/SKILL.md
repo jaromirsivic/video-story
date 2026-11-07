@@ -119,5 +119,5 @@ recording folder untouched (the user may want it later).
 ## Limits
 
 Windows, Linux X11 and macOS are supported; Wayland is not. On macOS the host application needs Screen Recording and Microphone permission. Transcription uses
-the multilingual Whisper small model on the CPU: expect mistakes in names, numbers and
+the multilingual Whisper large-v3-turbo model (5-bit) on the CPU: expect mistakes in names, numbers and
 punctuation, approximate segment times, and no speaker separation.

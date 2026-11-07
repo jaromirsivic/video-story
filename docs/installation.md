@@ -26,10 +26,11 @@ cd video-story
 uv sync
 ```
 
-The multilingual Whisper small model (`ggml-small.bin`, 466 MB) belongs in `models/`.
-It is not part of the repository. Either copy an existing file there or let the setup
-command download it from Hugging Face (SHA-1 `55356645c2b361a969dfd0ef2c5a50d530afd8d5`
-is verified):
+The multilingual Whisper large-v3-turbo model, 5-bit quantised
+(`ggml-large-v3-turbo-q5_0.bin`, 548 MB), belongs in `models/`. It is not part of the
+repository. Either copy an existing file there or let the setup command download it
+from Hugging Face (SHA-256
+`394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` is verified):
 
 ```bash
 uv run video-story setup
@@ -66,9 +67,9 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `export_crf` | 18 | libx264 quality (lower is better, 0 to 51) |
 | `export_audio_bitrate_k` | 192 | AAC bitrate in kb/s |
 | `editor_draw_cursor` | `true` | draw the recorded cursor into the preview and the exported video |
-| `whisper_model_path` | `null` | `null` means `models/ggml-small.bin` |
+| `whisper_model_path` | `null` | `null` means `models/ggml-large-v3-turbo-q5_0.bin` |
 | `whisper_backend` | `pywhispercpp` | or `whisper-cli` with `whisper_cli_path` pointing to a whisper.cpp binary |
-| `whisper_threads` | min(8, CPUs) | CPU threads for transcription |
+| `whisper_threads` | min(32, CPUs) | CPU threads for transcription (large-v3-turbo transcribes roughly 2-3x faster than real time on a desktop CPU) |
 | `ffmpeg_path` | `null` | explicit FFmpeg binary; `null` means PATH, then `bin/ffmpeg/` |
 
 ## 3. Register the skill with your agent
