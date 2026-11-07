@@ -1,0 +1,274 @@
+"""Command line interface used by agents, skills and people.
+
+Every command prints exactly one JSON object on stdout. Errors are printed as a JSON
+object on stderr (``{"ok": false, "code": ..., "message": ...}``) with a non-zero exit
+code. Logging goes to stderr and, while a session is active, to ``recording.log``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from video_story import __version__
+from video_story.core.config import (
+    Config,
+    ConfigError,
+    config_path,
+    load_config,
+    save_config,
+    update_config,
+)
+from video_story.core.session import SessionPaths, new_session_id
+
+log = logging.getLogger("video_story")
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_UNSUPPORTED = 3
+
+
+class CliError(Exception):
+    def __init__(self, code: str, message: str, exit_code: int = EXIT_ERROR) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.exit_code = exit_code
+
+
+def emit(payload: dict[str, Any]) -> None:
+    payload.setdefault("ok", True)
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    sys.stdout.flush()
+
+
+def emit_error(code: str, message: str) -> None:
+    sys.stderr.write(
+        json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False) + "\n"
+    )
+    sys.stderr.flush()
+
+
+def setup_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+
+
+def attach_file_log(path: Path) -> logging.Handler:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+# Commands --------------------------------------------------------------------
+
+
+def cmd_config(args: argparse.Namespace) -> dict[str, Any]:
+    path = Path(args.config) if args.config else config_path()
+    if args.action == "path":
+        return {"path": str(path), "exists": path.exists()}
+    if args.action == "get":
+        cfg = load_config(path)
+        data = cfg.to_json_dict()
+        if args.key:
+            if args.key not in data:
+                raise CliError("UNKNOWN_KEY", f"unknown configuration key {args.key!r}")
+            return {"key": args.key, "value": data[args.key]}
+        return {"path": str(path), "config": data}
+    if args.action == "set":
+        if not args.key:
+            raise CliError("USAGE", "config set requires KEY and VALUE", EXIT_USAGE)
+        value: Any = args.value
+        if value is not None:
+            lowered = value.lower()
+            if lowered in {"null", "none", ""}:
+                value = None
+            elif lowered in {"true", "false"}:
+                value = lowered == "true"
+            elif lowered.lstrip("-").isdigit():
+                value = int(lowered)
+        try:
+            cfg = update_config(path, **{args.key: value})
+        except TypeError as exc:
+            raise CliError("UNKNOWN_KEY", f"unknown configuration key {args.key!r}") from exc
+        return {"path": str(path), "config": cfg.to_json_dict()}
+    if args.action == "reset":
+        save_config(Config(), path)
+        return {"path": str(path), "config": load_config(path).to_json_dict()}
+    raise CliError("USAGE", f"unknown config action {args.action!r}", EXIT_USAGE)
+
+
+def cmd_devices(_args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.capture.audio_recorder import AudioError, list_input_devices
+
+    try:
+        devices = list_input_devices()
+    except AudioError as exc:
+        raise CliError("AUDIO_ERROR", str(exc)) from exc
+    return {"devices": [d.to_dict() for d in devices]}
+
+
+def cmd_screens(_args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.core.screens import assign_screen_ids
+    from video_story.platform import get_platform
+
+    platform = get_platform()
+    status = platform.support_status()
+    if not status.supported:
+        raise CliError("UNSUPPORTED", status.reason, EXIT_UNSUPPORTED)
+    platform.prepare_process()
+    screens = assign_screen_ids(platform.list_screens())
+    cursor = platform.cursor_position()
+    return {
+        "platform": platform.name,
+        "screens": [s.to_manifest() for s in screens],
+        "cursor_global": {"x": cursor[0], "y": cursor[1]} if cursor else None,
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.doctor import run_doctor
+
+    return run_doctor(load_config(Path(args.config) if args.config else None), fix=args.fix)
+
+
+def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
+    from video_story.host.doctor import run_doctor
+
+    return run_doctor(
+        load_config(Path(args.config) if args.config else None), fix=True, download_model=True
+    )
+
+
+def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
+    """Headless recording for development and integration tests (no window)."""
+    from video_story.capture.recorder import Recorder
+    from video_story.core.manifest import write_manifest
+    from video_story.platform import get_platform
+
+    cfg = load_config(Path(args.config) if args.config else None)
+    if args.interval:
+        cfg = cfg.with_values(capture_interval_ms=args.interval)
+    if args.folder:
+        cfg = cfg.with_values(recording_folder=str(args.folder))
+    platform = get_platform()
+    paths = SessionPaths(cfg.recording_folder, new_session_id(cfg.recording_folder))
+    paths.create_work_dirs()
+    handler = attach_file_log(paths.log_path(paths.work_dir))
+    try:
+        recorder = Recorder(cfg, platform, paths, record_audio=not args.no_audio)
+        recorder.start()
+        deadline = time.monotonic() + args.seconds
+        while time.monotonic() < deadline and recorder.running:
+            time.sleep(0.05)
+        summary = recorder.stop()
+        manifest = summary.to_manifest(cfg, platform.name)
+        write_manifest(paths.manifest_path(paths.work_dir), manifest)
+    finally:
+        # The log file must be closed before the work directory is renamed (Windows).
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    final_dir = paths.finalize() if not args.keep_work else paths.work_dir
+    return {
+        "session_id": paths.session_id,
+        "recording_dir": str(final_dir),
+        "recorded_duration_ms": summary.recorded_duration_ms,
+        "frames": summary.frame_count,
+        "dropped_ticks": summary.dropped_ticks,
+        "screens": [s.id for s in summary.screens],
+        "audio": summary.audio.__dict__ if summary.audio else None,
+        "auto_stopped": summary.auto_stopped,
+        "error": summary.error,
+    }
+
+
+def cmd_version(_args: argparse.Namespace) -> dict[str, Any]:
+    return {"version": __version__, "python": sys.version.split()[0], "platform": sys.platform}
+
+
+# Parser ----------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="video-story",
+        description="Video Story: record narrated screen sessions for AI agents.",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO", help="DEBUG, INFO, WARNING or ERROR (stderr)"
+    )
+    parser.add_argument(
+        "--config", help="path to config.json (default: plugin installation directory)"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("version", help="show the plugin version")
+    p.set_defaults(func=cmd_version)
+
+    p = sub.add_parser("config", help="read or change config.json")
+    p.add_argument("action", choices=["get", "set", "path", "reset"])
+    p.add_argument("key", nargs="?")
+    p.add_argument("value", nargs="?")
+    p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("devices", help="list audio input devices")
+    p.set_defaults(func=cmd_devices)
+
+    p = sub.add_parser("screens", help="list screens and the cursor position")
+    p.set_defaults(func=cmd_screens)
+
+    p = sub.add_parser("doctor", help="check the environment (ffmpeg, model, screens, audio)")
+    p.add_argument("--fix", action="store_true", help="download missing FFmpeg automatically")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("setup", help="prepare the environment: FFmpeg and the whisper model")
+    p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("record", help="headless recording for development and tests")
+    p.add_argument("--seconds", type=float, default=3.0)
+    p.add_argument("--interval", type=int, help="capture interval in ms (overrides config)")
+    p.add_argument("--folder", type=Path, help="recording folder (overrides config)")
+    p.add_argument("--no-audio", action="store_true")
+    p.add_argument("--keep-work", action="store_true", help="leave the recording in .work/")
+    p.set_defaults(func=cmd_record)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    setup_logging(args.log_level)
+    try:
+        result = args.func(args)
+    except CliError as exc:
+        emit_error(exc.code, exc.message)
+        return exc.exit_code
+    except ConfigError as exc:
+        emit_error("CONFIG_INVALID", str(exc))
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        emit_error("INTERRUPTED", "interrupted")
+        return 130
+    except Exception as exc:  # last resort: still produce machine readable output
+        log.exception("command failed")
+        emit_error("INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
+        return EXIT_ERROR
+    emit(result)
+    return EXIT_OK
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

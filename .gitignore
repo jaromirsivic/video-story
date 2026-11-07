@@ -1,0 +1,19 @@
+# Runtime configuration and local resources (never committed)
+config.json
+models/*.bin
+bin/
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Logs and recordings produced during development
+*.log
+recordings/
+tests/results/
