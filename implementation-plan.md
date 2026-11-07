@@ -1,6 +1,6 @@
 # Video Story – implementační plán
 
-Stav: **schváleno, implementace probíhá** (rozhodnutí z 7. 11. 2026 jsou v kapitole 13; kapitoly 4–8 jsou podle nich upraveny). Zadání je v [video-story-spec.md](video-story-spec.md).
+Stav: **implementováno a ověřeno na Windows a Linuxu (X11)** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15. Zadání je v [video-story-spec.md](video-story-spec.md).
 
 Tento plán je česky (vznikl před rozhodnutím). Vše ostatní v repozitáři – README, instalace, skill, UI, hlášky, logy, CLI nápověda, kód a komentáře – je anglicky.
 
@@ -382,6 +382,22 @@ Původní otázky:
 10. **Linux Wayland** mimo rozsah v1 (doporučení), X11 plně.[🗩](#comment_point_hvmwg5wz "comment_point_hvmwg5wz")
 11. **Testovací stroje.** Máš k dispozici macOS a Linux pro ověření M6? Pokud ne, implementuji platformní vrstvy podle dokumentace s unit testy a reálné ověření označím jako neprovedené.[🗩](#comment_point_vnnuqnho "comment_point_vnnuqnho")
 12. **Repozitář a dokumentace.** `git init` v `D:\git\video-story`, licence MIT, README a instalace česky, vše ostatní anglicky (doporučení). Registraci skillu do `~/.codex/skills` a `~/.claude` provést junctionem jako u `convert-audiovideo-to-text`.[🗩](#comment_point_kuiw44bi "comment_point_kuiw44bi")
+
+---
+
+## 15. Stav implementace (7. 11. 2026)
+
+| Milník | Stav | Důkaz |
+| --- | --- | --- |
+| M0 kostra a core | hotovo | `tests/unit/test_core.py` |
+| M1 záznam bez UI | hotovo | `tests/integration/test_recording.py` (Windows 2 monitory, Fedora Xvfb) |
+| M2 ovládací okno, dialogy, run/wait | hotovo | `tests/unit/test_ui.py`, `tests/unit/test_runner.py`, `tests/integration/test_ui_e2e.py` |
+| M3 kreslení | hotovo | `tests/unit/test_overlay.py`, `tests/integration/test_overlay_capture.py` (kresba je ve snímku obou monitorů) |
+| M4 přepis a doctor | hotovo | `tests/unit/test_transcribe.py`, `tests/unit/test_doctor.py`, `tests/integration/test_transcription.py` (čeština, offline, ~4 s na 14 s zvuku) |
+| M5 hostitelé | skill + Claude plugin + MCP server hotovo; Claude Code skill ověřen (junction), Codex a Claude Desktop jen zdokumentováno | `skills/video-story/SKILL.md`, `.claude-plugin/`, `src/video_story/host/mcp_server.py`, `docs/installation.md` |
+| M6 Linux a dokumentace | hotovo pro Fedora 44 / X11 (Xvfb + openbox): všechny sady prošly; macOS neimplementováno | `tests/manual/acceptance.md` |
+
+Odchylky od původního návrhu: žádná pauza při Stop dialogu (rozhodnutí 7), nástroje kreslení rozšířeny (rozhodnutí 8), položka Auto Stop Recording (rozhodnutí 6), vše v repozitáři anglicky (rozhodnutí 12). Konfigurace `config.json` v kořeni repozitáře; `models/` a `bin/` mimo Git.
 
 ---
 

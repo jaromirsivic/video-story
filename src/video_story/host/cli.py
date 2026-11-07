@@ -121,10 +121,9 @@ def cmd_config(args: argparse.Namespace) -> dict[str, Any]:
                 value = lowered == "true"
             elif lowered.lstrip("-").isdigit():
                 value = int(lowered)
-        try:
-            cfg = update_config(path, **{args.key: value})
-        except TypeError as exc:
-            raise CliError("UNKNOWN_KEY", f"unknown configuration key {args.key!r}") from exc
+        if args.key not in Config.__dataclass_fields__:
+            raise CliError("UNKNOWN_KEY", f"unknown configuration key {args.key!r}")
+        cfg = update_config(path, **{args.key: value})
         return {"path": str(path), "config": cfg.to_json_dict()}
     if args.action == "reset":
         save_config(Config(), path)
@@ -336,6 +335,19 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_mcp(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the MCP server (stdio for Claude Desktop/Codex, streamable-http for ChatGPT)."""
+    from video_story.host.mcp_server import serve
+
+    serve(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        config_file=_config_file(args),
+    )
+    return {"transport": args.transport, "stopped": True}
+
+
 def cmd_version(_args: argparse.Namespace) -> dict[str, Any]:
     return {"version": __version__, "python": sys.version.split()[0], "platform": sys.platform}
 
@@ -412,6 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("setup", help="prepare the environment: FFmpeg and the whisper model")
     p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("mcp", help="run the MCP server (stdio by default)")
+    p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("ui", help=argparse.SUPPRESS)
     p.add_argument("--session", required=True)

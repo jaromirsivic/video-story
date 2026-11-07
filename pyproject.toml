@@ -12,7 +12,7 @@ dependencies = [
     "numpy>=2.0",
     "pillow>=11.0",
     "pywhispercpp>=1.5",
-    "mcp>=1.10",
+    "mcp>=2.0",
     "platformdirs>=4.0",
     "python-xlib>=0.33; sys_platform == 'linux'",
 ]
@@ -39,6 +39,9 @@ testpaths = ["tests"]
 qt_api = "pyside6"
 markers = [
     "integration: tests that touch real screens, audio devices or the whisper model",
+]
+filterwarnings = [
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]

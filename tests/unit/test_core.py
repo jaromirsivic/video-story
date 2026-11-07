@@ -292,3 +292,28 @@ def test_manifest_roundtrip(tmp_path: Path):
     assert loaded.session_id == m.session_id and loaded.auto_stopped
     assert [s.id for s in loaded.screens] == ["screen1", "screen2"]
     assert loaded.screens[0].scale == 1.5
+
+
+# macOS style screens: bounds in points, images in pixels ----------------------
+
+
+def test_pixel_ratio_mapping():
+    raw = [
+        RawScreen(x=0, y=0, width=1440, height=900, primary=True, scale=2.0, pixel_ratio=2.0),
+        RawScreen(x=1440, y=0, width=1920, height=1080, scale=1.0, pixel_ratio=1.0),
+    ]
+    screens = assign_screen_ids(raw)
+    retina, external = screens
+    assert (retina.image_width, retina.image_height) == (2880, 1800)
+    assert (external.image_width, external.image_height) == (1920, 1080)
+    pos = locate_cursor(screens, 100, 50)
+    assert pos is not None and (pos.screen_id, pos.x, pos.y) == ("screen1", 200, 100)
+    edge = locate_cursor(screens, 1439, 899)
+    assert edge is not None and (edge.x, edge.y) == (2878, 1798)
+    ext = locate_cursor(screens, 1440 + 10, 20)
+    assert ext is not None and (ext.screen_id, ext.x, ext.y) == ("screen2", 10, 20)
+    data = retina.to_manifest()
+    assert data["image_size"] == {"width": 2880, "height": 1800} and data["pixel_ratio"] == 2.0
+    from video_story.core.screens import Screen
+
+    assert Screen.from_manifest(data).pixel_ratio == 2.0

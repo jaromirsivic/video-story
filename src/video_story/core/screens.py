@@ -16,7 +16,13 @@ from .naming import screen_id
 
 @dataclass(frozen=True)
 class RawScreen:
-    """A screen as reported by the platform layer (before numbering)."""
+    """A screen as reported by the platform layer (before numbering).
+
+    ``x``, ``y``, ``width`` and ``height`` are in the platform's global coordinate
+    space (physical pixels on Windows and X11, points on macOS). ``pixel_ratio`` is
+    the factor from those units to pixels of the captured image (2.0 on a Retina
+    display); ``scale`` is informational DPI scaling.
+    """
 
     x: int
     y: int
@@ -25,6 +31,7 @@ class RawScreen:
     primary: bool = False
     scale: float = 1.0
     name: str = ""
+    pixel_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,16 @@ class Screen:
     primary: bool
     scale: float
     name: str = ""
+    pixel_ratio: float = 1.0
+
+    @property
+    def image_width(self) -> int:
+        """Width of the captured image in pixels."""
+        return round(self.width * self.pixel_ratio)
+
+    @property
+    def image_height(self) -> int:
+        return round(self.height * self.pixel_ratio)
 
     @property
     def right(self) -> int:
@@ -52,13 +69,20 @@ class Screen:
         return self.x <= gx < self.right and self.y <= gy < self.bottom
 
     def to_local(self, gx: int, gy: int) -> tuple[int, int]:
-        return gx - self.x, gy - self.y
+        """Global point to pixels of this screen's image (origin top-left)."""
+        lx, ly = gx - self.x, gy - self.y
+        if self.pixel_ratio != 1.0:
+            lx = min(self.image_width - 1, round(lx * self.pixel_ratio))
+            ly = min(self.image_height - 1, round(ly * self.pixel_ratio))
+        return lx, ly
 
     def to_manifest(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "primary": self.primary,
             "bounds": {"x": self.x, "y": self.y, "width": self.width, "height": self.height},
+            "image_size": {"width": self.image_width, "height": self.image_height},
+            "pixel_ratio": self.pixel_ratio,
             "scale": self.scale,
             "name": self.name,
         }
@@ -76,6 +100,7 @@ class Screen:
             primary=bool(data.get("primary", False)),
             scale=float(data.get("scale", 1.0)),
             name=str(data.get("name", "")),
+            pixel_ratio=float(data.get("pixel_ratio", 1.0)),
         )
 
 
@@ -101,6 +126,7 @@ def assign_screen_ids(raw_screens: list[RawScreen]) -> list[Screen]:
             primary=s is primary,
             scale=s.scale,
             name=s.name,
+            pixel_ratio=s.pixel_ratio,
         )
         for index, s in enumerate(ordered, start=1)
     ]

@@ -57,7 +57,7 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         if cursor is not None:
             assert cursor["screen"] in screens
             target = next(s for s in manifest.screens if s.id == cursor["screen"])
-            assert 0 <= cursor["x"] < target.width and 0 <= cursor["y"] < target.height
+            assert 0 <= cursor["x"] < target.image_width and 0 <= cursor["y"] < target.image_height
     for times in per_screen.values():
         assert times == sorted(times) and len(set(times)) == len(times)
         gaps = [b - a for a, b in zip(times, times[1:], strict=False)]

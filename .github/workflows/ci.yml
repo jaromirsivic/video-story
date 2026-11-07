@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Linux packages (PortAudio, X11, Qt xcb, Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libportaudio2 xvfb openbox x11-utils libxcb-cursor0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libegl1 libgl1 libopengl0 ffmpeg
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Unit tests
+        run: uv run pytest tests/unit -q -p no:cacheprovider
+
+      - name: Platform smoke (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv run video-story version
+          uv run video-story screens
+          uv run video-story record --seconds 1 --no-audio --folder "${{ runner.temp }}\vs-rec"
+
+      - name: Platform smoke (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uv run video-story version
+          uv run video-story screens
+          uv run video-story record --seconds 1 --no-audio --folder "${{ runner.temp }}/vs-rec"
+          ls "${{ runner.temp }}"/vs-rec/*/frames | head -5
+          cat "${{ runner.temp }}"/vs-rec/*/manifest.json
+          for f in "${{ runner.temp }}"/vs-rec/*/frames/*screen1.json; do cat "$f"; echo; break; done
+          uv run python -c "from PIL import Image; import glob; p=glob.glob('${{ runner.temp }}/vs-rec/*/frames/*screen1.png')[0]; im=Image.open(p); print(p, im.size, im.getextrema())"
+          uv run video-story doctor || true
+
+      - name: Platform smoke (Linux, X11 via Xvfb)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+          XDG_SESSION_TYPE: x11
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1600x900x24 +extension RANDR >/tmp/xvfb.log 2>&1 &
+          sleep 1
+          openbox >/tmp/openbox.log 2>&1 &
+          sleep 0.5
+          uv run video-story version
+          uv run video-story screens
+          uv run video-story record --seconds 1 --no-audio --folder "${{ runner.temp }}/vs-rec"
+          VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_overlay_capture.py -q -p no:cacheprovider
+
+      - name: Upload smoke recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.os }}
+          path: ${{ runner.temp }}/vs-rec
+          if-no-files-found: ignore
+          retention-days: 3
