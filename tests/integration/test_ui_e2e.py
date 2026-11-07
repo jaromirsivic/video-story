@@ -136,3 +136,14 @@ def test_record_draw_process(qapp_real, tmp_path: Path, monkeypatch):
             reds += 1
     assert reds >= 2, f"expected red rectangle edge near ({x}, {y_top}) in {frame['image']}"
     assert frame["cursor"] is None or frame["cursor"]["screen"].startswith("screen")
+
+    # The same frame's sidecar describes the rectangle in pixels of the screen1 image.
+    rects = [d for d in frame["drawings"] if d["tool"] == "rectangle"]
+    assert len(rects) == 1, frame["drawings"]
+    rect = rects[0]
+    assert rect["color"] == "#FF0000" and rect["screen"] == "screen1"
+    assert rect["from"] == {"screen": "screen1", "x": round(200 * dpr), "y": round(300 * dpr)}
+    assert rect["to"] == {"screen": "screen1", "x": round(500 * dpr), "y": round(450 * dpr)}
+    # Every screen's sidecar of that tick carries the drawings, not only screen1.
+    for other in frames_at(paths, frame["time_ms"], screen="all")["frames"]:
+        assert any(d["tool"] == "rectangle" for d in other["drawings"]), other

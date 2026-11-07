@@ -312,12 +312,12 @@ def test_config_get_set_path(config_file: Path):
     path = mcp_server.tool_config("path")
     assert path == {"ok": True, "path": str(config_file), "exists": True}
     got = mcp_server.tool_config("get", "capture_interval_ms")
-    assert got["value"] == 250
+    assert got["value"] == 500
     whole = mcp_server.tool_config("get")
     assert whole["config"]["recording_folder"].endswith("rec")
-    changed = mcp_server.tool_config("set", "capture_interval_ms", "500")
-    assert changed["ok"] is True and changed["config"]["capture_interval_ms"] == 500
-    assert json.loads(config_file.read_text(encoding="utf-8"))["capture_interval_ms"] == 500
+    changed = mcp_server.tool_config("set", "capture_interval_ms", "250")
+    assert changed["ok"] is True and changed["config"]["capture_interval_ms"] == 250
+    assert json.loads(config_file.read_text(encoding="utf-8"))["capture_interval_ms"] == 250
     assert mcp_server.tool_config("set", "audio_input", "null")["config"]["audio_input"] is None
     invalid = mcp_server.tool_config("set", "capture_interval_ms", "99999")
     assert invalid["ok"] is False and invalid["code"] == "CONFIG_INVALID"

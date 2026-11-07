@@ -262,7 +262,10 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
         "Audio Input",
     ]
     assert form.itemAt(5, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
-    assert dialog.interval_spin.value() == 250 and dialog.format_combo.currentData() == "png"
+    assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Keep Recordings"
+    assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "png"
+    assert dialog.auto_stop_spin.value() == 120 and dialog.retention_spin.value() == 30
     assert dialog.interval_spin.minimum() == 1 and dialog.interval_spin.maximum() == 1000
     assert not form.isRowVisible(3)
     dialog.format_combo.setCurrentIndex(1)
@@ -270,13 +273,52 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     dialog.interval_spin.setValue(1000)
     dialog.quality_spin.setValue(20)
     dialog.auto_stop_spin.setValue(45)
+    dialog.retention_spin.setValue(7)
     dialog._save()
     assert dialog.result_config is not None
     assert dialog.result_config.capture_interval_ms == 1000
     assert dialog.result_config.image_format == "jpeg" and dialog.result_config.jpeg_quality == 20
     assert dialog.result_config.auto_stop_minutes == 45
+    assert dialog.result_config.retention_days == 7
     reloaded = cfg_mod.load_config()
     assert reloaded == dialog.result_config
+
+
+def test_settings_delete_all_asks_and_keeps_current_session(qtbot, tmp_path: Path, monkeypatch):
+    from video_story.core.session import SessionPaths, SessionState, Status, write_state
+    from video_story.ui import settings_dialog as sd
+
+    old = SessionPaths(tmp_path, "20261001-090000")
+    old.frames_dir(old.final_dir).mkdir(parents=True)
+    (old.frames_dir(old.final_dir) / "0_000_screen1.png").write_bytes(b"x")
+    current = SessionPaths(tmp_path, "20261107-120000")
+    current.create_work_dirs()
+    write_state(
+        current.state_path,
+        SessionState(session_id=current.session_id, status=Status.READY, recording_folder="x"),
+    )
+    dialog = SettingsDialog(
+        Config(recording_folder=tmp_path), current_session_id=current.session_id
+    )
+    qtbot.addWidget(dialog)
+    questions: list[str] = []
+
+    def answer_no(*args, **kwargs):
+        questions.append(args[2])
+        return sd.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(sd.QMessageBox, "question", answer_no)
+    monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **k: None)
+    dialog.delete_all_button.click()
+    assert len(questions) == 1 and "1 recording(s)" in questions[0]
+    assert old.final_dir.exists()
+
+    monkeypatch.setattr(
+        sd.QMessageBox, "question", lambda *a, **k: sd.QMessageBox.StandardButton.Yes
+    )
+    dialog.delete_all_button.click()
+    assert not old.final_dir.exists()
+    assert current.state_path.exists()
 
 
 def test_app_instance_available():

@@ -13,6 +13,10 @@ palette and Undo / Clear / Close. Keyboard shortcuts on the overlay windows:
 
 All geometry is kept in Qt logical coordinates of the window the shape was drawn in;
 Qt maps them to physical pixels per screen (Windows per-monitor DPI is handled by Qt).
+
+For the frame sidecars the overlay also keeps a JSON-ready snapshot of what is drawn
+(:meth:`DrawingOverlay.drawings`), with every point converted to pixels of the recorded
+screen image: the recorder reads it from its capture thread at every tick.
 """
 
 from __future__ import annotations
@@ -43,6 +47,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from video_story.core.screens import Screen
 
 from .palette import DEFAULT_COLOR, PALETTE, PaletteColor
 
@@ -78,6 +84,54 @@ class Shape:
         if len(self.points) < 2:
             return True
         return (self.points[0] - self.points[-1]).manhattanLength() < 1.0
+
+
+def _screen_for_window(qscreen: QScreen, screens: list[Screen]) -> Screen | None:
+    """The recorded screen shown by ``qscreen``: same top-left origin, else the nearest.
+
+    Qt keeps the native position of every screen's top-left corner in its logical
+    geometry (Windows, X11) or uses the same points as CoreGraphics (macOS), so origins
+    match the platform layer's screen list; sizes may differ by the device pixel ratio.
+    """
+    if not screens:
+        return None
+    origin = qscreen.geometry().topLeft()
+    for screen in screens:
+        if screen.x == origin.x() and screen.y == origin.y():
+            return screen
+    return min(screens, key=lambda s: abs(s.x - origin.x()) + abs(s.y - origin.y()))
+
+
+def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> dict[str, object]:
+    """Describe one shape in pixels of ``screen``'s image (origin top-left).
+
+    Rectangles and arrows carry ``from`` and ``to`` (two opposite corners, or tail and
+    head); brush strokes carry ``path``. Every point is ``{screen, x, y}`` like the
+    cursor entry of a sidecar.
+    """
+
+    def point(p: QPointF) -> dict[str, object]:
+        x = min(max(0, round(p.x() * device_pixel_ratio)), screen.image_width - 1)
+        y = min(max(0, round(p.y() * device_pixel_ratio)), screen.image_height - 1)
+        return {"screen": screen.id, "x": x, "y": y}
+
+    data: dict[str, object] = {
+        "tool": str(shape.tool),
+        "color": shape.color.name().upper(),
+        "screen": screen.id,
+        "stroke_width": round(STROKE_WIDTH * device_pixel_ratio),
+    }
+    if shape.tool is Tool.BRUSH:
+        path: list[dict[str, object]] = []
+        for p in shape.points:
+            entry = point(p)
+            if not path or path[-1] != entry:  # a press stores its point twice
+                path.append(entry)
+        data["path"] = path
+    else:
+        data["from"] = point(shape.points[0])
+        data["to"] = point(shape.points[-1])
+    return data
 
 
 def _arrow_head(tail: QPointF, head: QPointF) -> QPolygonF | None:
@@ -149,16 +203,26 @@ class OverlayWindow(QWidget):
     def shapes(self) -> list[Shape]:
         return list(self._shapes)
 
+    @property
+    def painted_shapes(self) -> list[Shape]:
+        """Committed shapes plus the one being dragged (everything visible on screen)."""
+        shapes = list(self._shapes)
+        if self._current is not None:
+            shapes.append(self._current)
+        return shapes
+
     def add_shape(self, shape: Shape) -> None:
         shape.screen_index = self.screen_index
         self._shapes.append(shape)
         self.update()
+        self._controller._refresh_drawings()
 
     def pop_shape(self) -> Shape | None:
         if not self._shapes:
             return None
         shape = self._shapes.pop()
         self.update()
+        self._controller._refresh_drawings()
         return shape
 
     def clear_shapes(self) -> None:
@@ -166,6 +230,7 @@ class OverlayWindow(QWidget):
             self._shapes.clear()
             self._current = None
             self.update()
+            self._controller._refresh_drawings()
 
     # -- Qt events ----------------------------------------------------------------
 
@@ -193,6 +258,7 @@ class OverlayWindow(QWidget):
             self._controller.tool, QColor(self._controller.color), [pos, pos], self.screen_index
         )
         self.update()
+        self._controller._refresh_drawings()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -205,6 +271,7 @@ class OverlayWindow(QWidget):
         else:
             self._current.points[-1] = pos
         self.update()
+        self._controller._refresh_drawings()
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -221,6 +288,7 @@ class OverlayWindow(QWidget):
             shape.points[-1] = pos
         if shape.is_degenerate():
             self.update()
+            self._controller._refresh_drawings()
         else:
             self._controller._commit_shape(self, shape)
         event.accept()
@@ -376,6 +444,8 @@ class DrawingOverlay(QObject):
         self._history: list[OverlayWindow] = []  # window of each committed shape, in order
         self._toolbar: OverlayToolbar | None = None
         self._visible = False
+        self._screens: list[Screen] = []
+        self._drawings: list[dict[str, object]] = []
 
     # -- public API ---------------------------------------------------------------
 
@@ -416,6 +486,7 @@ class DrawingOverlay(QObject):
         focus_window = self._window_for_screen(primary) or self._windows[0]
         focus_window.activateWindow()
         focus_window.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._refresh_drawings()
 
     def hide(self) -> None:
         self._visible = False
@@ -423,6 +494,7 @@ class DrawingOverlay(QObject):
             self._toolbar.hide()
         for window in self._windows:
             window.hide()
+        self._refresh_drawings()
 
     def close(self) -> None:
         self.hide()
@@ -463,6 +535,20 @@ class DrawingOverlay(QObject):
         for window in self._windows:
             result.extend(window.shapes)
         return result
+
+    def set_screens(self, screens: list[Screen]) -> None:
+        """Recorded screens (from the recorder) used to express drawings in image pixels."""
+        self._screens = list(screens)
+        self._refresh_drawings()
+
+    def drawings(self) -> list[dict[str, object]]:
+        """JSON-ready snapshot of everything currently visible on the overlay windows.
+
+        Safe to call from any thread: the list is rebuilt on the GUI thread whenever
+        the drawing changes and never mutated afterwards. Empty while the overlay is
+        hidden (nothing is on screen then) or until :meth:`set_screens` was called.
+        """
+        return self._drawings
 
     def add_shape(self, shape: Shape) -> None:
         """Add a shape programmatically to the window of ``shape.screen_index``."""
@@ -510,6 +596,27 @@ class DrawingOverlay(QObject):
         window.add_shape(shape)
         self._history.append(window)
 
+    def _refresh_drawings(self) -> None:
+        if not self._visible or not self._screens:
+            self._drawings = []
+            return
+        qscreens = QGuiApplication.screens()
+        result: list[dict[str, object]] = []
+        for window in self._windows:
+            qscreen = (
+                qscreens[window.screen_index]
+                if window.screen_index < len(qscreens)
+                else window.screen()
+            )
+            screen = _screen_for_window(qscreen, self._screens) if qscreen else None
+            if screen is None:
+                continue
+            ratio = float(qscreen.devicePixelRatio())
+            for shape in window.painted_shapes:
+                if shape.points:
+                    result.append(shape_to_json(shape, screen, ratio))
+        self._drawings = result
+
     def _raise_toolbar(self) -> None:
         if self._toolbar is not None and self._toolbar.isVisible():
             self._toolbar.raise_()
@@ -530,4 +637,5 @@ __all__ = [
     "Shape",
     "Tool",
     "paint_shape",
+    "shape_to_json",
 ]

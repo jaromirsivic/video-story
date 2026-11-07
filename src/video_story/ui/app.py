@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from video_story.core.config import load_config
@@ -11,6 +12,22 @@ from video_story.core.session import SessionPaths, new_session_id
 from video_story.platform import get_platform
 
 log = logging.getLogger(__name__)
+
+
+def _purge_in_background(config, session_id: str) -> None:
+    """Apply the retention setting without delaying the window (deleting is slow)."""
+    from video_story.host.retention import purge_old_recordings
+
+    def work() -> None:
+        try:
+            deleted = purge_old_recordings(config.recording_folder, config.retention_days)
+        except Exception:  # pragma: no cover - housekeeping must never break the window
+            log.exception("retention cleanup failed")
+            return
+        if deleted:
+            log.info("retention (%d days): deleted %s", config.retention_days, ", ".join(deleted))
+
+    threading.Thread(target=work, name="retention", daemon=True).start()
 
 
 def run_ui(session_id: str | None = None, config_file: Path | None = None) -> int:
@@ -36,6 +53,8 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
         controller.fail(status.reason, code="UNSUPPORTED_PLATFORM")
         QMessageBox.critical(None, "Video Story", status.reason)
         return 3
+
+    _purge_in_background(config, session_id)
 
     final_status = {"value": "cancelled"}
 

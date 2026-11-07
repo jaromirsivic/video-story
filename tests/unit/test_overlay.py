@@ -11,7 +11,8 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
-from video_story.ui.overlay import DrawingOverlay, OverlayWindow, Shape, Tool
+from video_story.core.screens import RawScreen, assign_screen_ids
+from video_story.ui.overlay import DrawingOverlay, OverlayWindow, Shape, Tool, shape_to_json
 from video_story.ui.palette import DEFAULT_COLOR, PALETTE, PaletteColor, find_color
 
 
@@ -180,6 +181,81 @@ def test_hide_and_show_keep_shapes(overlay):
     assert overlay.is_visible()
     assert len(overlay.shapes()) == 1
     assert overlay.windows[0].isVisible()
+
+
+def _recorded_screens():
+    """Screens matching the offscreen QScreens (origin 0,0), as the recorder would list them."""
+    raw = [
+        RawScreen(
+            x=s.geometry().x(),
+            y=s.geometry().y(),
+            width=round(s.geometry().width() * s.devicePixelRatio()),
+            height=round(s.geometry().height() * s.devicePixelRatio()),
+            primary=s is QGuiApplication.primaryScreen(),
+            scale=s.devicePixelRatio(),
+        )
+        for s in QGuiApplication.screens()
+    ]
+    return assign_screen_ids(raw)
+
+
+def test_drawings_snapshot_in_screen_pixels(overlay):
+    assert overlay.drawings() == []  # no recorded screens yet
+    screens = _recorded_screens()
+    overlay.set_screens(screens)
+    window = overlay.windows[0]
+    dpr = QGuiApplication.screens()[0].devicePixelRatio()
+
+    overlay.set_tool(Tool.RECTANGLE)
+    drag(window, [(10, 20), (110, 220)])
+    overlay.set_tool(Tool.ARROW)
+    overlay.set_color("#00FF00")
+    drag(window, [(50, 50), (150, 60)])
+    overlay.set_tool(Tool.BRUSH)
+    drag(window, [(5, 5), (6, 7), (9, 9)])
+
+    drawings = overlay.drawings()
+    assert [d["tool"] for d in drawings] == ["rectangle", "arrow", "brush"]
+    rect, arrow, brush = drawings
+    assert rect["color"] == "#FF0000" and rect["screen"] == "screen1"
+    assert rect["from"] == {"screen": "screen1", "x": round(10 * dpr), "y": round(20 * dpr)}
+    assert rect["to"] == {"screen": "screen1", "x": round(110 * dpr), "y": round(220 * dpr)}
+    assert arrow["color"] == "#00FF00" and arrow["from"]["x"] == round(50 * dpr)
+    assert arrow["to"] == {"screen": "screen1", "x": round(150 * dpr), "y": round(60 * dpr)}
+    assert brush["color"] == "#00FF00" and [(p["x"], p["y"]) for p in brush["path"]] == [
+        (round(5 * dpr), round(5 * dpr)),
+        (round(6 * dpr), round(7 * dpr)),
+        (round(9 * dpr), round(9 * dpr)),
+    ]
+    assert all(p["screen"] == "screen1" for p in brush["path"])
+
+    # The shape being dragged is on screen, so it is part of the snapshot.
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(1, 1), True)
+    _mouse(window, QEvent.Type.MouseMove, QPoint(3, 3), True)
+    assert len(overlay.drawings()) == 4
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(3, 3), False)
+
+    overlay.undo()
+    assert len(overlay.drawings()) == 3
+    overlay.hide()
+    assert overlay.drawings() == []  # hidden: nothing is on screen
+    overlay.show()
+    assert len(overlay.drawings()) == 3
+    overlay.clear()
+    assert overlay.drawings() == []
+
+
+def test_shape_to_json_clamps_to_image():
+    screen = _recorded_screens()[0]
+    shape = Shape(Tool.ARROW, QColor("#0000FF"), [QPointF(-5, -5), QPointF(10**6, 10**6)], 0)
+    data = shape_to_json(shape, screen, 2.0)
+    assert data["from"] == {"screen": "screen1", "x": 0, "y": 0}
+    assert data["to"] == {
+        "screen": "screen1",
+        "x": screen.image_width - 1,
+        "y": screen.image_height - 1,
+    }
+    assert data["stroke_width"] == 8 and data["color"] == "#0000FF"
 
 
 def test_add_shape_programmatically(overlay):

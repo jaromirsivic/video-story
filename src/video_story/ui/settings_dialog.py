@@ -1,10 +1,12 @@
-"""Settings dialog: items in the order required by the specification."""
+"""Settings dialog: items in the order required by the specification, followed by the
+retention setting and the recording folder actions (Open Folder, Delete All)."""
 
 from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -26,6 +28,8 @@ from video_story.core.config import (
     CAPTURE_INTERVAL_MIN_MS,
     JPEG_QUALITY_MAX,
     JPEG_QUALITY_MIN,
+    RETENTION_MAX_DAYS,
+    RETENTION_MIN_DAYS,
     Config,
     ConfigError,
     config_from_dict,
@@ -38,14 +42,24 @@ SYSTEM_DEFAULT_LABEL = "System default input"
 
 
 class SettingsDialog(QDialog):
-    """Edit ``config.json``. ``result_config`` holds the saved configuration on accept."""
+    """Edit ``config.json``. ``result_config`` holds the saved configuration on accept.
 
-    def __init__(self, config: Config, parent: QWidget | None = None) -> None:
+    ``current_session_id`` is the session of the open control window; its work folder
+    is never touched by **Delete All Recordings**.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        parent: QWidget | None = None,
+        current_session_id: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Video Story Settings")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(True)
         self._config = config
+        self._current_session_id = current_session_id
         self.result_config: Config | None = None
 
         form = QFormLayout(self)
@@ -81,7 +95,6 @@ class SettingsDialog(QDialog):
         self.quality_spin.setRange(JPEG_QUALITY_MIN, JPEG_QUALITY_MAX)
         self.quality_spin.setSuffix(" %")
         self.quality_spin.setValue(config.jpeg_quality)
-        self.quality_label = QWidget()
         form.addRow("JPEG Quality", self.quality_spin)
         self._quality_row = form.rowCount() - 1
         self.format_combo.currentIndexChanged.connect(self._update_quality_visibility)
@@ -101,6 +114,29 @@ class SettingsDialog(QDialog):
             "Recording stops and is processed automatically after this time"
         )
         form.addRow("Auto Stop Recording", self.auto_stop_spin)
+
+        # 6. Keep Recordings (retention)
+        self.retention_spin = QSpinBox()
+        self.retention_spin.setRange(RETENTION_MIN_DAYS, RETENTION_MAX_DAYS)
+        self.retention_spin.setSuffix(" days")
+        self.retention_spin.setValue(config.retention_days)
+        self.retention_spin.setToolTip(
+            "Recordings older than this are deleted automatically when Video Story starts"
+        )
+        form.addRow("Keep Recordings", self.retention_spin)
+
+        # 7. Recordings: open the folder, delete everything
+        self.open_folder_button = QPushButton("Open Folder")
+        self.open_folder_button.setToolTip("Open the recording folder in the file manager")
+        self.open_folder_button.clicked.connect(self._open_folder)
+        self.delete_all_button = QPushButton("Delete All Recordings...")
+        self.delete_all_button.setToolTip("Delete every stored recording (asks first)")
+        self.delete_all_button.clicked.connect(self._delete_all)
+        actions_row = QHBoxLayout()
+        actions_row.addWidget(self.open_folder_button)
+        actions_row.addWidget(self.delete_all_button)
+        actions_row.addStretch(1)
+        form.addRow("Recordings", actions_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -149,6 +185,45 @@ class SettingsDialog(QDialog):
         if chosen:
             self.folder_edit.setText(chosen)
 
+    # Recording folder actions ------------------------------------------------
+
+    def _open_folder(self) -> None:
+        """Open the configured (saved) recording folder in the system file manager."""
+        folder = self._config.recording_folder
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot open folder", f"{folder}\n\n{exc}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            QMessageBox.warning(self, "Cannot open folder", f"No file manager opened {folder}.")
+
+    def _delete_all(self) -> None:
+        """Delete every recording in the configured folder after confirmation."""
+        from video_story.host.retention import delete_all_recordings, summarize_recordings
+
+        folder = self._config.recording_folder
+        summary = summarize_recordings(folder, exclude_session_id=self._current_session_id)
+        if summary.count == 0:
+            QMessageBox.information(self, "Delete All Recordings", f"No recordings in {folder}.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete All Recordings",
+            f"Delete all {summary.count} recording(s) ({summary.total_text}) in\n{folder}?\n\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        deleted = delete_all_recordings(folder, exclude_session_id=self._current_session_id)
+        QMessageBox.information(
+            self, "Delete All Recordings", f"Deleted {len(deleted)} recording(s)."
+        )
+
+    # Values -------------------------------------------------------------------
+
     def values(self) -> dict[str, object]:
         data = self._config.to_json_dict()
         data.update(
@@ -159,6 +234,7 @@ class SettingsDialog(QDialog):
                 "jpeg_quality": self.quality_spin.value(),
                 "audio_input": self.audio_combo.currentData(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
+                "retention_days": self.retention_spin.value(),
             }
         )
         return data

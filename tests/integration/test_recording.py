@@ -53,6 +53,7 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         per_screen.setdefault(parsed.screen_id, []).append(parsed.time_ms)
         sidecar = json.loads(frame.with_suffix(".json").read_text(encoding="utf-8"))
         assert sidecar["screen"] == parsed.screen_id and sidecar["time_ms"] == parsed.time_ms
+        assert sidecar["drawings"] == []  # no overlay in a headless recording
         cursor = sidecar["cursor"]
         if cursor is not None:
             assert cursor["screen"] in screens

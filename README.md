@@ -11,9 +11,10 @@ Video Story is a plugin and skill for Claude Code, Codex and Claude Desktop (and
 ## How it works
 
 1. Say "Start Video Story" to your agent. A small window stays on top of other windows.
-2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (brush, rectangle, arrow, 16 colors) that is captured in the screenshots. Recording stops automatically after the configured time (30 minutes by default).
+2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (brush, rectangle, arrow, 16 colors) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
 3. Press **Stop** and choose **Process Recording**, **Continue Recording** or **Discard Recording**. Recording continues until you decide.
-4. The audio is transcribed on your CPU (Whisper small, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position.
+4. The audio is transcribed on your CPU (Whisper small, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position and the drawings visible at that moment.
+5. Recordings older than the configured retention (30 days by default) are deleted when Video Story starts; **Settings** also offers **Open Folder** and **Delete All Recordings**.
 
 Recording layout (`<recording_folder>/<YYYYMMDD-HHMMSS>/`):
 
@@ -22,8 +23,11 @@ manifest.json          screens, interval, format, audio, transcript summary
 audio.wav              16-bit PCM mono, device sample rate
 transcript.txt         [HH:MM:SS.mmm --> HH:MM:SS.mmm] text
 transcript.json        {"language": "cs", "segments": [{"start_ms", "end_ms", "text"}]}
-frames/0_250_screen1.png   screenshot of screen1 at 250 ms
-frames/0_250_screen1.json  {"time_ms": 250, "screen": "screen1", "cursor": {"screen": "screen2", "x": 412, "y": 388}}
+frames/0_500_screen1.png   screenshot of screen1 at 500 ms
+frames/0_500_screen1.json  {"time_ms": 500, "screen": "screen1", "cursor": {"screen": "screen2", "x": 412, "y": 388},
+                            "drawings": [{"tool": "rectangle", "color": "#FF0000", "screen": "screen1",
+                                          "from": {"screen": "screen1", "x": 300, "y": 450},
+                                          "to": {"screen": "screen1", "x": 750, "y": 675}}]}
 ```
 
 ## Quick start

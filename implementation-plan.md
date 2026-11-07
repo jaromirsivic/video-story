@@ -400,6 +400,13 @@ Původní otázky:
 
 Odchylky od původního návrhu: žádná pauza při Stop dialogu (rozhodnutí 7), nástroje kreslení rozšířeny (rozhodnutí 8), položka Auto Stop Recording (rozhodnutí 6), vše v repozitáři anglicky (rozhodnutí 12). Konfigurace `config.json` v kořeni repozitáře; `models/` a `bin/` mimo Git.
 
+Rozšíření ze 7. 11. 2026 (na žádost autora po prvním ručním ověření):
+
+- Sidecar JSON každého snímku (každé obrazovky) obsahuje `drawings`: tvary aktuálně nakreslené na overlay s `tool`, `color`, `screen` a body `{screen, x, y}` v pixelech obrázku dané obrazovky (`from`/`to` u obdélníku a šipky, `path` u štětce). Snímek overlay se přepočítává v GUI vlákně při každé změně kresby; capture vlákno ho čte při každém ticku.
+- Retence: `retention_days` (výchozí 30, v Nastavení jako **Keep Recordings**); starší nahrávky (podle času v id relace) se mažou na pozadí při startu okna. V Nastavení přibyla tlačítka **Open Folder** a **Delete All Recordings...** (potvrzovací dialog; relace otevřeného okna se nemaže).
+- Výchozí hodnoty: Auto Stop Recording 120 min (dříve 30), Capture Interval 500 ms (dříve 250 ms podle zadání).
+- Oprava finalizace na Windows: oddělený okenní proces drží otevřený `ui.log`, proto se nahrávka přesouvá po položkách a `state.json`, `lock` i `ui.log` zůstávají v `.work/<id>`.
+
 ---
 
 ## 14. Rizika

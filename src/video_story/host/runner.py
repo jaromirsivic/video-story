@@ -196,11 +196,15 @@ class FrameRef:
 
     def to_dict(self) -> dict[str, Any]:
         cursor = None
+        drawings: list[Any] = []
         try:
-            cursor_json = json.loads(self.sidecar.read_text(encoding="utf-8")).get("cursor")
-            position = cursor_from_json(cursor_json)
+            data = json.loads(self.sidecar.read_text(encoding="utf-8"))
+            position = cursor_from_json(data.get("cursor"))
             cursor = position.to_json() if position else None
-        except (OSError, ValueError, KeyError):
+            raw_drawings = data.get("drawings")
+            if isinstance(raw_drawings, list):
+                drawings = raw_drawings
+        except (OSError, ValueError, KeyError, AttributeError):
             pass
         return {
             "screen": self.screen_id,
@@ -208,6 +212,7 @@ class FrameRef:
             "image": str(self.image),
             "sidecar": str(self.sidecar),
             "cursor": cursor,
+            "drawings": drawings,
         }
 
 

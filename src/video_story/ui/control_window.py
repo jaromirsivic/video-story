@@ -247,7 +247,9 @@ class ControlWindow(QWidget):
     def _open_settings(self) -> None:
         if self.controller.recording:
             return
-        dialog = SettingsDialog(self.controller.config, self)
+        dialog = SettingsDialog(
+            self.controller.config, self, current_session_id=self.controller.paths.session_id
+        )
         if dialog.exec() and dialog.result_config is not None:
             self.controller.config = dialog.result_config
             self.status_label.setText("Settings saved. Press Record to start.")
@@ -265,6 +267,7 @@ class ControlWindow(QWidget):
                     closed = getattr(self._overlay, "closed", None)
                     if closed is not None:
                         closed.connect(self._overlay_closed)
+                    self._connect_overlay_to_recorder()
                 except Exception as exc:
                     log.exception("cannot create overlay")
                     QMessageBox.warning(self, "Draw on Screen", f"Drawing is not available: {exc}")
@@ -277,12 +280,27 @@ class ControlWindow(QWidget):
         elif self._overlay is not None:
             self._overlay.hide()  # type: ignore[attr-defined]
 
+    def _connect_overlay_to_recorder(self) -> None:
+        """Let the recorder store the drawings in every frame sidecar."""
+        recorder = self.controller.recorder
+        if recorder is None or self._overlay is None:
+            return
+        set_screens = getattr(self._overlay, "set_screens", None)
+        drawings = getattr(self._overlay, "drawings", None)
+        if set_screens is not None:
+            set_screens(list(getattr(recorder, "screens", [])))
+        if drawings is not None:
+            recorder.drawings_provider = drawings
+
     def _overlay_closed(self) -> None:
         self.draw_button.blockSignals(True)
         self.draw_button.setChecked(False)
         self.draw_button.blockSignals(False)
 
     def _close_overlay(self) -> None:
+        recorder = self.controller.recorder
+        if recorder is not None:
+            recorder.drawings_provider = None
         if self._overlay is not None:
             try:
                 self._overlay.close()  # type: ignore[attr-defined]

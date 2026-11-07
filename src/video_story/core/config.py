@@ -24,7 +24,7 @@ CONFIG_PATH_ENV = "VIDEO_STORY_CONFIG"
 
 CAPTURE_INTERVAL_MIN_MS = 1
 CAPTURE_INTERVAL_MAX_MS = 1000
-CAPTURE_INTERVAL_DEFAULT_MS = 250
+CAPTURE_INTERVAL_DEFAULT_MS = 500
 
 JPEG_QUALITY_MIN = 20
 JPEG_QUALITY_MAX = 100
@@ -32,7 +32,11 @@ JPEG_QUALITY_DEFAULT = 85
 
 AUTO_STOP_MIN_MINUTES = 1
 AUTO_STOP_MAX_MINUTES = 1440
-AUTO_STOP_DEFAULT_MINUTES = 30
+AUTO_STOP_DEFAULT_MINUTES = 120
+
+RETENTION_MIN_DAYS = 1
+RETENTION_MAX_DAYS = 3650
+RETENTION_DEFAULT_DAYS = 30
 
 IMAGE_FORMATS = ("png", "jpeg")
 WHISPER_BACKENDS = ("pywhispercpp", "whisper-cli")
@@ -89,6 +93,7 @@ class Config:
     jpeg_quality: int = JPEG_QUALITY_DEFAULT
     audio_input: str | None = None
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
+    retention_days: int = RETENTION_DEFAULT_DAYS
     whisper_model_path: Path | None = None
     whisper_backend: WhisperBackend = "pywhispercpp"
     whisper_cli_path: Path | None = None
@@ -195,6 +200,9 @@ def config_from_dict(data: dict[str, Any]) -> Config:
             AUTO_STOP_MAX_MINUTES,
             AUTO_STOP_DEFAULT_MINUTES,
         ),
+        retention_days=_require_int(
+            data, "retention_days", RETENTION_MIN_DAYS, RETENTION_MAX_DAYS, RETENTION_DEFAULT_DAYS
+        ),
         whisper_model_path=_optional_path(data, "whisper_model_path"),
         whisper_backend=_choice(data, "whisper_backend", WHISPER_BACKENDS, "pywhispercpp"),  # type: ignore[arg-type]
         whisper_cli_path=_optional_path(data, "whisper_cli_path"),
@@ -273,6 +281,9 @@ __all__ = [
     "JPEG_QUALITY_DEFAULT",
     "JPEG_QUALITY_MAX",
     "JPEG_QUALITY_MIN",
+    "RETENTION_DEFAULT_DAYS",
+    "RETENTION_MAX_DAYS",
+    "RETENTION_MIN_DAYS",
     "Config",
     "ConfigError",
     "config_from_dict",

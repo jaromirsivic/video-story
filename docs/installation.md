@@ -48,6 +48,7 @@ too:
 ```bash
 uv run video-story config get
 uv run video-story config set capture_interval_ms 250
+uv run video-story config set retention_days 90
 uv run video-story config set image_format jpeg
 uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 ```
@@ -55,11 +56,12 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `recording_folder` | `~/Videos/VideoStory` | where recordings are stored (`.work/` inside it holds recordings in progress) |
-| `capture_interval_ms` | 250 | screenshot interval, 1 to 1000 ms |
+| `capture_interval_ms` | 500 | screenshot interval, 1 to 1000 ms |
 | `image_format` | `png` | `png` or `jpeg` |
 | `jpeg_quality` | 85 | 20 to 100, used for JPEG only |
 | `audio_input` | `null` | device name; `null` means the system default input |
-| `auto_stop_minutes` | 30 | recording stops and is processed automatically after this time |
+| `auto_stop_minutes` | 120 | recording stops and is processed automatically after this time |
+| `retention_days` | 30 | recordings older than this (by their start time) are deleted when the control window starts, 1 to 3650 |
 | `whisper_model_path` | `null` | `null` means `models/ggml-small.bin` |
 | `whisper_backend` | `pywhispercpp` | or `whisper-cli` with `whisper_cli_path` pointing to a whisper.cpp binary |
 | `whisper_threads` | min(8, CPUs) | CPU threads for transcription |
@@ -139,6 +141,11 @@ uv run video-story mcp --transport streamable-http --port 8765
 
 The window still opens on the machine running the server; the transcript and frames are
 returned through the MCP tools.
+
+The Settings button edits the first six keys (Recording Folder, Capture Interval, Image
+Format, JPEG Quality, Audio Input, Auto Stop Recording, Keep Recordings) and offers
+**Open Folder** (the recording folder in the file manager) and **Delete All Recordings**,
+which asks for confirmation and then removes every recording except the open session.
 
 ## 4. Verify
 

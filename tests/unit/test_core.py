@@ -34,10 +34,11 @@ from video_story.core.transcript import Segment, Transcript, normalize_segments,
 
 def test_config_defaults():
     c = cfg.Config()
-    assert c.capture_interval_ms == 250
+    assert c.capture_interval_ms == 500
     assert c.image_format == "png"
     assert c.jpeg_quality == 85
-    assert c.auto_stop_minutes == 30
+    assert c.auto_stop_minutes == 120
+    assert c.retention_days == 30
     assert c.audio_input is None
     assert c.recording_folder.name == "VideoStory"
 

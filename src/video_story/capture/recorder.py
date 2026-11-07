@@ -18,6 +18,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from video_story import __version__
 from video_story.core.config import Config
@@ -88,11 +89,15 @@ class RecordingSummary:
         )
 
 
+DrawingsProvider = Callable[[], list[dict[str, Any]]]
+
+
 @dataclass
 class _Tick:
     time_ms: int
     cursor: CursorPosition | None
     frames: list[RawFrame] = field(default_factory=list)
+    drawings: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Recorder:
@@ -126,6 +131,10 @@ class Recorder:
         self._error: str | None = None
         self._lock = threading.Lock()
         self._summary: RecordingSummary | None = None
+        # Called from the capture thread at every tick; returns what is drawn on the
+        # screen right now (see ui.overlay.DrawingOverlay.drawings). Stored in the
+        # sidecar of every frame of the tick as ``drawings``.
+        self.drawings_provider: DrawingsProvider | None = None
 
     # Properties -------------------------------------------------------------
 
@@ -283,6 +292,12 @@ class Recorder:
         position = self.platform.cursor_position()
         cursor = locate_cursor(self.screens, *position) if position else None
         tick = _Tick(time_ms=time_ms, cursor=cursor)
+        provider = self.drawings_provider
+        if provider is not None:
+            try:
+                tick.drawings = list(provider())
+            except Exception:  # pragma: no cover - never let drawing data stop capture
+                log.exception("drawings provider failed")
         for screen in self.screens:
             tick.frames.append(grabber.grab(screen))
         return tick
@@ -300,6 +315,7 @@ class Recorder:
                 "time_ms": tick.time_ms,
                 "screen": frame.screen_id,
                 "cursor": tick.cursor.to_json() if tick.cursor else None,
+                "drawings": tick.drawings,
                 "captured_at": now_iso(),
             }
             (frames_dir / sidecar_filename(tick.time_ms, frame.screen_id)).write_text(
@@ -325,4 +341,4 @@ def write_sidecar_index(frames_dir: Path) -> int:
     return sum(1 for p in frames_dir.iterdir() if p.suffix.lower() in {".png", ".jpg"})
 
 
-__all__ = ["ENCODE_WORKERS", "Recorder", "RecorderEvent", "RecordingSummary"]
+__all__ = ["ENCODE_WORKERS", "DrawingsProvider", "Recorder", "RecorderEvent", "RecordingSummary"]

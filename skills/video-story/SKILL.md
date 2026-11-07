@@ -47,7 +47,7 @@ recording. Statuses: `ready` (window open), `recording`, `processing` (transcrib
 The user can press **Stop**, then choose **Process Recording**, **Continue Recording**
 or **Discard Recording** (discarding returns the window to the Record state; the same
 session continues). Recording also stops automatically after the configured
-auto-stop time (default 30 minutes) and is then processed.
+auto-stop time (default 2 hours) and is then processed.
 
 ## 4. Read the material (status `processed`)
 
@@ -72,9 +72,16 @@ For every instruction that refers to something on screen, fetch the matching fra
 - `--screen cursor` (default) returns the screen the cursor was on; `--screen all`
   returns every screen; `--screen screen2` a specific one. `--window 1000` also lists the
   frames within one second for context.
-- Each frame entry has `image` (open it with your image viewing tool), `sidecar` and
-  `cursor`: `{screen, x, y}` in pixels of that image, origin top-left. "Here", "this"
-  and "that" in the speech usually mean the cursor location.
+- Each frame entry has `image` (open it with your image viewing tool), `sidecar`,
+  `cursor`: `{screen, x, y}` in pixels of that image, origin top-left, and `drawings`:
+  what the user had drawn on the screens at that moment. "Here", "this" and "that" in
+  the speech usually mean the cursor location or the drawing.
+- `drawings` is a list (empty when nothing was drawn). Each entry has `tool`
+  (`rectangle`, `arrow` or `brush`), `color` (`#RRGGBB`), `screen` and the geometry in
+  pixels of that screen's image: `from`/`to` for a rectangle (two opposite corners) or
+  an arrow (tail, head), `path` (a list of points) for a brush stroke. Every point is
+  `{screen, x, y}`. The same list is stored in the sidecar of every screen of that tick,
+  so read it from any frame.
 - `describe --session <session_id>` returns the manifest, paths and the whole
   transcript at once. The manifest lists the screens (`screen1` is the primary) with
   their sizes and the capture interval.
@@ -93,7 +100,10 @@ recording folder untouched (the user may want it later).
 
 - `config get|set <key> <value>|path` - settings (`recording_folder`,
   `capture_interval_ms` 1-1000, `image_format` png|jpeg, `jpeg_quality` 20-100,
-  `audio_input`, `auto_stop_minutes`). The user can also use the **Settings** button.
+  `audio_input`, `auto_stop_minutes`, `retention_days`). The user can also use the
+  **Settings** button, which also opens the recording folder and can delete all
+  recordings. Recordings older than `retention_days` (default 30) are deleted when the
+  window starts.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
 - `transcribe <recording_dir>` - redo the transcription of an existing recording.
