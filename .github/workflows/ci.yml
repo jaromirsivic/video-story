@@ -17,7 +17,6 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       UV_PYTHON: "3.12"
-      VS_REC: ${{ runner.temp }}/vs-rec
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +47,8 @@ jobs:
       - name: Platform smoke (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          VS_REC: ${{ runner.temp }}/vs-rec
         run: |
           uv run video-story version
           uv run video-story screens
@@ -56,6 +57,8 @@ jobs:
 
       - name: Platform smoke (macOS)
         if: runner.os == 'macOS'
+        env:
+          VS_REC: ${{ runner.temp }}/vs-rec
         run: |
           uv run video-story version
           uv run video-story screens
@@ -69,6 +72,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: cocoa
           VIDEO_STORY_INTEGRATION: "1"
+          VS_REC: ${{ runner.temp }}/vs-rec
         run: |
           set +e
           uv run pytest tests/integration/test_overlay_capture.py -q -p no:cacheprovider -x 2>&1 | tee "$VS_REC/overlay-macos.log"
@@ -82,6 +86,7 @@ jobs:
           QT_QPA_PLATFORM: xcb
           XDG_SESSION_TYPE: x11
           QT_DEBUG_PLUGINS: "0"
+          VS_REC: ${{ runner.temp }}/vs-rec
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1600x900x24 +extension RANDR >/tmp/xvfb.log 2>&1 &
