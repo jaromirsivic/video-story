@@ -68,14 +68,16 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
 
         return DrawingOverlay()
 
-    window = ControlWindow(controller, on_finished=finished, overlay_factory=overlay_factory)
+    window = ControlWindow(
+        controller, on_finished=finished, overlay_factory=overlay_factory, config_file=config_file
+    )
     window.show()
     window.raise_()
     window.activateWindow()
     log.info("control window shown for session %s", session_id)
     code = app.exec()
     log.info("session %s finished with %s", session_id, final_status["value"])
-    return 0 if final_status["value"] in {"processed", "cancelled"} else code or 1
+    return 0 if final_status["value"] in {"processed", "cancelled", "editing"} else code or 1
 
 
 __all__ = ["run_ui"]

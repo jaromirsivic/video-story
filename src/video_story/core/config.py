@@ -28,7 +28,7 @@ CAPTURE_INTERVAL_DEFAULT_MS = 500
 
 JPEG_QUALITY_MIN = 20
 JPEG_QUALITY_MAX = 100
-JPEG_QUALITY_DEFAULT = 85
+JPEG_QUALITY_DEFAULT = 70
 
 AUTO_STOP_MIN_MINUTES = 1
 AUTO_STOP_MAX_MINUTES = 1440
@@ -45,6 +45,7 @@ EXPORT_AUDIO_BITRATE_K_DEFAULT = 192
 EXPORT_FPS = 24
 
 IMAGE_FORMATS = ("png", "jpeg")
+IMAGE_FORMAT_DEFAULT = "jpeg"
 WHISPER_BACKENDS = ("pywhispercpp", "whisper-cli")
 MODEL_FILE_NAME = "ggml-small.bin"
 
@@ -95,7 +96,7 @@ class Config:
 
     recording_folder: Path = field(default_factory=default_recording_folder)
     capture_interval_ms: int = CAPTURE_INTERVAL_DEFAULT_MS
-    image_format: ImageFormat = "png"
+    image_format: ImageFormat = IMAGE_FORMAT_DEFAULT  # type: ignore[assignment]
     jpeg_quality: int = JPEG_QUALITY_DEFAULT
     audio_input: str | None = None
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
@@ -209,7 +210,7 @@ def config_from_dict(data: dict[str, Any]) -> Config:
             CAPTURE_INTERVAL_MAX_MS,
             CAPTURE_INTERVAL_DEFAULT_MS,
         ),
-        image_format=_choice(data, "image_format", IMAGE_FORMATS, "png"),  # type: ignore[arg-type]
+        image_format=_choice(data, "image_format", IMAGE_FORMATS, IMAGE_FORMAT_DEFAULT),  # type: ignore[arg-type]
         jpeg_quality=_require_int(
             data, "jpeg_quality", JPEG_QUALITY_MIN, JPEG_QUALITY_MAX, JPEG_QUALITY_DEFAULT
         ),
@@ -310,6 +311,7 @@ __all__ = [
     "EXPORT_PRESETS",
     "EXPORT_PRESET_DEFAULT",
     "IMAGE_FORMATS",
+    "IMAGE_FORMAT_DEFAULT",
     "JPEG_QUALITY_DEFAULT",
     "JPEG_QUALITY_MAX",
     "JPEG_QUALITY_MIN",

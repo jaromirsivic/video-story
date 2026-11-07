@@ -56,6 +56,10 @@ class Transcript:
     def segments_at(self, time_ms: int) -> list[Segment]:
         return [s for s in self.segments if s.start_ms <= time_ms <= s.end_ms]
 
+    def segments_in_range(self, start_ms: int, end_ms: int) -> list[Segment]:
+        """Segments overlapping ``[start_ms, end_ms]`` (times are kept unshifted)."""
+        return [s for s in self.segments if s.end_ms >= start_ms and s.start_ms <= end_ms]
+
 
 def format_segment_line(segment: Segment) -> str:
     return (

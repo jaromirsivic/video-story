@@ -207,6 +207,74 @@ def test_process_runs_transcription_and_finishes(window, controller, monkeypatch
         .startswith("[00:00:00.000 --> 00:00:00.500] hello")
     )
     assert state.recording_dir == str(final)
+    assert state.crop == {"start_ms": 0, "end_ms": state.recorded_duration_ms}
+    assert state.processed_via == "stop_dialog"
+
+
+def _fake_transcription(monkeypatch):
+    import video_story.transcribe.pipeline as pipeline_mod
+    from video_story.core.manifest import TranscriptInfo
+    from video_story.core.transcript import Segment, Transcript, write_transcript
+
+    class Result:
+        def __init__(self):
+            self.transcript = Transcript("en", [Segment(0, 500, "hello")])
+            self.info = TranscriptInfo(language="en", segments=1)
+
+    def fake_transcribe(paths, config, *, base_dir=None, progress=None):
+        base = base_dir or paths.work_dir
+        write_transcript(
+            paths.transcript_txt_path(base), paths.transcript_json_path(base), Result().transcript
+        )
+        return Result()
+
+    monkeypatch.setattr(pipeline_mod, "transcribe_recording", fake_transcribe, raising=False)
+
+
+def test_video_editor_choice_processes_and_hands_over(window, controller, monkeypatch, qtbot):
+    """Stop -> Video Editor: transcribe, then open the editor; the session stays non-final."""
+    _fake_transcription(monkeypatch)
+    launched: list[dict] = []
+
+    def fake_launch(config, session_id=None, config_file=None, recording_session=None):
+        launched.append({"session_id": session_id, "recording_session": recording_session})
+        return {"pid": 4321, "session_id": session_id, "editor_session": "x", "attached": False}
+
+    monkeypatch.setattr(cw, "launch_editor", fake_launch)
+    window.record_button.click()
+    _auto_answer_stop(monkeypatch, StopChoice.EDITOR)
+    window.record_button.click()
+    qtbot.waitUntil(lambda: window.finished_statuses == ["editing"], timeout=10000)
+    assert launched == [
+        {
+            "session_id": controller.paths.session_id,
+            "recording_session": controller.paths.session_id,
+        }
+    ]
+    state = read_state(controller.paths.state_path)
+    assert state.status is Status.EDITING and not state.status.final
+    assert state.pid == 4321 and state.crop is None
+    assert state.recording_dir == str(controller.paths.final_dir)
+    assert (controller.paths.final_dir / "transcript.txt").exists()
+
+
+def test_video_editor_choice_falls_back_to_processed(window, controller, monkeypatch, qtbot):
+    """When the editor cannot start, the session is processed with the whole range."""
+    _fake_transcription(monkeypatch)
+
+    def failing_launch(config, session_id=None, config_file=None, recording_session=None):
+        raise RuntimeError("no editor today")
+
+    monkeypatch.setattr(cw, "launch_editor", failing_launch)
+    monkeypatch.setattr(cw.QMessageBox, "warning", lambda *a, **k: None)
+    window.record_button.click()
+    _auto_answer_stop(monkeypatch, StopChoice.EDITOR)
+    window.record_button.click()
+    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
+    state = read_state(controller.paths.state_path)
+    assert state.status is Status.PROCESSED and state.processed_via == "stop_dialog"
+    assert state.crop == {"start_ms": 0, "end_ms": state.recorded_duration_ms}
+    assert "no editor today" in (state.message or "")
 
 
 def test_auto_stop_triggers_processing(window, controller, monkeypatch, qtbot):
@@ -264,9 +332,12 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert form.itemAt(5, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
     assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Keep Recordings"
     assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Recordings"
-    assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "png"
+    assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "jpeg"
+    assert dialog.quality_spin.value() == 70
     assert dialog.auto_stop_spin.value() == 120 and dialog.retention_spin.value() == 30
     assert dialog.interval_spin.minimum() == 1 and dialog.interval_spin.maximum() == 1000
+    assert form.isRowVisible(3)  # JPEG is the default, so the quality row shows
+    dialog.format_combo.setCurrentIndex(0)
     assert not form.isRowVisible(3)
     dialog.format_combo.setCurrentIndex(1)
     assert form.isRowVisible(3)

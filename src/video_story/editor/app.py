@@ -8,12 +8,14 @@ a second start raises the existing window and fails with ``ALREADY_RUNNING``.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 from video_story.core.config import load_config
 from video_story.host.editor_launcher import check_editor_session, editor_lock_path
 from video_story.host.editor_lock import EditorLock, lock_holder_pid
+from video_story.host.editor_session import write_editor_event
 from video_story.host.runner import SessionError
 from video_story.platform import get_platform
 
@@ -41,8 +43,17 @@ def bring_existing_to_front(title: str = WINDOW_TITLE) -> bool:
         return False
 
 
-def run_editor(session_id: str | None = None, config_file: Path | None = None) -> int:
+def run_editor(
+    session_id: str | None = None,
+    config_file: Path | None = None,
+    editor_session: Path | None = None,
+    recording_session: str | None = None,
+) -> int:
     """Run the editor window; raises :class:`SessionError` when it cannot start.
+
+    ``editor_session`` is the event file the agent waits on (``wait --editor``);
+    ``recording_session`` is a recording session in status ``editing`` that the editor
+    finishes (Process) or cancels (close) - see :mod:`video_story.host.editor_session`.
 
     ``ALREADY_RUNNING`` (another editor holds the lock; its window is raised first),
     ``NO_RECORDINGS``, ``UNKNOWN_SESSION`` and ``INVALID_SESSION`` as for ``--detach``.
@@ -67,12 +78,21 @@ def run_editor(session_id: str | None = None, config_file: Path | None = None) -
         who = f" (pid {holder})" if holder else ""
         raise SessionError("ALREADY_RUNNING", f"the Video Story Editor is already open{who}")
 
+    if editor_session is not None:
+        write_editor_event(editor_session, "open", pid=os.getpid())
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Video Story Editor")
     app.setOrganizationName("VideoStory")
     settings = QSettings("VideoStory", "Editor")
     try:
-        window = EditorWindow(config, session_id=session_id, settings=settings)
+        window = EditorWindow(
+            config,
+            session_id=session_id,
+            settings=settings,
+            editor_session=editor_session,
+            recording_session=recording_session,
+        )
         window.restore_settings()
         window.show()
         window.raise_()

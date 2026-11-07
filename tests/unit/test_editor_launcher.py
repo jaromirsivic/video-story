@@ -16,6 +16,7 @@ from video_story.core.manifest import Manifest, write_manifest
 from video_story.core.screens import Screen
 from video_story.core.session import SessionPaths, now_iso
 from video_story.host import editor_launcher as launcher
+from video_story.host import editor_session as es
 from video_story.host import mcp_server
 from video_story.host.editor_lock import EditorLock, lock_holder_pid
 from video_story.host.runner import SessionError
@@ -92,9 +93,9 @@ def test_lock_held_by_another_process_is_detected(tmp_path: Path):
         assert not EditorLock(path).acquire()
         cfg = Config(recording_folder=tmp_path)
         _processed(tmp_path, "20261001-090000")
-        with pytest.raises(SessionError) as info:
-            launcher.launch_editor(cfg)
-        assert info.value.code == "ALREADY_RUNNING" and child_pid in str(info.value)
+        attached = launcher.launch_editor(cfg)
+        assert attached["attached"] is True and attached["pid"] == int(child_pid)
+        es.take_attach_requests(cfg)
     finally:
         assert proc.stdin is not None
         proc.stdin.write("\n")
@@ -144,13 +145,19 @@ def test_launch_spawns_detached_process(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(launcher, "spawn_detached", fake_spawn)
     result = launcher.launch_editor(cfg, config_file=tmp_path / "config.json")
     assert result["pid"] == 4242 and result["session_id"] == "20261002-090000"
-    assert result["recordings"] == 2
-    assert spawned[0][-1] == "edit" and "--session" not in spawned[0]
+    assert result["recordings"] == 2 and result["attached"] is False
+    assert "--session" not in spawned[0]
     assert str(tmp_path / "config.json") in spawned[0]
+    editor_session = Path(result["editor_session"])
+    assert editor_session.exists() and spawned[0][-2:] == ["--editor-session", str(editor_session)]
+    assert "--recording-session" not in spawned[0]
 
-    result = launcher.launch_editor(cfg, "20261001-090000")
+    result = launcher.launch_editor(cfg, "20261001-090000", recording_session="20261001-090000")
     assert result["session_id"] == "20261001-090000"
-    assert spawned[1][-2:] == ["--session", "20261001-090000"]
+    assert "--session" in spawned[1] and spawned[1][-2:] == [
+        "--recording-session",
+        "20261001-090000",
+    ]
 
 
 def test_launch_refuses_second_instance(tmp_path: Path, monkeypatch):
@@ -158,9 +165,12 @@ def test_launch_refuses_second_instance(tmp_path: Path, monkeypatch):
     _processed(tmp_path, "20261001-090000")
     monkeypatch.setattr(launcher, "spawn_detached", lambda *a, **k: 1)
     with EditorLock(launcher.editor_lock_path(cfg)):
-        with pytest.raises(SessionError) as info:
-            launcher.launch_editor(cfg)
-        assert info.value.code == "ALREADY_RUNNING"
+        # A running editor is reused: an attach request is written, no process spawned.
+        result = launcher.launch_editor(cfg, "20261001-090000")
+        assert result["attached"] is True and result["pid"] == os.getpid()
+        requests = es.take_attach_requests(cfg)
+        assert len(requests) == 1 and requests[0].session_id == "20261001-090000"
+        assert requests[0].editor_session == Path(result["editor_session"])
     assert launcher.launch_editor(cfg)["pid"] == 1
 
 
@@ -181,6 +191,8 @@ def test_tool_edit_wraps_launcher(tmp_path: Path, monkeypatch):
     )
     result = mcp_server.tool_edit("20261001-090000", config_file)
     assert result["ok"] is True and result["pid"] == 77
-    assert calls and calls[0][-2:] == ("--session", "20261001-090000")
+    assert calls and "--session" in calls[0]
+    assert calls[0][calls[0].index("--session") + 1] == "20261001-090000"
+    assert "--editor-session" in calls[0] and result["editor_session"] in calls[0]
     assert str(config_file) in calls[0]
     assert mcp_server.tool_edit("20261002-090000", config_file)["code"] == "UNKNOWN_SESSION"

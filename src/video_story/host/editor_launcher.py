@@ -12,6 +12,7 @@ from video_story.core.session import WORK_DIR_NAME, is_session_id, list_sessions
 from video_story.platform.process import gui_python, spawn_detached
 
 from .editor_lock import lock_holder_pid
+from .editor_session import new_editor_session, write_attach_request, write_editor_event
 from .runner import SessionError
 
 log = logging.getLogger(__name__)
@@ -62,26 +63,61 @@ def check_editor_session(config: Config, session_id: str | None) -> list[str]:
 
 
 def launch_editor(
-    config: Config, session_id: str | None = None, config_file: Path | None = None
+    config: Config,
+    session_id: str | None = None,
+    config_file: Path | None = None,
+    recording_session: str | None = None,
 ) -> dict[str, Any]:
-    """Spawn the editor process and return at once."""
+    """Open the editor for ``session_id`` (default: the newest recording) and return at once.
+
+    Creates an editor session file (``editor_session`` in the result) that the editor
+    reports ``process`` / ``closed`` into; ``wait --editor`` polls it. When an editor is
+    already running, no second process starts: an attach request makes the running
+    editor load the recording and adopt the editor session (``attached`` is true).
+    ``recording_session`` is the id of a recording session in status ``editing``
+    (the editor finishes or cancels it when the user presses Process or closes).
+    """
     recordings = check_editor_session(config, session_id)
-    running = editor_running_pid(config)
-    if running is not None:
-        who = f" (pid {running})" if running else ""
-        raise SessionError("ALREADY_RUNNING", f"the Video Story Editor is already open{who}")
     work = config.recording_folder / WORK_DIR_NAME
     work.mkdir(parents=True, exist_ok=True)
+    editor_session = new_editor_session(config)
+    selected = session_id or recordings[0]
+    running = editor_running_pid(config)
+    if running is not None:
+        request = write_attach_request(config, editor_session, session_id, recording_session)
+        still_running = editor_running_pid(config)
+        if still_running is not None:
+            write_editor_event(editor_session, "open", pid=still_running or None)
+            log.info("editor already running (pid %s): attach request for %s", running, selected)
+            return {
+                "pid": still_running,
+                "session_id": selected,
+                "recordings": len(recordings),
+                "editor_session": str(editor_session),
+                "attached": True,
+                "log": str(work / EDITOR_LOG_NAME),
+            }
+        # The editor went away while we wrote the request: serve it ourselves.
+        try:
+            request.unlink()
+        except OSError:
+            pass
     config_arg = str(config_file or config_path())
     args = [gui_python(), "-m", "video_story", "--config", config_arg, "edit"]
     if session_id is not None:
         args += ["--session", session_id]
+    args += ["--editor-session", str(editor_session)]
+    if recording_session is not None:
+        args += ["--recording-session", recording_session]
     pid = spawn_detached(args, work / EDITOR_LOG_NAME, cwd=Path.cwd())
-    log.info("editor started: pid %s, session %s", pid, session_id or recordings[0])
+    write_editor_event(editor_session, "open", pid=pid)  # liveness for `wait --editor`
+    log.info("editor started: pid %s, session %s", pid, selected)
     return {
         "pid": pid,
-        "session_id": session_id or recordings[0],
+        "session_id": selected,
         "recordings": len(recordings),
+        "editor_session": str(editor_session),
+        "attached": False,
         "log": str(work / EDITOR_LOG_NAME),
     }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from video_story.core.timeline import format_timestamp
 from video_story.host.controller import SessionController
+from video_story.host.editor_launcher import launch_editor
 
 from .icons import draw_icon, record_icon, settings_icon, stop_icon
 from .progress_dialog import ProgressDialog
@@ -37,13 +39,16 @@ class ProcessingWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, controller: SessionController) -> None:
+    def __init__(self, controller: SessionController, hand_to_editor: bool = False) -> None:
         super().__init__()
         self._controller = controller
+        self._hand_to_editor = hand_to_editor
 
     def run(self) -> None:
         try:
-            final_dir = self._controller.process(progress=self.progress.emit)
+            final_dir = self._controller.process(
+                progress=self.progress.emit, hand_to_editor=self._hand_to_editor
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -58,11 +63,14 @@ class ControlWindow(QWidget):
         controller: SessionController,
         on_finished: Callable[[str], None],
         overlay_factory: Callable[[], QObject] | None = None,
+        config_file: Path | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
         self._on_finished = on_finished
         self._overlay_factory = overlay_factory
+        self._config_file = config_file
+        self._open_editor = False
         self._overlay: QObject | None = None
         self._processing = False
         self._done = False
@@ -166,6 +174,9 @@ class ControlWindow(QWidget):
             if choice is StopChoice.PROCESS:
                 self._begin_processing()
                 return
+            if choice is StopChoice.EDITOR:
+                self._begin_processing(open_editor=True)
+                return
             if confirm_discard(self):
                 self._discard()
                 return
@@ -188,10 +199,11 @@ class ControlWindow(QWidget):
 
     # Processing -------------------------------------------------------------
 
-    def _begin_processing(self) -> None:
+    def _begin_processing(self, open_editor: bool = False) -> None:
         if self._processing:
             return
         self._processing = True
+        self._open_editor = open_editor
         self._timer.stop()
         self._close_overlay()
         self.record_button.setEnabled(False)
@@ -200,7 +212,7 @@ class ControlWindow(QWidget):
 
         self._progress_dialog = ProgressDialog(self)
         self._thread = QThread(self)
-        self._worker = ProcessingWorker(self.controller)
+        self._worker = ProcessingWorker(self.controller, hand_to_editor=open_editor)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._progress_dialog.set_progress)
@@ -224,7 +236,30 @@ class ControlWindow(QWidget):
         self._stop_thread()
         self._done = True
         log.info("processed: %s", final_dir)
-        self._finish("processed")
+        if not self._open_editor:
+            self._finish("processed")
+            return
+        session_id = self.controller.paths.session_id
+        try:
+            info = launch_editor(
+                self.controller.config,
+                session_id,
+                self._config_file,
+                recording_session=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - the recording must not be lost
+            log.exception("cannot open the editor")
+            self.controller.editor_failed(str(exc))
+            QMessageBox.warning(
+                self,
+                "Video Editor",
+                f"The editor could not be opened: {exc}\n\n"
+                "The recording was processed; the agent will use the whole recording.",
+            )
+            self._finish("processed")
+            return
+        self.controller.editor_opened(int(info.get("pid") or 0))
+        self._finish("editing")
 
     def _on_processing_failed(self, message: str) -> None:
         self._stop_thread()

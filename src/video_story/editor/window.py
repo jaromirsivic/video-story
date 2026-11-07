@@ -1,8 +1,28 @@
-"""EditorWindow: recordings list, preview, timeline, crop controls, Render."""
+"""EditorWindow: recordings list, preview, timeline, crop controls, Render, Process.
+
+The window talks to the agent through the host-side helpers of
+:mod:`video_story.host.editor_session`:
+
+* ``editor_session`` (``edit --detach``): the event file the agent polls with
+  ``wait --editor``. **Process** writes ``process`` with the id of the recording shown
+  and its crop; closing the window without Process writes ``closed``.
+* ``recording_session`` (Video Editor from the Stop dialog): a recording session in
+  status ``editing``. The window adopts it at start (its pid), **Process** finishes it
+  (``processed`` with the crop, ``processed_via`` ``editor``) and closing without
+  Process cancels it.
+* Attach requests: a later ``edit --detach`` while this window runs writes a request
+  file; a 1 s timer picks it up, loads the requested recording, adopts the new editor
+  session / recording session and raises the window.
+
+The crop ``[In, Out]`` is stored next to the recording in ``crop.json`` on every change
+(handle drag - debounced to the end of the drag -, I/O keys, In/Out editors, Reset
+Crop) and restored when the recording is loaded again.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -27,6 +47,7 @@ from PySide6.QtGui import (
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,9 +62,18 @@ from PySide6.QtWidgets import (
 )
 
 from video_story.core.config import EXPORT_FPS, Config
+from video_story.core.crop import Crop, read_crop, write_crop
 from video_story.core.session import SessionPaths
 from video_story.core.timeline import format_timestamp, parse_timestamp
 from video_story.export import ExportRequest, ExportResult
+from video_story.host.editor_session import (
+    AttachRequest,
+    adopt_recording_session,
+    cancel_recording_session,
+    finish_recording_session,
+    take_attach_requests,
+    write_editor_event,
+)
 
 from .player import Player
 from .preview import PreviewPanel
@@ -60,6 +90,17 @@ TICK_MS = 33
 STEP_MS = 1000.0 / EXPORT_FPS
 ZOOM_SLIDER_MAX = 1000
 TIME_TEXT = re.compile(r"^\d{2,}:\d{2}:\d{2}(\.\d{1,3})?$")  # HH:MM:SS[.mmm]
+CROP_SAVE_DEBOUNCE_MS = 300  # a handle drag writes crop.json once it comes to rest
+ATTACH_POLL_MS = 1000
+PROCESS_FEEDBACK_MS = 2000
+PROCESS_BUTTON_STYLE = """
+QPushButton {
+    background-color: #1e9e3e; color: white; border: 1px solid #167a30; border-radius: 4px;
+}
+QPushButton:hover { background-color: #23b347; }
+QPushButton:pressed { background-color: #167a30; }
+QPushButton:disabled { background-color: #8fcf9f; color: #f4fff6; border-color: #7fbf8f; }
+"""
 
 
 class _LoadSignals(QObject):
@@ -131,6 +172,9 @@ class TimeEdit(QLineEdit):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.commit()
+            if event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier:
+                event.ignore()  # Ctrl+Enter: committed, now let the window shortcut fire
+                return
             self.selectAll()
             event.accept()
             return
@@ -142,9 +186,15 @@ class TimeEdit(QLineEdit):
 
 
 class EditorWindow(QMainWindow):
-    """The editor. ``export_fn`` replaces the FFmpeg export (tests)."""
+    """The editor. ``export_fn`` replaces the FFmpeg export (tests).
+
+    ``editor_session`` is the event file an agent waits on (``wait --editor``);
+    ``recording_session`` is the id of a recording session in status ``editing`` that
+    this window finishes (Process) or cancels (close). See the module docstring.
+    """
 
     recording_loaded = Signal(object)  # LoadedRecording | None
+    processed = Signal(str, object)  # session id, Crop - after Process was sent
 
     def __init__(
         self,
@@ -153,6 +203,8 @@ class EditorWindow(QMainWindow):
         export_fn: ExportFn | None = None,
         settings: QSettings | None = None,
         parent: QWidget | None = None,
+        editor_session: Path | None = None,
+        recording_session: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
@@ -160,6 +212,9 @@ class EditorWindow(QMainWindow):
         self._settings = settings
         self.recording: LoadedRecording | None = None
         self.last_export_result: ExportResult | None = None
+        self.editor_session: Path | None = editor_session
+        self.recording_session: str | None = recording_session
+        self.editor_event_sent = False  # a "process" event went to editor_session
         self.model = TimelineModel()
         self.player = Player(self)
         self.player.status_message.connect(self._show_status_message)
@@ -170,6 +225,7 @@ class EditorWindow(QMainWindow):
         self._load_signals.done.connect(self._on_loaded)
         self._syncing_zoom = False
         self._resume_after_scrub = False  # playback was paused for a playhead drag
+        self._crop_dirty_for: LoadedRecording | None = None  # pending debounced write
 
         self.setWindowTitle(WINDOW_TITLE)
         self._build_ui()
@@ -179,12 +235,28 @@ class EditorWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
+        self._crop_save_timer = QTimer(self)
+        self._crop_save_timer.setSingleShot(True)
+        self._crop_save_timer.setInterval(CROP_SAVE_DEBOUNCE_MS)
+        self._crop_save_timer.timeout.connect(self._flush_crop)
+        self._process_feedback_timer = QTimer(self)
+        self._process_feedback_timer.setSingleShot(True)
+        self._process_feedback_timer.setInterval(PROCESS_FEEDBACK_MS)
+        self._process_feedback_timer.timeout.connect(self._restore_process_button)
+        self._attach_timer = QTimer(self)
+        self._attach_timer.setInterval(ATTACH_POLL_MS)
+        self._attach_timer.timeout.connect(self.check_attach_requests)
+
+        if self.recording_session is not None:
+            self._adopt_recording_session(self.recording_session)
 
         self.recordings = RecordingsModel(config.recording_folder, self)
         self.list_view.setModel(self.recordings)
         self.list_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self._select_row(self.recordings.default_row(session_id))
         self._update_status()
+        self._decline_attach_requests()  # left behind by an editor that was closing
+        self._attach_timer.start()
 
     # UI ---------------------------------------------------------------------
 
@@ -276,6 +348,7 @@ class EditorWindow(QMainWindow):
         bottom_layout.addWidget(self.timeline, 1)
 
         render_row = QHBoxLayout()
+        render_row.setSpacing(12)
         render_row.addStretch(1)
         self.render_button = QPushButton("Render")
         self.render_button.setToolTip("Export the selected screen and crop to MP4 + SRT (Ctrl+R)")
@@ -287,6 +360,17 @@ class EditorWindow(QMainWindow):
         self.render_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.render_button.clicked.connect(self.render)
         render_row.addWidget(self.render_button)
+        self.process_button = QPushButton("Process")
+        self.process_button.setToolTip(
+            "Send the cropped range to the agent for processing (Ctrl+Enter)"
+        )
+        self.process_button.setFont(render_font)
+        self.process_button.setMinimumSize(180, 44)
+        self.process_button.setStyleSheet(PROCESS_BUTTON_STYLE)
+        self.process_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.process_button.setEnabled(False)
+        self.process_button.clicked.connect(self.process)
+        render_row.addWidget(self.process_button)
         bottom_layout.addLayout(render_row)
         self.right_splitter.addWidget(bottom)
         self.right_splitter.setStretchFactor(0, 3)
@@ -328,6 +412,7 @@ class EditorWindow(QMainWindow):
         self.zoom_out_action = action("Zoom out", "Ctrl+-", self.zoom_out)
         self.fit_action = action("Fit", "Ctrl+0", self.zoom_fit)
         self.render_action = action("Render", "Ctrl+R", self.render)
+        self.process_action = action("Process", ["Ctrl+Return", "Ctrl+Enter"], self.process)
         self.refresh_action = action("Refresh", "F5", self.refresh_recordings)
 
     # Recordings list --------------------------------------------------------
@@ -384,13 +469,18 @@ class EditorWindow(QMainWindow):
     def _set_recording(self, recording: LoadedRecording | None) -> None:
         self._timer.stop()
         self.player.stop()
+        self._flush_crop()  # a drag of the previous recording still waiting to be written
         self.recording = recording
         self.preview.view.clear()
         self.timeline.set_recording(recording)
+        if recording is not None:
+            self._restore_crop(recording)
         self.player.set_audio(recording.audio if recording else None)
         self.player.set_range(self.model.in_ms, self.model.out_ms)
         self._crop_updated()
         self._sync_zoom_slider()
+        if not self._process_feedback_timer.isActive():
+            self.process_button.setEnabled(recording is not None)
         if recording is None:
             self.preview.view.set_message("No recording")
             self.preview.set_subtitle("")
@@ -519,28 +609,43 @@ class EditorWindow(QMainWindow):
 
     # Crop -------------------------------------------------------------------
 
+    @property
+    def crop(self) -> Crop:
+        """The current ``[In, Out]`` of the timeline."""
+        return Crop(self.model.in_ms, self.model.out_ms)
+
     def set_in_at_playhead(self) -> None:
         if self.model.set_in(self.model.playhead_ms):
-            self._crop_updated()
+            self._crop_edited()
 
     def set_out_at_playhead(self) -> None:
         if self.model.set_out(self.model.playhead_ms):
-            self._crop_updated()
+            self._crop_edited()
 
     def reset_crop(self) -> None:
-        if self.model.reset_crop():
-            self._crop_updated()
+        self.model.reset_crop()
+        self._crop_edited()  # always stores the whole range, even when nothing moved
 
     def _on_in_edited(self, value: int) -> None:
         self.model.set_in(value)
-        self._crop_updated()
+        self._crop_edited()
 
     def _on_out_edited(self, value: int) -> None:
         self.model.set_out(value)
-        self._crop_updated()
+        self._crop_edited()
 
     def _on_crop_changed(self) -> None:
+        # A handle drag: the view emits on every mouse move, so the file is written
+        # once the drag has rested for CROP_SAVE_DEBOUNCE_MS (or at the next flush).
         self._crop_updated()
+        if self.recording is not None:
+            self._crop_dirty_for = self.recording
+            self._crop_save_timer.start()
+
+    def _crop_edited(self) -> None:
+        """A discrete crop change (keys, editors, Reset Crop): refresh and store it."""
+        self._crop_updated()
+        self._save_crop()
 
     def _crop_updated(self) -> None:
         self.in_edit.set_value(self.model.in_ms)
@@ -550,6 +655,38 @@ class EditorWindow(QMainWindow):
         self.timeline.update()
         self._update_status()
 
+    def _restore_crop(self, recording: LoadedRecording) -> None:
+        """Apply ``crop.json`` of ``recording`` to the timeline (nothing is written)."""
+        path = recording.paths.crop_path(recording.paths.final_dir)
+        crop = read_crop(path, recording.duration_ms)
+        self.model.reset_crop()
+        self.model.set_in(crop.start_ms)
+        self.model.set_out(crop.end_ms)
+        self.model.set_in(crop.start_ms)  # set_in before set_out may have been clamped
+        self._crop_dirty_for = None
+        self._crop_save_timer.stop()
+
+    def _save_crop(self) -> None:
+        """Write the current crop to ``crop.json`` of the shown recording."""
+        self._crop_save_timer.stop()
+        self._crop_dirty_for = None
+        recording = self.recording
+        if recording is None:
+            return
+        path = recording.paths.crop_path(recording.paths.final_dir)
+        try:
+            write_crop(path, self.crop)
+        except OSError as exc:
+            log.warning("cannot write %s: %s", path, exc)
+            self._show_status_message(f"Cannot save crop: {exc}")
+
+    def _flush_crop(self) -> None:
+        """Write a crop change that is still waiting on the debounce timer, if any."""
+        self._crop_save_timer.stop()
+        dirty, self._crop_dirty_for = self._crop_dirty_for, None
+        if dirty is not None and dirty is self.recording:
+            self._save_crop()
+
     # Screen selection -------------------------------------------------------
 
     def select_screen(self, screen_id: str) -> None:
@@ -557,7 +694,7 @@ class EditorWindow(QMainWindow):
             self._on_screen_selected(screen_id)
 
     def _on_screen_selected(self, _screen_id: str) -> None:
-        self.preview.view.clear()
+        self.preview.view.drop_frame()  # keeps the zoom for a screen of the same size
         self._sync_playhead()
         self._update_status()
 
@@ -599,10 +736,17 @@ class EditorWindow(QMainWindow):
             write_srt=True,
         )
 
+    def _commit_time_edits(self) -> None:
+        """Apply a value typed into In/Out that was not committed yet (Ctrl+R, Ctrl+Enter)."""
+        for edit in (self.in_edit, self.out_edit):
+            if edit.hasFocus():
+                edit.commit()
+
     def render(self) -> ExportResult | None:
         if self.recording is None:
             self._show_status_message("Select a recording first.")
             return None
+        self._commit_time_edits()
         if self.player.playing:
             self.toggle_play()
         suggested = default_output_path(
@@ -623,14 +767,212 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Rendered {result.output}")
         return result
 
+    # Process ----------------------------------------------------------------
+
+    def process(self) -> Crop | None:
+        """Send the shown recording and its crop to the agent; the window stays open.
+
+        Stores ``crop.json``, writes the ``process`` event into ``editor_session`` and
+        finishes ``recording_session`` (``processed`` with the crop). The recording
+        session is finished even when the user has meanwhile selected a different
+        recording: the agent waiting on it must be released by the green button, and
+        the editor session event carries the id actually shown. The crop applies to
+        all screens; the selected track is irrelevant.
+        """
+        if self.recording is None:
+            self._show_status_message("Select a recording first.")
+            return None
+        if self._process_feedback_timer.isActive():
+            return None  # "Sent to agent" is still showing: no second event
+        self._commit_time_edits()
+        if self.player.playing:
+            self.toggle_play()
+        crop = self.crop
+        session_id = self.recording.session_id
+        self._save_crop()
+        problems: list[str] = []
+        if self.editor_session is not None:
+            try:
+                write_editor_event(self.editor_session, "process", session_id=session_id, crop=crop)
+                self.editor_event_sent = True
+            except OSError as exc:
+                log.warning("cannot write editor event %s: %s", self.editor_session, exc)
+                problems.append(f"editor session: {exc}")
+        if self.recording_session is not None:
+            recording_session = self.recording_session
+            if recording_session != session_id:
+                log.warning(
+                    "Process on %s finishes recording session %s", session_id, recording_session
+                )
+            paths = SessionPaths(self.config.recording_folder, recording_session)
+            try:
+                finish_recording_session(paths, crop, shown_session_id=session_id)
+            except (OSError, RuntimeError) as exc:
+                log.warning("cannot finish recording session %s: %s", recording_session, exc)
+                problems.append(f"recording session: {exc}")
+            else:
+                self.recording_session = None  # final now; closing must not cancel it
+        detail = f"{session_id} {format_timestamp(crop.start_ms)}-{format_timestamp(crop.end_ms)}"
+        self._update_status()
+        if problems:
+            # The button stays "Process": the user can retry; a session that could not be
+            # finished is kept so that closing the window still cancels it.
+            self._show_status_message(f"Process failed for {detail}: " + "; ".join(problems))
+            return None
+        self._show_process_feedback()
+        self._show_status_message(f"Sent to agent: {detail}")
+        self.processed.emit(session_id, crop)
+        return crop
+
+    def _show_process_feedback(self) -> None:
+        self.process_button.setText("Sent to agent")
+        self.process_button.setEnabled(False)
+        self.process_action.setEnabled(False)  # Ctrl+Enter must not bypass the button
+        self._process_feedback_timer.start()
+
+    def _restore_process_button(self) -> None:
+        self.process_button.setText("Process")
+        self.process_button.setEnabled(self.recording is not None)
+        self.process_action.setEnabled(True)
+
+    # Agent sessions ---------------------------------------------------------
+
+    def _adopt_recording_session(self, session_id: str) -> None:
+        try:
+            adopt_recording_session(SessionPaths(self.config.recording_folder, session_id))
+        except (OSError, RuntimeError) as exc:
+            log.warning("cannot adopt recording session %s: %s", session_id, exc)
+
+    def _close_editor_session(self) -> None:
+        """Report ``closed`` to the agent of ``editor_session`` unless Process went out."""
+        path, self.editor_session = self.editor_session, None
+        sent, self.editor_event_sent = self.editor_event_sent, False
+        if path is None or sent:
+            return
+        try:
+            write_editor_event(path, "closed")
+        except OSError as exc:
+            log.warning("cannot write editor event %s: %s", path, exc)
+
+    def _cancel_recording_session(self) -> None:
+        """Cancel ``recording_session`` (closed without Process) unless already final."""
+        session_id, self.recording_session = self.recording_session, None
+        if session_id is None:
+            return
+        try:
+            cancel_recording_session(SessionPaths(self.config.recording_folder, session_id))
+        except (OSError, RuntimeError) as exc:
+            log.warning("cannot cancel recording session %s: %s", session_id, exc)
+
+    def _take_attach_requests(self) -> list[AttachRequest]:
+        try:
+            return take_attach_requests(self.config)
+        except OSError as exc:
+            log.warning("cannot read attach requests: %s", exc)
+            return []
+
+    def check_attach_requests(self) -> list[AttachRequest]:
+        """Serve pending attach requests (the 1 s timer slot); returns what it handled.
+
+        Nothing is taken while a modal dialog (Render) runs its own event loop or a
+        recording is still loading: the request waits in its folder for the next tick.
+        """
+        if QApplication.activeModalWidget() is not None or self.loading:
+            return []
+        requests = self._take_attach_requests()
+        for request in requests:
+            self.attach(request)
+        return requests
+
+    def _decline_attach_requests(self) -> list[AttachRequest]:
+        """Answer pending requests with ``closed`` instead of attaching.
+
+        Called before the timer starts (a request meant for an editor that was closing
+        must not hijack this window and its own agent) and once more while closing (a
+        request landing during shutdown would otherwise be orphaned until it expires).
+        """
+        requests = self._take_attach_requests()
+        for request in requests:
+            log.info("declining attach request %s (not attaching)", request.path.name)
+            try:
+                write_editor_event(request.editor_session, "closed")
+            except OSError as exc:
+                log.warning("cannot write editor event %s: %s", request.editor_session, exc)
+            if request.recording_session is not None:
+                try:
+                    cancel_recording_session(
+                        SessionPaths(self.config.recording_folder, request.recording_session)
+                    )
+                except (OSError, RuntimeError) as exc:
+                    log.warning(
+                        "cannot cancel recording session %s: %s", request.recording_session, exc
+                    )
+        return requests
+
+    def attach(self, request: AttachRequest) -> None:
+        """A later ``edit --detach`` (or the control window) wants this window.
+
+        The previous editor session that is still waiting gets ``closed`` and a
+        previous recording session that was not finished is cancelled: only one agent
+        waits on this window at a time, and the earlier one must not hang forever.
+        """
+        if self.editor_session != request.editor_session:
+            self._close_editor_session()
+            self.editor_session = request.editor_session
+        try:
+            write_editor_event(self.editor_session, "open", pid=os.getpid())
+        except OSError as exc:
+            log.warning("cannot record pid in %s: %s", self.editor_session, exc)
+            self.editor_event_sent = False
+        if request.recording_session is not None:
+            if self.recording_session not in (None, request.recording_session):
+                self._cancel_recording_session()
+            self.recording_session = request.recording_session
+            self._adopt_recording_session(request.recording_session)
+        if request.session_id is None:
+            self.refresh_recordings()
+        else:
+            self.recordings.refresh()
+            row = self.recordings.default_row(request.session_id)
+            if row >= 0 and self.recordings.item(row).session_id != request.session_id:
+                log.warning("attach request for unknown recording %s", request.session_id)
+            if row >= 0:
+                self.list_view.setCurrentIndex(self.recordings.index(row))
+            else:
+                self._select_row(row)
+        self._update_status()
+        # Un-minimize only: showNormal() would also drop a maximized window to normal.
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+        )
+        self.raise_()
+        self.activateWindow()
+        log.info(
+            "attached: editor session %s, recording session %s, recording %s",
+            request.editor_session.name,
+            request.recording_session,
+            request.session_id or "(current)",
+        )
+
     # Status -----------------------------------------------------------------
 
     def _show_status_message(self, text: str) -> None:
         self.statusBar().showMessage(text, 8000)
 
+    def _agent_status(self) -> str:
+        if self.recording_session is not None:
+            return f"waiting for Process (recording {self.recording_session})"
+        if self.editor_session is not None:
+            if self.editor_event_sent:
+                return "sent to agent"
+            return f"waiting for Process ({self.editor_session.stem})"
+        return ""
+
     def _update_status(self) -> None:
+        agent = self._agent_status()
+        suffix = f"   |   {agent}" if agent else ""
         if self.recording is None:
-            self.status_label.setText("No recording selected")
+            self.status_label.setText("No recording selected" + suffix)
             return
         width, height = self.recording.screen_size(self.model.selected_screen)
         size = f"{width}x{height}" if width else "unknown size"
@@ -638,7 +980,7 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(
             f"{self.recording.session_id}   |   {self.model.selected_screen} {size}   |   "
             f"crop {format_timestamp(self.model.crop_length_ms)} "
-            f"({frames} frames at {EXPORT_FPS} fps)"
+            f"({frames} frames at {EXPORT_FPS} fps)" + suffix
         )
 
     # Settings and shutdown --------------------------------------------------
@@ -668,6 +1010,8 @@ class EditorWindow(QMainWindow):
 
     def shutdown(self) -> None:
         self._timer.stop()
+        self._attach_timer.stop()
+        self._process_feedback_timer.stop()
         self.player.stop()
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
@@ -675,9 +1019,15 @@ class EditorWindow(QMainWindow):
         self.preview.view.wait()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._attach_timer.stop()
+        self._flush_crop()
+        # Closing without Process: the agents learn that nothing is to be done.
+        self._close_editor_session()
+        self._cancel_recording_session()
+        self._decline_attach_requests()  # a request that arrived during shutdown
         self.save_settings()
         self.shutdown()
         super().closeEvent(event)
 
 
-__all__ = ["EditorWindow", "TimeEdit", "WINDOW_TITLE"]
+__all__ = ["EditorWindow", "PROCESS_BUTTON_STYLE", "TimeEdit", "WINDOW_TITLE"]

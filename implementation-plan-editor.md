@@ -204,3 +204,17 @@ Odchylky od návrhu:
 - **Kurzor v exportu bez `sendcmd`.** Filtr `overlay` v FFmpeg 7.1 nepřijímá změny `x`/`y` za běhu (volby nejsou označené jako runtime), takže `sendcmd` příkazy ignoruje. Místo toho se poloha kurzoru vyjadřuje výrazem nad indexem snímku `n` – vyvážený strom `if(lt(n,N),a,b)` pro každou osu (`cursor_expressions`), vyhodnocovaný s `eval=frame`. Pro dlouhé nahrávky (desetitisíce klíčových snímků) jde graf přes `-filter_complex_script`, kratší inline. Režie je neměřitelná.
 - Zvuk se do výstupu bere `-ss`/`-t` jako vstupní volby (`-to` jako vstupní volba je v starších FFmpeg nedostupná); délka výstupu se drží `-t` a `apad`.
 - Nastavení editoru (`export_preset`, `export_crf`, `export_audio_bitrate_k`, `editor_draw_cursor`) jsou jen v `config.json`.
+
+## 14. Rozšíření v2 (7. 11. 2026, zadání `video-story-spec-v2.md`, potvrzeno autorem)
+
+| Část | Stav |
+| --- | --- |
+| Výchozí hodnoty | JPEG, kvalita 70 % (`core/config.py`); dokumentace a testy upraveny. |
+| Kreslení | výchozí nástroj obdélník (`DEFAULT_TOOL`), paleta 8 barev (`ui/palette.py`). |
+| Zoom náhledu | `editor/preview.py`: kolečko 1,25×/dílek ukotvené ke kurzoru, max 800 %, posun tažením, dvojklik = celý náhled; zoom přežívá změnu snímku, reset při jiném rozlišení; testy `tests/unit/test_editor_preview.py`. |
+| Video Editor ve Stop dialogu | `ui/stop_dialog.py` (čtvrtá volba), `host/controller.py` (`process(hand_to_editor=True)` → stav `editing`, `editor_opened`, `editor_failed`), `ui/control_window.py` (po zpracování `launch_editor(..., recording_session=id)`, při selhání `processed` s celým rozsahem). |
+| Process v editoru, crop.json | `editor/window.py`: zelené tlačítko (Ctrl+Enter), `crop.json` při každé změně (tažení s 300 ms debounce), obnovení při načtení, událost `process`/`closed` do souboru editor session, `finish_recording_session` / `cancel_recording_session`; připojení k běžícímu editoru přes požadavky v `.work/editor-requests/` (1 s). Testy `tests/unit/test_editor_process.py`. |
+| Rozhraní pro agenta | `Status.EDITING`, pole `crop` a `processed_via` ve `state.json`; `host/editor_session.py`; `edit --detach` vrací `editor_session` a `attached`; `wait --editor`; MCP `video_story_wait_editor`; `describe` vrací `crop` a `transcript_in_range`; `active_session` ignoruje `editing`, takže nové nahrávání může začít, zatímco editor čeká. Skilly `video-story` a `video-story-edit` aktualizovány. |
+| Ověření | 241 jednotkových testů; integrační `tests/integration/test_editor_flow.py` (Windows: Stop → Video Editor → skutečný proces editoru → zavření křížkem → `cancelled`). |
+
+Rozhodnutí při implementaci: Process stisknutý nad jinou nahrávkou, než ke které patří nahrávací relace, ukončí relaci s cropem z jejího vlastního `crop.json` (crop zobrazené nahrávky jde jen do události editoru). Připojení k běžícímu editoru uzavře předchozí neodeslanou editor session a zruší neukončenou nahrávací relaci, aby dřívější agent nečekal navždy.

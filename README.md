@@ -11,8 +11,8 @@ Video Story is a plugin and skill for Claude Code, Codex and Claude Desktop (and
 ## How it works
 
 1. Say "Start Video Story" to your agent. A small window stays on top of other windows.
-2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (brush, rectangle, arrow, 16 colors) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
-3. Press **Stop** and choose **Process Recording**, **Continue Recording** or **Discard Recording**. Recording continues until you decide.
+2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (rectangle by default, brush, arrow, 8 colors) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
+3. Press **Stop** and choose **Process Recording**, **Video Editor** (process, then crop the recording in the editor and press its green **Process** button so the agent acts only on that range), **Continue Recording** or **Discard Recording**. Recording continues until you decide.
 4. The audio is transcribed on your CPU (Whisper small, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position and the drawings visible at that moment.
 5. Recordings older than the configured retention (30 days by default) are deleted when Video Story starts; **Settings** also offers **Open Folder** and **Delete All Recordings**.
 
@@ -21,9 +21,10 @@ Recording layout (`<recording_folder>/<YYYYMMDD-HHMMSS>/`):
 ```text
 manifest.json          screens, interval, format, audio, transcript summary
 audio.wav              16-bit PCM mono, device sample rate
+crop.json              {"start_ms", "end_ms"} chosen in the editor (absent = whole recording)
 transcript.txt         [HH:MM:SS.mmm --> HH:MM:SS.mmm] text
 transcript.json        {"language": "cs", "segments": [{"start_ms", "end_ms", "text"}]}
-frames/0_500_screen1.png   screenshot of screen1 at 500 ms
+frames/0_500_screen1.jpg   screenshot of screen1 at 500 ms (JPEG 70 % by default, PNG optional)
 frames/0_500_screen1.json  {"time_ms": 500, "screen": "screen1", "cursor": {"screen": "screen2", "x": 412, "y": 388},
                             "drawings": [{"tool": "rectangle", "color": "#FF0000", "screen": "screen1",
                                           "from": {"screen": "screen1", "x": 300, "y": 450},
@@ -32,7 +33,7 @@ frames/0_500_screen1.json  {"time_ms": 500, "screen": "screen1", "cursor": {"scr
 
 ## Editing and exporting
 
-Say "Edit Video Story" and the **Video Story Editor** opens: a list of the stored recordings on the left (newest selected), a preview with Play/Stop and subtitles under it, and a timeline with one video track per screen plus the audio track. Zoom the timeline, drag the In/Out handles (or press `I`/`O`) to crop the start and the end, click a screen track to choose what is exported and press **Render**: the selected screen becomes an MP4 (H.264 + AAC, constant 24 fps, screen resolution, cursor drawn in) with an SRT subtitle file next to it. `video-story export --session <id> --screen screen2 --start-ms 10000 --end-ms 60000` does the same without the window. The editor is verified on Windows; Linux and macOS follow.
+Say "Edit Video Story" and the **Video Story Editor** opens: a list of the stored recordings on the left (newest selected), a preview with Play/Stop and subtitles under it, and a timeline with one video track per screen plus the audio track. Zoom the timeline, drag the In/Out handles (or press `I`/`O`) to crop the start and the end (the crop is remembered per recording in `crop.json`), click a screen track to choose what is exported and press **Render**: the selected screen becomes an MP4 (H.264 + AAC, constant 24 fps, screen resolution, cursor drawn in) with an SRT subtitle file next to it. The green **Process** button instead hands the cropped range to the agent that opened the editor (all screens), which then acts only on that part of the recording. The mouse wheel zooms the preview up to 800 % around the cursor. `video-story export --session <id> --screen screen2 --start-ms 10000 --end-ms 60000` does the same without the window. The editor is verified on Windows; Linux and macOS follow.
 
 ## Quick start
 

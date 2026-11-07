@@ -415,6 +415,7 @@ def test_create_server_registers_tools(config_file: Path, recording: SessionPath
         "video_story_start",
         "video_story_status",
         "video_story_wait",
+        "video_story_wait_editor",
     ]
     wait = next(t for t in tools if t.name == "video_story_wait")
     assert set(wait.input_schema["properties"]) == {"session_id", "timeout_s"}

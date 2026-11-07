@@ -40,6 +40,19 @@ person with the window on screen.
 | E5 | Render asks for the MP4 path (default `<recording folder>/<id>_<screenN>.mp4`), shows progress with Cancel, reports MP4 and SRT paths; the editor stays open | `tests/unit/test_editor.py` (Render passes the selected screen and crop to the export) | Render a cropped range of screen2; check the file and the SRT |
 | E6 | Platforms | Windows 11: unit tests, real export of recording 20261107-122147, editor window verified on screen (7 Nov 2026). Linux and macOS: unit and export tests run in CI; the editor window is not yet verified there (planned milestone E7). | |
 
+## Version 2 (crop handed to the agent, preview zoom, new defaults)
+
+| # | Criterion | Automated evidence | Manual check |
+| --- | --- | --- | --- |
+| V1 | New defaults: JPEG at 70 %; Settings shows them; everything works with JPEG frames | `tests/unit/test_core.py::test_config_defaults`, `tests/unit/test_ui.py::test_settings_dialog_order_and_values`, export/editor tests use JPEG and PNG | Record once, check `frames/*.jpg` |
+| V2 | Draw on Screen starts with the rectangle tool; 8-colour palette, red first | `tests/unit/test_overlay.py` (palette, default tool) | Press Draw on Screen, draw without choosing a tool |
+| V3 | Preview zoom: wheel zooms around the cursor up to 800 %, zoom-out snaps to fit, drag pans, double-click resets; cursor/drawings stay aligned; export unaffected | `tests/unit/test_editor_preview.py` | Zoom into a corner of the preview, play, switch screens |
+| V4 | Stop dialog offers Video Editor: the recording is processed and the editor opens with it; the session is `editing` and `wait` keeps waiting | `tests/unit/test_ui.py::test_video_editor_choice_processes_and_hands_over`, `..._falls_back_to_processed`, `tests/unit/test_editor_launcher.py` (attach request to a running editor) | Record, Stop, Video Editor |
+| V5 | Green Process in the editor: crop saved, session `processed` with `crop`, the agent acts only on that range; `describe` returns `transcript_in_range` | `tests/unit/test_editor_process.py`, `tests/unit/test_editor_session.py` (events, finish/cancel, describe) | Crop, press Process, watch the agent use only that part |
+| V6 | Standalone editor: the agent waits on `wait --editor`; Process sends session id and crop; closing without Process sends `closed` and the agent does nothing | `tests/unit/test_editor_session.py::test_editor_session_events_and_wait`, `tests/unit/test_editor_process.py` | "Edit Video Story", pick an older recording, Process; then repeat and close instead |
+| V7 | Closing the editor without Process after Video Editor cancels the session (recording kept) | `tests/unit/test_editor_session.py::test_recording_session_finish_and_cancel`, `tests/unit/test_editor_process.py` | Record, Stop, Video Editor, close the editor |
+| V8 | Crop is stored in `crop.json` on every change and restored when the recording is reopened | `tests/unit/test_editor_process.py`, `tests/unit/test_editor_session.py::test_crop_round_trip_and_clamping` | Crop, close the editor, reopen it |
+
 ### Manual editor script (5 minutes)
 
 1. In the agent: "Edit Video Story". The editor opens; the newest recording is selected.

@@ -57,8 +57,8 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | --- | --- | --- |
 | `recording_folder` | `~/Videos/VideoStory` | where recordings are stored (`.work/` inside it holds recordings in progress) |
 | `capture_interval_ms` | 500 | screenshot interval, 1 to 1000 ms |
-| `image_format` | `png` | `png` or `jpeg` |
-| `jpeg_quality` | 85 | 20 to 100, used for JPEG only |
+| `image_format` | `jpeg` | `jpeg` or `png` |
+| `jpeg_quality` | 70 | 20 to 100, used for JPEG only |
 | `audio_input` | `null` | device name; `null` means the system default input |
 | `auto_stop_minutes` | 120 | recording stops and is processed automatically after this time |
 | `retention_days` | 30 | recordings older than this (by their start time) are deleted when the control window starts, 1 to 3650 |
@@ -164,6 +164,8 @@ Editor and export:
 ```bash
 uv run video-story edit                                   # opens the Video Story Editor (newest recording selected)
 uv run video-story export --session <id> --screen screen1 # MP4 + SRT without the window
+uv run video-story edit --detach                          # agents: returns editor_session, then
+uv run video-story wait --editor <editor_session>         # ... waits for the green Process button
 ```
 
 ```bash

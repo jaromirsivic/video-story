@@ -88,7 +88,7 @@ def _session_paths(args: argparse.Namespace, cfg: Config) -> SessionPaths:
             return resolve_session(cfg, args.session)
         except SessionError as exc:
             raise CliError(exc.code, str(exc)) from exc
-    running = active_session(cfg)
+    running = active_session(cfg, include_editing=True)
     if running is not None:
         return running[0]
     raise CliError("NO_SESSION", "no active session; pass --session ID", EXIT_USAGE)
@@ -204,6 +204,13 @@ def cmd_ui(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.host.runner import SessionError, wait_for_session
 
+    if getattr(args, "editor", None):
+        from video_story.host.editor_session import wait_for_editor
+
+        path = Path(args.editor).expanduser()
+        if not path.exists():
+            raise CliError("UNKNOWN_EDITOR_SESSION", f"no editor session file {path}")
+        return wait_for_editor(path, timeout_s=args.timeout)
     cfg = _load(args)
     paths = _session_paths(args, cfg)
     try:
@@ -338,10 +345,15 @@ def cmd_edit(args: argparse.Namespace) -> dict[str, Any]:
     cfg = _load(args)
     try:
         if args.detach:
-            return launch_editor(cfg, args.session, _config_file(args))
+            return launch_editor(cfg, args.session, _config_file(args), args.recording_session)
         from video_story.editor.app import run_editor
 
-        code = run_editor(args.session, _config_file(args))
+        code = run_editor(
+            args.session,
+            _config_file(args),
+            editor_session=Path(args.editor_session) if args.editor_session else None,
+            recording_session=args.recording_session,
+        )
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
     return {"session_id": args.session, "exit_code": code}
@@ -430,6 +442,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("wait", help="wait until a session is final or the timeout elapses")
     p.add_argument("--session", help="session id or recording directory (default: active)")
+    p.add_argument(
+        "--editor", help="editor session file from `edit --detach`: wait for Process / close"
+    )
     p.add_argument("--timeout", type=float, default=240.0, help="seconds (default 240)")
     p.set_defaults(func=cmd_wait)
 
@@ -473,6 +488,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("edit", help="open the Video Story Editor (agents: use --detach)")
     p.add_argument("--detach", action="store_true", help="start the editor and return at once")
     p.add_argument("--session", help="recording to select (default: the newest)")
+    p.add_argument("--editor-session", help=argparse.SUPPRESS)  # internal: event file
+    p.add_argument("--recording-session", help=argparse.SUPPRESS)  # internal: editing session
     p.set_defaults(func=cmd_edit)
 
     p = sub.add_parser("config", help="read or change config.json")

@@ -50,9 +50,9 @@ def overlay(qtbot):
 
 
 def test_palette_has_16_unique_colors_and_red_first():
-    assert len(PALETTE) == 16
-    assert len({c.hex.upper() for c in PALETTE}) == 16
-    assert len({c.name for c in PALETTE}) == 16
+    assert len(PALETTE) == 8
+    assert len({c.hex.upper() for c in PALETTE}) == 8
+    assert len({c.name for c in PALETTE}) == 8
     assert PALETTE[0] == DEFAULT_COLOR == PaletteColor("Red", "#FF0000")
     assert DEFAULT_COLOR.rgb == (255, 0, 0)
     for entry in PALETTE:
@@ -79,7 +79,7 @@ def test_one_window_per_screen(overlay):
 
 
 def test_set_tool_and_color(overlay):
-    assert overlay.tool is Tool.BRUSH
+    assert overlay.tool is Tool.RECTANGLE  # rectangle is the default tool
     assert overlay.color == QColor("#FF0000")
     overlay.set_tool(Tool.ARROW)
     assert overlay.tool is Tool.ARROW
@@ -91,6 +91,7 @@ def test_set_tool_and_color(overlay):
 
 def test_brush_drag_adds_polyline(overlay):
     window = overlay.windows[0]
+    overlay.set_tool(Tool.BRUSH)
     drag(window, [(10, 10), (20, 15), (30, 30), (45, 60)])
     shapes = overlay.shapes()
     assert len(shapes) == 1
@@ -127,6 +128,7 @@ def test_zero_size_rectangle_is_discarded(overlay):
 
 def test_undo_and_clear(overlay):
     window = overlay.windows[0]
+    overlay.set_tool(Tool.BRUSH)
     drag(window, [(10, 10), (20, 20)])
     overlay.set_tool(Tool.RECTANGLE)
     drag(window, [(30, 30), (60, 60)])

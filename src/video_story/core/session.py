@@ -38,6 +38,7 @@ UI_LOG_FILE_NAME = "ui.log"
 MANIFEST_FILE_NAME = "manifest.json"
 TRANSCRIPT_TXT_NAME = "transcript.txt"
 TRANSCRIPT_JSON_NAME = "transcript.json"
+CROP_FILE_NAME = "crop.json"
 
 # Files that stay in the work directory when a recording is finalised or discarded.
 WORK_ONLY_FILES = frozenset({STATE_FILE_NAME, LOCK_FILE_NAME, UI_LOG_FILE_NAME})
@@ -49,6 +50,7 @@ class Status(StrEnum):
     READY = "ready"  # window open, not recording yet
     RECORDING = "recording"
     PROCESSING = "processing"  # transcribing
+    EDITING = "editing"  # processed, the editor is open; waiting for Process / close
     PROCESSED = "processed"  # final: recording folder ready for the agent
     DISCARDED = "discarded"  # final: user discarded the recording
     CANCELLED = "cancelled"  # final: window closed without recording
@@ -130,6 +132,9 @@ class SessionPaths:
 
     def transcript_json_path(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / TRANSCRIPT_JSON_NAME
+
+    def crop_path(self, base: Path | None = None) -> Path:
+        return (base or self.current_dir) / CROP_FILE_NAME
 
     @property
     def state_path(self) -> Path:
@@ -220,6 +225,8 @@ class SessionState:
     progress: float | None = None  # 0..1 during processing
     message: str | None = None  # human readable detail (errors, auto stop, ...)
     error_code: str | None = None
+    crop: dict[str, int] | None = None  # {"start_ms", "end_ms"} the agent should act on
+    processed_via: str | None = None  # "stop_dialog" | "editor"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -277,6 +284,7 @@ def list_sessions(recording_folder: Path) -> list[SessionPaths]:
 __all__ = [
     "AUDIO_16K_FILE_NAME",
     "AUDIO_FILE_NAME",
+    "CROP_FILE_NAME",
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",
     "LOG_FILE_NAME",

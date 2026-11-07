@@ -466,6 +466,19 @@ def tool_edit(session: str | None = None, config_file: Path | None = None) -> di
     return _guard(lambda: launch_editor(_load(config_file), session, config_file))
 
 
+def tool_wait_editor(editor_session: str, timeout_s: float = 60) -> dict[str, Any]:
+    """Wait for the editor's Process / close event; mirror of ``wait --editor``."""
+    from video_story.host.editor_session import wait_for_editor
+
+    path = Path(editor_session).expanduser()
+    if not path.exists():
+        return _error("UNKNOWN_EDITOR_SESSION", f"no editor session file {path}")
+    result = _guard(lambda: wait_for_editor(path, clamp_timeout(timeout_s)))
+    if result.get("timed_out"):
+        result["hint"] = "call video_story_wait_editor again until the event is process or closed"
+    return result
+
+
 def tool_doctor(config_file: Path | None = None) -> dict[str, Any]:
     """Environment diagnostics (ffmpeg, whisper model, screens, audio)."""
     try:
@@ -499,8 +512,10 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         session_id: str, timeout_s: float = 60, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Wait until the session is final (processed, discarded, cancelled or failed) or
-        timeout_s (1..240) elapses; when "timed_out" is true call it again. A processed
-        session carries the paths of manifest, transcript and frames."""
+        timeout_s (1..240) elapses; when "timed_out" is true call it again. Status
+        "editing" means the user is cropping the recording in the editor: keep waiting.
+        A processed session carries the paths of manifest, transcript and frames and
+        "crop" {start_ms, end_ms}: act only on that part of the recording."""
         timeout = clamp_timeout(timeout_s)
 
         async def progress(elapsed: float, message: str) -> None:
@@ -526,8 +541,9 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         return tool_status(session_id, config_file)
 
     def video_story_describe(session_id: str) -> dict[str, Any]:
-        """Paths, manifest content (screens, duration, capture interval) and the full
-        transcript text of a processed recording."""
+        """Paths, manifest content (screens, duration, capture interval), the full
+        transcript text, the stored crop {start_ms, end_ms} and transcript_in_range
+        (only the segments inside the crop) of a processed recording."""
         return tool_describe(session_id, config_file)
 
     def video_story_get_transcript(session_id: str, format: str = "text") -> dict[str, Any]:
@@ -612,11 +628,23 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
         """Open the Video Story Editor window for the user: a list of the stored
         recordings, a preview with subtitles, a timeline per screen with In/Out crop
-        handles and a Render button that writes an MP4 (+ SRT). session_id preselects
-        a recording (default: the newest). Returns at once; the user works in the
-        window and nothing comes back. ALREADY_RUNNING: the editor is already open;
-        NO_RECORDINGS: nothing to edit yet."""
+        handles, a Render button (MP4 + SRT) and a green Process button. session_id
+        preselects a recording (default: the newest). Returns at once with
+        editor_session: then call video_story_wait_editor with it until the user
+        presses Process (event "process" with session_id and crop {start_ms, end_ms}:
+        act only on that range of the recording) or closes the window (event "closed":
+        do nothing). An already open editor is reused (attached). NO_RECORDINGS:
+        nothing to edit yet."""
         return tool_edit(session_id, config_file)
+
+    async def video_story_wait_editor(
+        editor_session: str, timeout_s: float = 60, ctx: Context | None = None
+    ) -> dict[str, Any]:
+        """Wait until the editor opened by video_story_edit reports event "process"
+        (the user pressed Process: session_id and crop {start_ms, end_ms} tell which
+        recording and which part to act on) or "closed" (nothing to do), or until
+        timeout_s (1..240) elapses ("timed_out": call again)."""
+        return await anyio.to_thread.run_sync(lambda: tool_wait_editor(editor_session, timeout_s))
 
     def video_story_doctor() -> dict[str, Any]:
         """Check the environment: Python, platform support, FFmpeg, whisper model, screens
@@ -633,6 +661,7 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     server.add_tool(video_story_config)
     server.add_tool(video_story_export)
     server.add_tool(video_story_edit)
+    server.add_tool(video_story_wait_editor)
     server.add_tool(video_story_doctor)
     return server
 
@@ -675,6 +704,7 @@ __all__ = [
     "tool_describe",
     "tool_doctor",
     "tool_edit",
+    "tool_wait_editor",
     "tool_export",
     "tool_get_frame",
     "tool_get_transcript",

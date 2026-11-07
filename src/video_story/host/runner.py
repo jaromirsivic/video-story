@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from video_story.core.config import Config, config_path
+from video_story.core.crop import read_crop
 from video_story.core.cursor import cursor_from_json
 from video_story.core.manifest import Manifest, read_manifest
 from video_story.core.naming import FrameName, parse_frame_filename
@@ -31,6 +32,7 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
+from video_story.core.transcript import format_segment_line, read_transcript
 from video_story.platform.process import gui_python, pid_alive, spawn_detached
 
 log = logging.getLogger(__name__)
@@ -61,14 +63,23 @@ def resolve_session(config: Config, session: str) -> SessionPaths:
     raise SessionError("INVALID_SESSION", f"not a session id or recording directory: {session}")
 
 
-def active_session(config: Config) -> tuple[SessionPaths, SessionState] | None:
-    """A session whose window is still open (non-final state and live process)."""
+def active_session(
+    config: Config, include_editing: bool = False
+) -> tuple[SessionPaths, SessionState] | None:
+    """A session whose window is still open (non-final state and live process).
+
+    ``editing`` sessions belong to the editor, not to a control window: they are
+    skipped by default so that a new recording can start while the editor waits for
+    Process; ``include_editing`` returns them too (default session for ``wait`` etc.).
+    """
     for paths in list_sessions(config.recording_folder):
         if not paths.state_path.exists():
             continue
         try:
             state = read_state(paths.state_path)
         except RuntimeError:
+            continue
+        if state.status is Status.EDITING and not include_editing:
             continue
         if not state.status.final and pid_alive(state.pid):
             return paths, state
@@ -146,9 +157,20 @@ def session_status(paths: SessionPaths) -> dict[str, Any]:
     if not state.status.final and state.pid and not pid_alive(state.pid):
         age = time.time() - paths.state_path.stat().st_mtime
         if state.pid > 0 or age > STARTUP_GRACE_S:
-            state.status = Status.FAILED
-            state.error_code = "WINDOW_EXITED"
-            state.message = "The control window process ended unexpectedly."
+            if state.status is Status.EDITING:
+                # The editor ended without Process or close (crash, killed at start):
+                # the recording is complete, so hand the whole range to the agent.
+                duration = state.recorded_duration_ms or 0
+                state.status = Status.PROCESSED
+                state.crop = {"start_ms": 0, "end_ms": duration}
+                state.processed_via = "stop_dialog"
+                state.message = (
+                    "The editor process ended without Process; act on the whole recording."
+                )
+            else:
+                state.status = Status.FAILED
+                state.error_code = "WINDOW_EXITED"
+                state.message = "The control window process ended unexpectedly."
             write_state(paths.state_path, state)
             data = state.to_dict()
     data["state_file"] = str(paths.state_path)
@@ -336,11 +358,25 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
         "transcript_json": str(paths.transcript_json_path(base)),
         "frames_dir": str(paths.frames_dir(base)),
     }
+    duration_ms = 0
     if manifest_path.exists():
         data["manifest_content"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+        duration_ms = int(data["manifest_content"].get("recorded_duration_ms") or 0)
+    crop = read_crop(paths.crop_path(base), duration_ms)
+    data["crop"] = crop.to_dict()
     txt = paths.transcript_txt_path(base)
     if txt.exists():
         data["transcript"] = txt.read_text(encoding="utf-8")
+    json_path = paths.transcript_json_path(base)
+    if json_path.exists():
+        try:
+            transcript = read_transcript(json_path)
+        except (OSError, ValueError, KeyError):
+            transcript = None
+        if transcript is not None:
+            segments = transcript.segments_in_range(crop.start_ms, crop.end_ms)
+            lines = [format_segment_line(s) for s in segments]
+            data["transcript_in_range"] = "\n".join(lines) + ("\n" if lines else "")
     return data
 
 

@@ -23,22 +23,36 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
 <skill-dir>/scripts/video-story-edit.sh edit --detach
 ```
 
-## 2. Open the editor ("Edit Video Story")
+## 2. Open the editor ("Edit Video Story") and wait for Process
 
 1. Run `edit --detach`. Add `--session <id>` when the user named a recording (ids look
    like `20261107-122147`; `sessions` lists them). Without it the newest recording is
-   selected.
-2. Tell the user in one line that the Video Story Editor is open. Do not wait for it:
-   the user works in the window (play, crop, pick a screen, Render) and the result is a
-   file they chose; nothing comes back to you.
-3. `ALREADY_RUNNING` means the editor window is already open; say so.
+   selected. The result holds `editor_session` (a file path). If an editor was already
+   open, it is reused (`attached` is true) and loads the recording.
+2. Tell the user in one line that the editor is open and that you will act once they
+   press the green **Process** button.
+3. Loop until the event is `process` or `closed`:
+
+   ```text
+   <launcher> wait --editor <editor_session> --timeout 240
+   ```
+
+   `timed_out` true: call it again. Event `process`: the result carries `session_id` and
+   `crop` `{start_ms, end_ms}`; run `describe --session <session_id>` and act on
+   `transcript_in_range` (only the speech inside the crop) and on frames inside the
+   range (`frames --at <ms>` with times between `start_ms` and `end_ms`), following the
+   same rules as the video-story skill. The crop applies to every screen. Event
+   `closed`: the user closed the editor without Process; say so in one line and do
+   nothing else.
 4. `NO_RECORDINGS` means there is nothing to edit yet; suggest recording with Video Story.
 
 What the user can do in the window: select a recording on the left; press Space to
-play (subtitles under the preview, toggle with the Subtitles box); drag the In/Out
-handles on the timeline or press `I`/`O` at the playhead to crop (one crop for all
-screens); click a screen track to choose what is previewed and exported; press
-**Render** (Ctrl+R), choose the MP4 path, wait for the progress dialog.
+play (subtitles under the preview, toggle with the Subtitles box; the mouse wheel zooms
+the preview up to 800 %); drag the In/Out handles on the timeline or press `I`/`O` at
+the playhead to crop (one crop for all screens, remembered per recording in
+`crop.json`); click a screen track to choose what is previewed and exported; press
+**Render** (Ctrl+R) for an MP4, or the green **Process** (Ctrl+Enter) to hand the
+cropped range to you.
 
 ## 3. Export without the window
 

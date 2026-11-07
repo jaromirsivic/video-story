@@ -133,10 +133,15 @@ class SessionController:
             self.summary = self.recorder.stop()
         return self.summary
 
-    def process(self, progress: ProgressCallback | None = None) -> Path:
+    def process(
+        self, progress: ProgressCallback | None = None, hand_to_editor: bool = False
+    ) -> Path:
         """Stop, transcribe and finalise. Blocking: run in a worker thread.
 
-        Returns the final recording directory.
+        Returns the final recording directory. With ``hand_to_editor`` the session ends
+        in the non-final ``editing`` state instead of ``processed``: the window then
+        opens the editor (:meth:`editor_opened`) or, when that fails,
+        :meth:`editor_failed` finishes the session with the whole range.
         """
         from video_story.transcribe.pipeline import transcribe_recording
 
@@ -180,19 +185,51 @@ class SessionController:
                 recording_dir=str(self.paths.work_dir),
             )
             raise
-        self._set_status(
-            Status.PROCESSED,
-            "Recording processed; transcript and frames are ready.",
-            progress=1.0,
+        duration = summary.recorded_duration_ms
+        paths_fields = dict(
             recording_dir=str(final_dir),
             manifest=str(self.paths.manifest_path(final_dir)),
             transcript_txt=str(self.paths.transcript_txt_path(final_dir)),
             transcript_json=str(self.paths.transcript_json_path(final_dir)),
             frames_dir=str(self.paths.frames_dir(final_dir)),
-            recorded_duration_ms=summary.recorded_duration_ms,
+            recorded_duration_ms=duration,
         )
+        if hand_to_editor:
+            self._set_status(
+                Status.EDITING,
+                "Recording processed; opening the Video Story Editor (waiting for Process).",
+                progress=1.0,
+                **paths_fields,
+            )
+        else:
+            self._set_status(
+                Status.PROCESSED,
+                "Recording processed; transcript and frames are ready.",
+                progress=1.0,
+                crop={"start_ms": 0, "end_ms": duration},
+                processed_via="stop_dialog",
+                **paths_fields,
+            )
         self.recorder = None
         return final_dir
+
+    def editor_opened(self, editor_pid: int) -> None:
+        """The editor process now owns the ``editing`` session (liveness by its pid)."""
+        self._set_status(
+            Status.EDITING,
+            "Video Story Editor open; waiting for the user to press Process.",
+            pid=editor_pid,
+        )
+
+    def editor_failed(self, message: str) -> None:
+        """The editor could not be opened: finish as processed with the whole range."""
+        duration = self.state.recorded_duration_ms or 0
+        self._set_status(
+            Status.PROCESSED,
+            f"Editor could not be opened ({message}); act on the whole recording.",
+            crop={"start_ms": 0, "end_ms": duration},
+            processed_via="stop_dialog",
+        )
 
     def discard(self) -> None:
         """Stop and delete the current recording; the session returns to READY."""

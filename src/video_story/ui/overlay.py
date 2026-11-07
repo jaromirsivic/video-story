@@ -7,8 +7,8 @@ the drawing is part of the composited screen and therefore shows up in screensho
 taken by ``mss``. Drawing is a mode of its own: while the overlay is shown, clicks do
 not reach the applications below it.
 
-A small floating toolbar on the primary screen offers the tools, the 16-color
-palette and Undo / Clear / Close. Keyboard shortcuts on the overlay windows:
+A small floating toolbar on the primary screen offers the tools (rectangle is the
+default), the 8-color palette and Undo / Clear / Close. Keyboard shortcuts on the overlay windows:
 ``Esc`` close, ``C`` clear, ``Ctrl+Z`` undo, ``B`` / ``R`` / ``A`` select a tool.
 
 All geometry is kept in Qt logical coordinates of the window the shape was drawn in;
@@ -63,6 +63,9 @@ class Tool(StrEnum):
     BRUSH = "brush"
     RECTANGLE = "rectangle"
     ARROW = "arrow"
+
+
+DEFAULT_TOOL = Tool.RECTANGLE  # the tool selected when the overlay is created
 
 
 @dataclass
@@ -405,7 +408,7 @@ class OverlayToolbar(QWidget):
             self._swatches[entry.hex.upper()] = swatch
         root.addLayout(grid)
 
-        self.set_tool(Tool.BRUSH)
+        self.set_tool(DEFAULT_TOOL)
         self.set_color(DEFAULT_COLOR.hex)
 
     def set_tool(self, tool: Tool) -> None:
@@ -437,7 +440,7 @@ class DrawingOverlay(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._tool = Tool.BRUSH
+        self._tool = DEFAULT_TOOL
         self._palette_color: PaletteColor | None = DEFAULT_COLOR
         self._color = QColor(DEFAULT_COLOR.hex)
         self._windows: list[OverlayWindow] = []
@@ -630,6 +633,7 @@ class DrawingOverlay(QObject):
 
 __all__ = [
     "ARROW_HEAD_LENGTH",
+    "DEFAULT_TOOL",
     "STROKE_WIDTH",
     "DrawingOverlay",
     "OverlayToolbar",

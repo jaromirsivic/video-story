@@ -10,12 +10,13 @@ from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QPushButton, QVBoxLa
 
 class StopChoice(Enum):
     PROCESS = "process"
+    EDITOR = "editor"  # process, then open the recording in the Video Story Editor
     CONTINUE = "continue"
     DISCARD = "discard"
 
 
 class StopDialog(QDialog):
-    """Three choices. Recording keeps running while this dialog is open."""
+    """Four choices. Recording keeps running while this dialog is open."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -25,19 +26,27 @@ class StopDialog(QDialog):
         self.choice: StopChoice = StopChoice.CONTINUE
 
         layout = QVBoxLayout(self)
-        info = QLabel("Recording continues until you choose Process Recording or discard it.")
+        info = QLabel(
+            "Recording continues until you choose Process Recording, Video Editor or discard it."
+        )
         info.setWordWrap(True)
         layout.addWidget(info)
 
         self.process_button = QPushButton("Process Recording")
         self.process_button.setToolTip("Stop recording and transcribe the audio")
         self.process_button.setDefault(True)
+        self.editor_button = QPushButton("Video Editor")
+        self.editor_button.setToolTip(
+            "Stop recording, transcribe the audio and open the recording in the Video Story "
+            "Editor to crop it before the agent processes it"
+        )
         self.continue_button = QPushButton("Continue Recording")
         self.continue_button.setToolTip("Close this dialog and keep recording")
         self.discard_button = QPushButton("Discard Recording")
         self.discard_button.setToolTip("Delete all files of this recording")
         for button, choice in (
             (self.process_button, StopChoice.PROCESS),
+            (self.editor_button, StopChoice.EDITOR),
             (self.continue_button, StopChoice.CONTINUE),
             (self.discard_button, StopChoice.DISCARD),
         ):

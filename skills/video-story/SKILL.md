@@ -41,18 +41,24 @@ Loop until `final` is `true`:
 Each call returns after at most 240 s with the current `status` and `timed_out`. Call it
 again when `timed_out` is true. Do not start other work while waiting; the user is
 recording. Statuses: `ready` (window open), `recording`, `processing` (transcribing),
-`processed` (done), `cancelled` (window closed without a recording), `failed` (see
+`editing` (the user chose **Video Editor** after Stop and is cropping the recording in
+the editor; keep waiting), `processed` (done), `cancelled` (window closed without a
+recording, or the editor was closed without Process: do nothing), `failed` (see
 `message` and `recording.log` in the work folder).
 
-The user can press **Stop**, then choose **Process Recording**, **Continue Recording**
-or **Discard Recording** (discarding returns the window to the Record state; the same
-session continues). Recording also stops automatically after the configured
+The user can press **Stop**, then choose **Process Recording**, **Video Editor**
+(process, then crop in the editor and press its green **Process** button),
+**Continue Recording** or **Discard Recording** (discarding returns the window to the
+Record state; the same session continues). Recording also stops automatically after the configured
 auto-stop time (default 2 hours) and is then processed.
 
 ## 4. Read the material (status `processed`)
 
-The final result holds `recording_dir`, `manifest`, `transcript_txt`, `transcript_json`
-and `frames_dir`. Read `transcript_txt` first. Lines look like:
+The final result holds `recording_dir`, `manifest`, `transcript_txt`, `transcript_json`,
+`frames_dir` and **`crop`** `{start_ms, end_ms}`: the part of the recording the user wants
+you to act on (the whole recording unless they cropped it in the editor). Act only on
+speech and frames inside that range; `describe` returns `transcript_in_range` with just
+those segments. Read the transcript first. Lines look like:
 
 ```text
 [00:00:03.480 --> 00:00:07.120] And here, where my cursor is, add a button.
