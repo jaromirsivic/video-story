@@ -159,7 +159,12 @@ class SessionController:
         def _progress(fraction: float, text: str) -> None:
             self.state.progress = max(0.0, min(1.0, fraction))
             self.state.message = text
-            self._write_state()
+            try:
+                self._write_state()
+            except OSError as exc:
+                # Progress is advisory: an agent holding state.json open (Windows) must
+                # never turn a finished transcription into a failed recording.
+                log.warning("progress not written to state.json: %s", exc)
             if progress:
                 progress(fraction, text)
 

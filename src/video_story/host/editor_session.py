@@ -29,6 +29,7 @@ from typing import Any
 
 from video_story.core.config import Config
 from video_story.core.crop import Crop, read_crop
+from video_story.core.fileio import atomic_write_text, read_json_with_retry
 from video_story.core.session import (
     WORK_DIR_NAME,
     SessionPaths,
@@ -70,7 +71,7 @@ def write_editor_event(
     data: dict[str, Any] = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = read_json_with_retry(path)
         except (OSError, ValueError):
             data = {}
     data["event"] = event
@@ -87,7 +88,7 @@ def write_editor_event(
 def read_editor_event(path: Path) -> dict[str, Any]:
     """The current event; a dead editor (``pid`` recorded, process gone) counts as closed."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_with_retry(path)
     except FileNotFoundError:
         return {"event": "closed", "message": "editor session file is gone"}
     except (OSError, ValueError):
@@ -173,7 +174,7 @@ def take_attach_requests(config: Config) -> list[AttachRequest]:
         if entry.suffix != ".json":
             continue
         try:
-            data = json.loads(entry.read_text(encoding="utf-8"))
+            data = read_json_with_retry(entry, attempts=4)
             request = AttachRequest(
                 entry,
                 data.get("session_id"),
@@ -267,10 +268,7 @@ def cancel_recording_session(paths: SessionPaths) -> None:
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 
 __all__ = [

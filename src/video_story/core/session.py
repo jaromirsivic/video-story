@@ -20,12 +20,17 @@ import json
 import os
 import re
 import shutil
-import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from video_story.core.fileio import (
+    atomic_write_text,
+    read_json_with_retry,
+    replace_with_retry,
+)
 
 WORK_DIR_NAME = ".work"
 FRAMES_DIR_NAME = "frames"
@@ -195,14 +200,7 @@ def _replace_with_retry(src: Path, dst: Path, attempts: int = 10, delay: float =
     """``os.replace`` with retries: on Windows a file or directory cannot be renamed
     while it (or, for a directory, anything inside it) is open: log handlers, the
     search indexer, antivirus scanners."""
-    for attempt in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(delay)
+    replace_with_retry(src, dst, attempts=attempts, delay=delay)
 
 
 @dataclass
@@ -244,23 +242,17 @@ class SessionState:
 
 
 def write_state(path: Path, state: SessionState) -> None:
-    """Atomically write ``state.json``."""
+    """Atomically write ``state.json`` (retried while the agent holds the file open)."""
     state.updated_at = now_iso()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(state.to_dict(), indent=2) + "\n")
 
 
 def read_state(path: Path) -> SessionState:
-    """Read ``state.json``; tolerates a concurrent write by retrying once."""
-    last_error: Exception | None = None
-    for _ in range(3):
-        try:
-            return SessionState.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError, KeyError, ValueError) as exc:
-            last_error = exc
-    raise RuntimeError(f"cannot read state file {path}: {last_error}")
+    """Read ``state.json``; waits out a concurrent rewrite (see ``core.fileio``)."""
+    try:
+        return SessionState.from_dict(read_json_with_retry(path))
+    except (OSError, KeyError, ValueError) as exc:
+        raise RuntimeError(f"cannot read state file {path}: {exc}") from exc
 
 
 def find_session_paths(recording_folder: Path, session_id: str) -> SessionPaths:

@@ -407,6 +407,7 @@ Rozšíření ze 7. 11. 2026 (na žádost autora po prvním ručním ověření)
 - Výchozí hodnoty: Auto Stop Recording 120 min (dříve 30), Capture Interval 500 ms (dříve 250 ms podle zadání).
 - Oprava finalizace na Windows: oddělený okenní proces drží otevřený `ui.log`, proto se nahrávka přesouvá po položkách a `state.json`, `lock` i `ui.log` zůstávají v `.work/<id>`.
 - Editor nahrávek (Edit Video Story, export do MP4 + SRT): samostatný plán a stav v `implementation-plan-editor.md`.
+- Oprava 9. 11. 2026: na Windows selhával zápis `state.json` (WinError 5), když agent (Codex) soubor zrovna četl; sdílené JSON soubory se nyní zapisují i čtou přes `core/fileio.py` s opakováním a zápis průběhu nikdy neshodí zpracování.
 - Model přepisu změněn (7. 11. 2026, na žádost autora) z `ggml-small.bin` na **`ggml-large-v3-turbo-q5_0.bin`** (548 MB, ověřováno SHA-256 z Hugging Face); stažení přes `video-story setup`.
 
 ---

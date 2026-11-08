@@ -259,7 +259,33 @@ def test_process_runs_transcription_and_finishes(window, controller, monkeypatch
     assert state.processed_via == "stop_dialog"
 
 
-def _fake_transcription(monkeypatch):
+def test_process_survives_unwritable_progress(window, controller, monkeypatch, qtbot):
+    """A progress tick that cannot replace state.json (the agent holds it open on
+    Windows) is logged and skipped; the recording is still processed."""
+    import video_story.host.controller as ctl
+
+    _fake_transcription(monkeypatch, progress_fraction=0.5)
+    real_write_state = ctl.write_state
+    denied: list[float] = []
+
+    def flaky_write_state(path, state):
+        if state.status is Status.PROCESSING and state.progress == 0.5:
+            denied.append(state.progress)
+            raise PermissionError(13, "Access is denied")
+        real_write_state(path, state)
+
+    monkeypatch.setattr(ctl, "write_state", flaky_write_state)
+    window.record_button.click()
+    _auto_answer_stop(monkeypatch, StopChoice.PROCESS)
+    window.record_button.click()
+    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
+    assert denied == [0.5]
+    state = read_state(controller.paths.state_path)
+    assert state.status is Status.PROCESSED and state.progress == 1.0
+    assert (controller.paths.final_dir / "manifest.json").exists()
+
+
+def _fake_transcription(monkeypatch, progress_fraction: float | None = None):
     import video_story.transcribe.pipeline as pipeline_mod
     from video_story.core.manifest import TranscriptInfo
     from video_story.core.transcript import Segment, Transcript, write_transcript
@@ -271,6 +297,8 @@ def _fake_transcription(monkeypatch):
 
     def fake_transcribe(paths, config, *, base_dir=None, progress=None):
         base = base_dir or paths.work_dir
+        if progress and progress_fraction is not None:
+            progress(progress_fraction, "Transcribing audio")
         write_transcript(
             paths.transcript_txt_path(base), paths.transcript_json_path(base), Result().transcript
         )

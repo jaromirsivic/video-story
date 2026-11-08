@@ -17,6 +17,8 @@ from typing import Any, Literal
 
 from platformdirs import user_config_dir, user_videos_dir
 
+from video_story.core.fileio import atomic_write_text
+
 log = logging.getLogger(__name__)
 
 CONFIG_FILE_NAME = "config.json"
@@ -283,10 +285,7 @@ def load_config(path: Path | None = None) -> Config:
 def save_config(config: Config, path: Path | None = None) -> Path:
     """Write the configuration atomically and return the path used."""
     path = path or config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(config.to_json_dict(), indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(config.to_json_dict(), indent=2) + "\n")
     return path
 
 

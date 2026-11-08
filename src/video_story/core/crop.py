@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .fileio import atomic_write_text, read_json_with_retry
 from .session import now_iso
 
 log = logging.getLogger(__name__)
@@ -55,8 +56,7 @@ def read_crop(path: Path, duration_ms: int) -> Crop:
     if not path.exists():
         return Crop.whole(duration_ms)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        crop = Crop.from_dict(data)
+        crop = Crop.from_dict(read_json_with_retry(path))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         log.warning("ignoring unreadable %s: %s", path, exc)
         return Crop.whole(duration_ms)
@@ -65,11 +65,8 @@ def read_crop(path: Path, duration_ms: int) -> Crop:
 
 def write_crop(path: Path, crop: Crop) -> None:
     """Atomically store the crop (``start_ms``, ``end_ms``, ``updated_at``)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {**crop.to_dict(), "updated_at": now_iso()}
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 __all__ = ["Crop", "read_crop", "write_crop"]
