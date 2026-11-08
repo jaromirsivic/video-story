@@ -7,8 +7,10 @@ the drawing is part of the composited screen and therefore shows up in screensho
 taken by ``mss``. Drawing is a mode of its own: while the overlay is shown, clicks do
 not reach the applications below it.
 
-A small floating toolbar on the primary screen offers the tools (rectangle is the
-default), the 8-color palette and Undo / Clear / Close. Keyboard shortcuts on the overlay windows:
+A small floating toolbar (top-left of the primary screen at first; drag its title bar
+to move it, the cross closes drawing mode) offers the tools Rect / Arrow / Brush
+(rectangle is the default), Undo / Clear / Close and the 8-color palette. Keyboard
+shortcuts on the overlay windows:
 ``Esc`` close, ``C`` clear, ``Ctrl+Z`` undo, ``B`` / ``R`` / ``A`` select a tool.
 
 All geometry is kept in Qt logical coordinates of the window the shape was drawn in;
@@ -42,6 +44,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QGridLayout,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QToolButton,
     QVBoxLayout,
@@ -355,24 +358,50 @@ class OverlayToolbar(QWidget):
             " background: #E8F0FF; }"
             "QWidget#overlayToolbar QToolButton:checked {"
             " background: #FFD27F; border: 1px solid #A06000; }"
+            "QLabel#overlayToolbarTitle { color: #404040; font-weight: bold; }"
+            "QWidget#overlayToolbar QToolButton#overlayToolbarCross {"
+            " background: transparent; border: none; padding: 1px 6px; color: #404040; }"
+            "QWidget#overlayToolbar QToolButton#overlayToolbarCross:hover {"
+            " background: #E81123; color: #FFFFFF; }"
         )
 
         self._tool_buttons: dict[Tool, QToolButton] = {}
         self._swatches: dict[str, QToolButton] = {}
         self._current_hex = DEFAULT_COLOR.hex.upper()
+        self._drag_offset: QPoint | None = None
+        self.user_moved = False  # True once the user dragged the toolbar somewhere
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(6, 2, 6, 6)
         root.setSpacing(4)
+
+        # Title bar: drag it (or any free spot of the toolbar) to move the toolbar;
+        # the cross leaves drawing mode like Close.
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        title = QLabel("Drawing tools", self)
+        title.setObjectName("overlayToolbarTitle")
+        title.setToolTip("Drag to move the toolbar")
+        title.setCursor(Qt.CursorShape.SizeAllCursor)  # QLabel passes presses to the toolbar
+        header.addWidget(title, 1)
+        self.close_cross = QToolButton(self)
+        self.close_cross.setObjectName("overlayToolbarCross")
+        self.close_cross.setText("✕")
+        self.close_cross.setToolTip("Leave drawing mode (Esc)")
+        self.close_cross.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.close_cross.setAutoRaise(True)
+        self.close_cross.clicked.connect(self.close_requested.emit)
+        header.addWidget(self.close_cross)
+        root.addLayout(header)
 
         row = QHBoxLayout()
         row.setSpacing(4)
         group = QButtonGroup(self)
         group.setExclusive(True)
         for tool, label, tip in (
-            (Tool.BRUSH, "Brush", "Brush: freehand line (B)"),
             (Tool.RECTANGLE, "Rect", "Rectangle: drag from corner to corner (R)"),
             (Tool.ARROW, "Arrow", "Arrow: drag from tail to head (A)"),
+            (Tool.BRUSH, "Brush", "Brush: freehand line (B)"),
         ):
             button = QToolButton(self)
             button.setText(label)
@@ -410,6 +439,32 @@ class OverlayToolbar(QWidget):
 
         self.set_tool(DEFAULT_TOOL)
         self.set_color(DEFAULT_COLOR.hex)
+
+    # -- moving the toolbar ---------------------------------------------------------
+    # Clicks on buttons and swatches are consumed by them; a press anywhere else
+    # (title bar, margins, gaps) starts a drag.
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag_offset is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        self.move(event.globalPosition().toPoint() - self._drag_offset)
+        self.user_moved = True
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_offset is not None:
+            self._drag_offset = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def set_tool(self, tool: Tool) -> None:
         button = self._tool_buttons[tool]
@@ -480,9 +535,12 @@ class DrawingOverlay(QObject):
             window.raise_()
         toolbar = self._ensure_toolbar()
         primary = QGuiApplication.primaryScreen() or screens[0]
-        toolbar.setScreen(primary)
         toolbar.adjustSize()
-        toolbar.move(primary.geometry().topLeft() + QPoint(TOOLBAR_MARGIN, TOOLBAR_MARGIN))
+        # Keep the spot the user dragged the toolbar to, as long as it is still on a screen.
+        if not toolbar.user_moved or QGuiApplication.screenAt(toolbar.geometry().center()) is None:
+            toolbar.setScreen(primary)
+            toolbar.move(primary.geometry().topLeft() + QPoint(TOOLBAR_MARGIN, TOOLBAR_MARGIN))
+            toolbar.user_moved = False
         toolbar.show()
         toolbar.raise_()
         self._visible = True

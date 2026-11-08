@@ -27,6 +27,7 @@ WHISPER_SAMPLE_RATE = 16_000
 MIN_AUDIO_MS = 1100  # whisper.cpp rejects input shorter than 1000 ms; we pad with silence
 
 ProgressCallback = Callable[[float], None]
+SegmentCallback = Callable[[Segment], None]
 
 
 class TranscriptionError(RuntimeError):
@@ -45,8 +46,13 @@ class TranscriptionBackend(Protocol):
         language: str | None,
         threads: int,
         progress: ProgressCallback | None = None,
+        on_segment: SegmentCallback | None = None,
     ) -> Transcript:
-        """Transcribe a 16 kHz mono 16-bit WAV. ``language`` None/"auto" = detect."""
+        """Transcribe a 16 kHz mono 16-bit WAV. ``language`` None/"auto" = detect.
+
+        ``on_segment`` (when the backend can stream) receives every segment as soon as
+        whisper produces it, before the matching ``progress`` call.
+        """
         ...
 
 
@@ -136,6 +142,7 @@ class PyWhisperCppBackend:
         language: str | None,
         threads: int,
         progress: ProgressCallback | None = None,
+        on_segment: SegmentCallback | None = None,
     ) -> Transcript:
         model = self._load(threads)
         audio = load_wav16k(wav16k)
@@ -146,13 +153,18 @@ class PyWhisperCppBackend:
         lang = "auto" if _wants_auto(language) else language
         assert lang is not None
 
-        def on_segment(segment: Any) -> None:
+        def on_new_segment(segment: Any) -> None:
+            if on_segment is not None:
+                on_segment(
+                    Segment(int(segment.t0) * 10, int(segment.t1) * 10, str(segment.text).strip())
+                )
             if progress is not None and total_ms > 0:
                 progress(min(1.0, max(0.0, segment.t1 * 10 / total_ms)))
 
+        streaming = progress is not None or on_segment is not None
         raw_segments = model.transcribe(
             audio,
-            new_segment_callback=on_segment if progress is not None else None,
+            new_segment_callback=on_new_segment if streaming else None,
             n_threads=threads,
             language=lang,
             translate=False,
@@ -214,6 +226,7 @@ class WhisperCliBackend:
         language: str | None,
         threads: int,
         progress: ProgressCallback | None = None,
+        on_segment: SegmentCallback | None = None,  # whisper-cli reports only at the end
     ) -> Transcript:
         if not self.cli_path.is_file():
             raise TranscriptionError(f"whisper-cli not found: {self.cli_path}")

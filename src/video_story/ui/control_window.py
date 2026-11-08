@@ -367,8 +367,8 @@ class ControlWindow(QWidget):
         elapsed = format_timestamp(recorder.elapsed_ms)
         remaining = max(0, self.controller.config.auto_stop_ms - recorder.elapsed_ms)
         self.status_label.setText(
-            f"Recording {elapsed[:-4]}  |  {len(recorder.screens)} screen(s), "
-            f"{recorder.frame_count} frames  |  auto stop in {format_timestamp(remaining)[:-4]}"
+            f"Recording {elapsed[:-4]}  |  auto stop in {format_timestamp(remaining)[:-4]}  |  "
+            f"{len(recorder.screens)} screen(s), {recorder.frame_count} frames"
         )
 
     # Close ------------------------------------------------------------------

@@ -139,6 +139,54 @@ def test_record_then_continue_keeps_recording(window, controller, monkeypatch, q
     assert window.record_button.text() == "Stop"
 
 
+def test_status_line_order_while_recording(window, controller):
+    window.record_button.click()
+    text = window.status_label.text()
+    assert text.startswith("Recording ")
+    assert text.index("auto stop in") < text.index("screen(s)") < text.index("frames")
+
+
+def test_draw_icon_uses_button_text_color(qtbot):
+    from PySide6.QtGui import QColor
+
+    from video_story.ui.icons import draw_icon
+
+    image = draw_icon(24, QColor("#FFFFFF")).pixmap(24, 24).toImage()
+    opaque = [
+        image.pixelColor(x, y)
+        for x in range(24)
+        for y in range(24)
+        if image.pixelColor(x, y).alpha() == 255
+    ]
+    assert opaque and all(c.red() == c.green() == c.blue() == 255 for c in opaque)
+    # Bristle tip bottom-left, handle top-right.
+    assert image.pixelColor(5, 19).alpha() > 0 and image.pixelColor(19, 5).alpha() > 0
+    assert image.pixelColor(19, 19).alpha() == 0 and image.pixelColor(4, 4).alpha() == 0
+
+
+def test_progress_dialog_shows_position_line(qtbot):
+    from video_story.ui.progress_dialog import ELLIPSIS, ProgressDialog
+
+    dialog = ProgressDialog()
+    qtbot.addWidget(dialog)
+    dialog.show()
+    assert dialog.windowTitle() == "Transcribing Audio"
+    dialog.set_progress(0.05, "Transcribing audio, this may take a while")
+    assert dialog.message_label.text() == "Transcribing audio, this may take a while"
+    assert dialog.detail_label.isHidden()
+    dialog.set_progress(0.4, "Transcribing audio, this may take a while\n00:01:05  Hello there")
+    assert dialog.message_label.text() == "Transcribing audio, this may take a while"
+    assert dialog.detail_label.text() == "00:01:05  Hello there" + ELLIPSIS
+    assert not dialog.detail_label.isHidden() and dialog.bar.value() == 40
+    dialog.set_progress(
+        0.4, "Transcribing audio, this may take a while\n00:01:09  " + "word " * 200
+    )
+    shown = dialog.detail_label.text()
+    assert shown.startswith("00:01:09  word") and shown.endswith(ELLIPSIS) and len(shown) < 300
+    dialog.set_progress(0.98, "Writing transcript")
+    assert dialog.detail_label.isHidden()
+
+
 def test_discard_not_confirmed_keeps_files(window, controller, monkeypatch):
     window.record_button.click()
     answers = iter([(StopChoice.DISCARD, False), (StopChoice.CONTINUE, None)])

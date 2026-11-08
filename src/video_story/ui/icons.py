@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPixmap,
+    QPolygonF,
+)
 
 RECORD_RED = QColor("#E53935")
 STOP_RED = QColor("#C62828")
@@ -69,17 +78,37 @@ def settings_icon(size: int = 24) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
-def draw_icon(size: int = 24) -> QIcon:
+def _button_text_color() -> QColor:
+    """Text color of buttons in the current theme (white in dark mode, dark in light)."""
+    app = QGuiApplication.instance()
+    if app is None:
+        return QColor("#FFFFFF")
+    return QGuiApplication.palette().color(QPalette.ColorRole.ButtonText)
+
+
+def draw_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A paint brush (handle, ferrule, bristles) in the button text color."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
     def draw(p: QPainter, s: int) -> None:
-        pen = QPen(
-            INK, s * 0.11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin
+        p.translate(s / 2, s / 2)
+        p.rotate(45)  # handle to the top right, bristle tip to the bottom left
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        # Handle.
+        p.drawRoundedRect(QRectF(-s * 0.06, -s * 0.48, s * 0.12, s * 0.40), s * 0.06, s * 0.06)
+        # Ferrule (metal band), separated from handle and bristles by a small gap.
+        p.drawRect(QRectF(-s * 0.09, -s * 0.05, s * 0.18, s * 0.11))
+        # Bristles: a teardrop ending in a point.
+        bristles = QPainterPath(QPointF(-s * 0.11, s * 0.09))
+        bristles.cubicTo(
+            QPointF(-s * 0.13, s * 0.24), QPointF(-s * 0.04, s * 0.36), QPointF(0, s * 0.47)
         )
-        p.setPen(pen)
-        p.drawLine(QPointF(s * 0.22, s * 0.78), QPointF(s * 0.72, s * 0.28))
-        p.setPen(QPen(RECORD_RED, s * 0.11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(s * 0.72, s * 0.28), QPointF(s * 0.80, s * 0.20))
-        p.setPen(QPen(INK, s * 0.07, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(s * 0.18, s * 0.86), QPointF(s * 0.40, s * 0.86))
+        bristles.cubicTo(
+            QPointF(s * 0.04, s * 0.36), QPointF(s * 0.13, s * 0.24), QPointF(s * 0.11, s * 0.09)
+        )
+        bristles.closeSubpath()
+        p.drawPath(bristles)
 
     return QIcon(_pixmap(size, draw))
 

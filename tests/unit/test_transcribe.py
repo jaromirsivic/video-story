@@ -480,7 +480,11 @@ def test_pywhispercpp_backend_lazy_load_and_units(tmp_path: Path, monkeypatch):
     backend = wb.PyWhisperCppBackend(model_path)
     assert FakeModel.instances == [], "model is loaded lazily"
     progress: list[float] = []
-    t = backend.transcribe(wav, language="auto", threads=2, progress=progress.append)
+    streamed: list[Segment] = []
+    t = backend.transcribe(
+        wav, language="auto", threads=2, progress=progress.append, on_segment=streamed.append
+    )
+    assert streamed == [Segment(0, 1500, "Hello"), Segment(1500, 3000, "world")]
     t2 = backend.transcribe(wav, language="en", threads=2)
     assert len(FakeModel.instances) == 1, "model loaded once per backend"
     model = FakeModel.instances[0]
@@ -540,11 +544,14 @@ class FakeBackend:
         self.language = language
         self.calls: list[dict] = []
 
-    def transcribe(self, wav16k, *, language, threads, progress=None):
+    def transcribe(self, wav16k, *, language, threads, progress=None, on_segment=None):
         self.calls.append({"wav": wav16k, "language": language, "threads": threads})
         assert wav16k.exists()
         if progress:
             progress(0.5)
+            if on_segment:
+                on_segment(Segment(61_500, 63_000, "  hello   there "))
+            progress(0.75)
             progress(1.0)
         return Transcript(language=self.language, segments=list(self.segments))
 
@@ -594,10 +601,14 @@ def test_transcribe_recording_writes_files_and_progress(session):
     assert stored.model == "ggml-small" and stored.backend == "fake"
     fractions = [f for f, _ in events]
     assert fractions == sorted(fractions) and fractions[0] == 0.0 and fractions[-1] == 1.0
-    assert [m for _, m in events][:2] == ["Preparing audio", "Transcribing audio"]
-    assert "Writing transcript" in {m for _, m in events}
-    mid = [f for f, m in events if m == "Transcribing audio"]
-    assert all(0.05 <= f <= 0.98 for f in mid)
+    messages = [m for _, m in events]
+    t = pipeline.TRANSCRIBING_MESSAGE
+    assert messages[:3] == ["Preparing audio", t, t]
+    # After whisper produced a segment: its start time and text on a second line.
+    assert pipeline.TRANSCRIBING_MESSAGE + "\n00:01:01  hello there" in messages
+    assert "Writing transcript" in set(messages)
+    mid = [f for f, m in events if m.startswith(pipeline.TRANSCRIBING_MESSAGE)]
+    assert len(mid) == 4 and all(0.05 <= f <= 0.98 for f in mid)
 
 
 def test_transcribe_recording_uses_base_dir(session, tmp_path: Path):

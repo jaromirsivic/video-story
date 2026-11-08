@@ -267,3 +267,42 @@ def test_add_shape_programmatically(overlay):
     assert len(overlay.shapes()) == 1
     with pytest.raises(IndexError):
         overlay.add_shape(Shape(Tool.BRUSH, QColor("#FF0000"), [QPointF(1, 1)], 99))
+
+
+def test_toolbar_order_cross_and_drag(overlay, qtbot):
+    from PySide6.QtWidgets import QPushButton, QToolButton
+
+    toolbar = overlay._toolbar
+    assert toolbar is not None
+    tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
+    assert tools == ["Rect", "Arrow", "Brush"]
+    actions = [b.text() for b in toolbar.findChildren(QPushButton)]
+    assert actions == ["Undo", "Clear", "Close"]
+
+    # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
+    start = toolbar.pos()
+    grab = QPointF(20, 8)
+    for kind, delta, buttons in (
+        (QEvent.Type.MouseButtonPress, QPoint(0, 0), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, QPoint(150, 90), Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, QPoint(150, 90), Qt.MouseButton.NoButton),
+    ):
+        global_pos = QPointF(toolbar.mapToGlobal(grab.toPoint()) + delta - (toolbar.pos() - start))
+        event = QMouseEvent(
+            kind,
+            grab,
+            global_pos,
+            Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(toolbar, event)
+    assert toolbar.pos() == start + QPoint(150, 90) and toolbar.user_moved
+    overlay.hide()
+    overlay.show()
+    assert toolbar.pos() == start + QPoint(150, 90)
+
+    # The cross leaves drawing mode like Close.
+    with qtbot.waitSignal(overlay.closed, timeout=1000):
+        toolbar.close_cross.click()
+    assert not overlay.is_visible()

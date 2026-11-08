@@ -17,7 +17,13 @@ from pathlib import Path
 from video_story.core.config import Config
 from video_story.core.manifest import TranscriptInfo
 from video_story.core.session import SessionPaths
-from video_story.core.transcript import Transcript, normalize_segments, write_transcript
+from video_story.core.timeline import format_timestamp
+from video_story.core.transcript import (
+    Segment,
+    Transcript,
+    normalize_segments,
+    write_transcript,
+)
 
 from .ffmpeg import convert_to_16k_mono, ensure_ffmpeg
 from .whisper_backend import TranscriptionBackend, create_backend, wav_duration_ms
@@ -27,7 +33,22 @@ log = logging.getLogger(__name__)
 PROGRESS_CONVERT_END = 0.05
 PROGRESS_TRANSCRIBE_END = 0.98
 
+TRANSCRIBING_MESSAGE = "Transcribing audio, this may take a while"
+SEGMENT_PREVIEW_CHARS = 120  # the UI elides further to its width
+
 ProgressCallback = Callable[[float, str], None]
+
+
+def transcribing_message(last: Segment | None) -> str:
+    """Progress text while whisper runs: a fixed first line, then (once whisper has
+    produced a segment) ``HH:MM:SS  text`` of the latest segment on a second line, so
+    the user can see roughly how far the transcription got."""
+    if last is None:
+        return TRANSCRIBING_MESSAGE
+    text = " ".join(last.text.split())
+    if len(text) > SEGMENT_PREVIEW_CHARS:
+        text = text[:SEGMENT_PREVIEW_CHARS].rstrip()
+    return f"{TRANSCRIBING_MESSAGE}\n{format_timestamp(last.start_ms)[:-4]}  {text}"
 
 
 @dataclass
@@ -88,17 +109,24 @@ def transcribe_recording(
         convert_to_16k_mono(ffmpeg, audio, audio16k)
         try:
             audio_duration_ms = wav_duration_ms(audio16k)
-            report(PROGRESS_CONVERT_END, "Transcribing audio")
+            report(PROGRESS_CONVERT_END, transcribing_message(None))
             span = PROGRESS_TRANSCRIBE_END - PROGRESS_CONVERT_END
+            last_segment: list[Segment] = []  # latest segment whisper produced
+
+            def on_backend_segment(segment: Segment) -> None:
+                if segment.text.strip():
+                    last_segment[:] = [segment]
 
             def on_backend_progress(fraction: float) -> None:
-                report(PROGRESS_CONVERT_END + span * fraction, "Transcribing audio")
+                last = last_segment[0] if last_segment else None
+                report(PROGRESS_CONVERT_END + span * fraction, transcribing_message(last))
 
             transcript = backend.transcribe(
                 audio16k,
                 language="auto",
                 threads=config.whisper_threads,
                 progress=on_backend_progress if progress is not None else None,
+                on_segment=on_backend_segment if progress is not None else None,
             )
         finally:
             try:
