@@ -10,6 +10,8 @@ The window talks to the agent through the host-side helpers of
   status ``editing``. The window adopts it at start (its pid), **Process** finishes it
   (``processed`` with the crop, ``processed_via`` ``editor``) and closing without
   Process cancels it.
+* **Process** closes the window once the event went out: the work continues in the
+  agent.
 * Attach requests: a later ``edit --detach`` while this window runs writes a request
   file; a 1 s timer picks it up, loads the requested recording, adopts the new editor
   session / recording session and raises the window.
@@ -17,6 +19,10 @@ The window talks to the agent through the host-side helpers of
 The crop ``[In, Out]`` is stored next to the recording in ``crop.json`` on every change
 (handle drag - debounced to the end of the drag -, I/O keys, In/Out editors, Reset
 Crop) and restored when the recording is loaded again.
+
+The Edit button next to the subtitle opens :class:`SubtitleDialog` for the segment under
+the playhead; Save rewrites ``transcript.json`` and ``transcript.txt``, so the agent
+reads the corrected words.
 """
 
 from __future__ import annotations
@@ -80,6 +86,7 @@ from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import ItemRole, RecordingItem, RecordingsModel
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
+from .subtitle_dialog import SubtitleDialog
 from .timeline.model import TimelineModel
 from .timeline.view import TimelineView
 
@@ -292,6 +299,7 @@ class EditorWindow(QMainWindow):
         self.preview.go_in.connect(self.go_to_in)
         self.preview.go_out.connect(self.go_to_out)
         self.preview.step.connect(self.step_frames)
+        self.preview.edit_subtitle.connect(self.edit_subtitle)
         self.right_splitter.addWidget(self.preview)
 
         bottom = QWidget()
@@ -767,17 +775,58 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Rendered {result.output}")
         return result
 
+    # Subtitles --------------------------------------------------------------
+
+    def _subtitle_dialog(self, segment, duration_ms: int) -> SubtitleDialog:
+        return SubtitleDialog(segment, duration_ms, self)
+
+    def edit_subtitle(self) -> bool:
+        """Edit the segment shown as the subtitle at the playhead; True when saved."""
+        recording = self.recording
+        if recording is None:
+            return False
+        if self.player.playing:
+            self.toggle_play()
+        segment = recording.segment_at(self.model.playhead_ms)
+        if segment is None:
+            self._show_status_message("No subtitle at the playhead.")
+            return False
+        dialog = self._subtitle_dialog(segment, recording.duration_ms)
+        try:
+            if dialog.exec() != SubtitleDialog.DialogCode.Accepted:
+                return False
+            edited = dialog.segment()
+        finally:
+            dialog.deleteLater()
+        if edited is None or edited == segment:
+            return False
+        if self.recording is not recording:
+            return False  # another recording was loaded meanwhile
+        try:
+            recording.replace_segment(segment, edited)
+        except (OSError, ValueError) as exc:
+            log.warning("cannot save subtitle of %s: %s", recording.session_id, exc)
+            self._show_status_message(f"Cannot save the subtitle: {exc}")
+            return False
+        self._sync_playhead()
+        self._show_status_message(
+            f"Subtitle saved: {format_timestamp(edited.start_ms)}-{format_timestamp(edited.end_ms)}"
+        )
+        return True
+
     # Process ----------------------------------------------------------------
 
     def process(self) -> Crop | None:
-        """Send the shown recording and its crop to the agent; the window stays open.
+        """Send the shown recording and its crop to the agent, then close the window.
 
         Stores ``crop.json``, writes the ``process`` event into ``editor_session`` and
         finishes ``recording_session`` (``processed`` with the crop). The recording
         session is finished even when the user has meanwhile selected a different
         recording: the agent waiting on it must be released by the green button, and
         the editor session event carries the id actually shown. The crop applies to
-        all screens; the selected track is irrelevant.
+        all screens; the selected track is irrelevant. When the event went out, the
+        window closes (the work continues in the agent); on a failure it stays open so
+        that the user can retry.
         """
         if self.recording is None:
             self._show_status_message("Select a recording first.")
@@ -822,6 +871,7 @@ class EditorWindow(QMainWindow):
         self._show_process_feedback()
         self._show_status_message(f"Sent to agent: {detail}")
         self.processed.emit(session_id, crop)
+        QTimer.singleShot(0, self.close)
         return crop
 
     def _show_process_feedback(self) -> None:

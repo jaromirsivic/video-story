@@ -93,7 +93,7 @@ def test_process_button_is_green_enabled_and_next_to_render(qtbot, folder: Path)
     assert not button.isEnabled()
 
 
-def test_process_without_sessions_only_stores_crop_and_shows_feedback(qtbot, folder: Path):
+def test_process_without_sessions_stores_crop_shows_feedback_and_closes(qtbot, folder: Path):
     window = _open(qtbot, folder)
     sent: list[tuple[str, Crop]] = []
     window.processed.connect(lambda sid, crop: sent.append((sid, crop)))
@@ -110,11 +110,10 @@ def test_process_without_sessions_only_stores_crop_and_shows_feedback(qtbot, fol
     assert sent == [(NEWEST, Crop(500, 2000))]
     assert window.process_button.text() == "Sent to agent"
     assert not window.process_button.isEnabled()
-    assert window.isVisible()
     assert "Sent to agent" in window.statusBar().currentMessage()
     assert NEWEST in window.statusBar().currentMessage()
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    assert window.process_button.isEnabled()
+    # The work continues in the agent: the editor closes by itself.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
 
 
 def test_shortcut_cannot_bypass_the_sent_to_agent_feedback(qtbot, folder: Path):
@@ -131,10 +130,9 @@ def test_shortcut_cannot_bypass_the_sent_to_agent_feedback(qtbot, folder: Path):
     assert window.process() is None  # a direct call during the feedback is ignored too
     assert sent == [NEWEST]
     assert es.read_editor_event(editor_session)["updated_at"] == stamp
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    assert window.process_action.isEnabled()
-    qtbot.keyClick(window.timeline, Qt.Key_Return, Qt.KeyboardModifier.ControlModifier)
-    assert sent == [NEWEST, NEWEST]
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+    assert sent == [NEWEST]
+    assert es.read_editor_event(editor_session)["event"] == "process"
 
 
 def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, monkeypatch):
@@ -150,15 +148,12 @@ def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, m
     assert window.model.in_ms == 700
     event = es.read_editor_event(editor_session)
     assert event["event"] == "process" and event["crop"]["start_ms"] == 700
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    # A value typed into Out and Process called by the button / direct call: committed.
-    window.out_edit.setFocus()
-    window.out_edit.selectAll()
-    qtbot.keyClicks(window.out_edit, "00:00:02.000")
-    assert window.model.out_ms == DURATION_MS
-    assert window.process() == Crop(700, 2000)
-    assert es.read_editor_event(editor_session)["crop"] == {"start_ms": 700, "end_ms": 2000}
-    # Render too: the request carries the committed In.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+    editor_session = es.new_editor_session(cfg)
+    window = _open(qtbot, folder, editor_session=editor_session)
+    assert window.model.in_ms == 700  # restored from crop.json
+    # Render: the request carries the committed In.
     window.in_edit.setFocus()
     window.in_edit.selectAll()
     qtbot.keyClicks(window.in_edit, "00:00:00.900")
@@ -170,7 +165,14 @@ def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, m
 
     monkeypatch.setattr(window_mod, "ask_output_path", cancelled_dialog)
     assert window.render() is None
-    assert seen == [(900, 2000)]
+    assert seen == [(900, DURATION_MS)]
+    # A value typed into Out and Process called by a direct call: committed.
+    window.out_edit.setFocus()
+    window.out_edit.selectAll()
+    qtbot.keyClicks(window.out_edit, "00:00:02.000")
+    assert window.model.out_ms == DURATION_MS
+    assert window.process() == Crop(900, 2000)
+    assert es.read_editor_event(editor_session)["crop"] == {"start_ms": 900, "end_ms": 2000}
 
 
 def test_process_failure_keeps_the_recording_session_and_the_button(
@@ -318,10 +320,10 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     assert _read_crop_json(folder)["start_ms"] == 500
     assert window.recording_session is None and window.editor_event_sent
     assert "sent to agent" in window.status_label.text()
-    assert window.isVisible()
 
-    # Closing afterwards neither rewrites the event nor touches the finished session.
-    window.close()
+    # The window closes by itself; closing neither rewrites the event nor touches the
+    # finished session.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
     assert es.read_editor_event(editor_session)["event"] == "process"
     assert read_state(paths.state_path).status is Status.PROCESSED
 

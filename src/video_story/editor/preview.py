@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
 from video_story.core.cursor import CursorPosition
 from video_story.core.timeline import format_timestamp
 from video_story.host.runner import FrameRef
+from video_story.ui.icons import pencil_icon
 
 log = logging.getLogger(__name__)
 
@@ -439,9 +441,10 @@ class PreviewWidget(QWidget):
 
 
 class PreviewPanel(QWidget):
-    """Preview widget, transport row and the subtitle label below."""
+    """Preview widget, transport row and the subtitle label (with its Edit button) below."""
 
     play_pause = Signal()
+    edit_subtitle = Signal()  # the Edit button next to the subtitle was clicked
     stop = Signal()
     go_in = Signal()
     go_out = Signal()
@@ -489,7 +492,19 @@ class PreviewPanel(QWidget):
         sub_font.setPointSizeF(sub_font.pointSizeF() + 2)
         self.subtitle_label.setFont(sub_font)
         self.subtitle_label.setMinimumHeight(self.subtitle_label.fontMetrics().height() * 2 + 8)
-        layout.addWidget(self.subtitle_label)
+        self.edit_subtitle_button = QToolButton(self)
+        self.edit_subtitle_button.setIcon(pencil_icon(20))
+        self.edit_subtitle_button.setText("Edit")
+        self.edit_subtitle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.edit_subtitle_button.setToolTip("Edit this subtitle: its time and what was said")
+        self.edit_subtitle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.edit_subtitle_button.setEnabled(False)
+        self.edit_subtitle_button.clicked.connect(self.edit_subtitle.emit)
+        subtitle_row = QHBoxLayout()
+        subtitle_row.setSpacing(6)
+        subtitle_row.addWidget(self.subtitle_label, 1)
+        subtitle_row.addWidget(self.edit_subtitle_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(subtitle_row)
         self._subtitle_text = ""
         self.subtitles_check.toggled.connect(lambda _on: self._apply_subtitle())
 
@@ -518,6 +533,7 @@ class PreviewPanel(QWidget):
         shown = self._subtitle_text if self.subtitles_check.isChecked() else ""
         if self.subtitle_label.text() != shown:
             self.subtitle_label.setText(shown)
+        self.edit_subtitle_button.setEnabled(bool(shown))
 
     def paint_rect(self) -> QRect:
         return self.view.rect()

@@ -98,6 +98,7 @@ class _Tick:
     cursor: CursorPosition | None
     frames: list[RawFrame] = field(default_factory=list)
     drawings: list[dict[str, Any]] = field(default_factory=list)
+    zoom: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Recorder:
@@ -135,6 +136,9 @@ class Recorder:
         # screen right now (see ui.overlay.DrawingOverlay.drawings). Stored in the
         # sidecar of every frame of the tick as ``drawings``.
         self.drawings_provider: DrawingsProvider | None = None
+        # Same for the zoom of the drawing canvas (ui.overlay.DrawingOverlay.zoom):
+        # which screens show a magnified region, stored in the sidecars as ``zoom``.
+        self.zoom_provider: DrawingsProvider | None = None
 
     # Properties -------------------------------------------------------------
 
@@ -298,6 +302,12 @@ class Recorder:
                 tick.drawings = list(provider())
             except Exception:  # pragma: no cover - never let drawing data stop capture
                 log.exception("drawings provider failed")
+        zoom_provider = self.zoom_provider
+        if zoom_provider is not None:
+            try:
+                tick.zoom = list(zoom_provider())
+            except Exception:  # pragma: no cover - never let zoom data stop capture
+                log.exception("zoom provider failed")
         for screen in self.screens:
             tick.frames.append(grabber.grab(screen))
         return tick
@@ -316,6 +326,7 @@ class Recorder:
                 "screen": frame.screen_id,
                 "cursor": tick.cursor.to_json() if tick.cursor else None,
                 "drawings": tick.drawings,
+                "zoom": tick.zoom,
                 "captured_at": now_iso(),
             }
             (frames_dir / sidecar_filename(tick.time_ms, frame.screen_id)).write_text(

@@ -8,25 +8,72 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent
+from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from video_story.core.screens import RawScreen, assign_screen_ids
-from video_story.ui.overlay import DrawingOverlay, OverlayWindow, Shape, Tool, shape_to_json
+from video_story.ui.overlay import (
+    MAX_ZOOM,
+    DrawingOverlay,
+    OverlayWindow,
+    Shape,
+    Tool,
+    shape_to_json,
+)
 from video_story.ui.palette import DEFAULT_COLOR, PALETTE, PaletteColor, find_color
 
 
-def _mouse(window: OverlayWindow, kind: QEvent.Type, pos: QPoint, pressed: bool) -> None:
+def _mouse(
+    window: OverlayWindow,
+    kind: QEvent.Type,
+    pos: QPoint,
+    pressed: bool,
+    button: Qt.MouseButton = Qt.MouseButton.LeftButton,
+) -> None:
     local = QPointF(pos)
     event = QMouseEvent(
         kind,
         local,
         window.mapToGlobal(local),
-        Qt.MouseButton.LeftButton,
-        Qt.MouseButton.LeftButton if pressed else Qt.MouseButton.NoButton,
+        button,
+        button if pressed else Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(window, event)
+
+
+def _wheel(window: OverlayWindow, pos: QPoint, notches: float) -> None:
+    local = QPointF(pos)
+    event = QWheelEvent(
+        local,
+        window.mapToGlobal(local),
+        QPoint(0, 0),
+        QPoint(0, round(120 * notches)),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(window, event)
+
+
+def _key(key: Qt.Key) -> QKeyEvent:
+    return QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+
+
+def _snapshot(window: OverlayWindow) -> QPixmap:
+    pixmap = QPixmap(window.size())
+    pixmap.fill(QColor("#336699"))
+    return pixmap
+
+
+def _park_toolbar(overlay: DrawingOverlay) -> None:
+    """Move the toolbar to the bottom-right corner, away from where the tests draw."""
+    toolbar = overlay._toolbar
+    assert toolbar is not None
+    area = QGuiApplication.primaryScreen().geometry()
+    toolbar.move(area.bottomRight() - QPoint(toolbar.width(), toolbar.height()))
+    toolbar.user_moved = True
 
 
 def drag(window: OverlayWindow, points: list[tuple[int, int]]) -> None:
@@ -45,6 +92,7 @@ def overlay(qtbot):
     overlay.show()
     for window in overlay.windows:
         qtbot.addWidget(window)
+    _park_toolbar(overlay)
     yield overlay
     overlay.close()
 
@@ -274,6 +322,7 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
 
     toolbar = overlay._toolbar
     assert toolbar is not None
+    toolbar.move(QGuiApplication.primaryScreen().geometry().topLeft() + QPoint(16, 16))
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
     assert tools == ["Rect", "Arrow", "Brush"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
@@ -306,3 +355,115 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         toolbar.close_cross.click()
     assert not overlay.is_visible()
+
+
+def test_press_on_toolbar_spot_moves_toolbar_instead_of_drawing(overlay):
+    """The overlay may lie above the toolbar (window activation): a press on the
+    toolbar's spot drags the toolbar whatever tool is selected, and draws nothing."""
+    toolbar = overlay._toolbar
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.RECTANGLE)
+    start = toolbar.pos()
+    inside = window.mapFromGlobal(toolbar.mapToGlobal(QPoint(30, 8)))
+    drag(window, [(inside.x(), inside.y()), (inside.x() - 100, inside.y() - 80)])
+    assert overlay.shapes() == []
+    assert toolbar.pos() == start - QPoint(100, 80) and toolbar.user_moved
+    # Outside the toolbar the overlay draws as usual.
+    drag(window, [(10, 10), (60, 60)])
+    assert len(overlay.shapes()) == 1
+
+
+def test_toolbar_header_strip(overlay):
+    toolbar = overlay._toolbar
+    assert toolbar.header.cursor().shape() == Qt.CursorShape.SizeAllCursor
+    assert toolbar.close_cross.parent() is toolbar.header
+
+
+def test_wheel_zoom_needs_a_snapshot(overlay):
+    window = overlay.windows[0]
+    window.set_snapshot(None)
+    _wheel(window, QPoint(100, 100), 3)
+    assert window.zoom == 1.0
+
+
+def test_wheel_zoom_around_cursor_and_limits(overlay):
+    window = overlay.windows[0]
+    window.set_snapshot(_snapshot(window))
+    anchor = QPoint(200, 150)
+    before = window.to_canvas(QPointF(anchor))
+    _wheel(window, anchor, 1)
+    assert window.zoom == pytest.approx(1.25)
+    after = window.to_canvas(QPointF(anchor))
+    assert after.x() == pytest.approx(before.x()) and after.y() == pytest.approx(before.y())
+    _wheel(window, anchor, 50)
+    assert window.zoom == MAX_ZOOM
+    _wheel(window, anchor, -50)
+    assert window.zoom == 1.0 and window.offset == QPointF(0, 0)
+    _wheel(window, anchor, 2)
+    QApplication.sendEvent(window, _key(Qt.Key.Key_0))
+    assert window.zoom == 1.0
+
+
+def test_middle_button_pans_only_while_zoomed(overlay):
+    window = overlay.windows[0]
+    window.set_snapshot(_snapshot(window))
+    middle = Qt.MouseButton.MiddleButton
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(100, 100), True, middle)
+    _mouse(window, QEvent.Type.MouseMove, QPoint(50, 50), True, middle)
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(50, 50), False, middle)
+    assert window.offset == QPointF(0, 0)
+
+    window.set_zoom(4.0, QPointF(0, 0))
+    assert window.offset == QPointF(0, 0)
+    window._set_offset(QPointF(20, 20))
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(100, 100), True, middle)
+    _mouse(window, QEvent.Type.MouseMove, QPoint(60, 80), True, middle)
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(60, 80), False, middle)
+    assert window.offset == QPointF(30, 25)  # dragged 40, 20 view px = 10, 5 canvas px
+    assert window.cursor().shape() == Qt.CursorShape.CrossCursor
+    # Panning stops at the edges of the picture.
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(0, 0), True, middle)
+    _mouse(window, QEvent.Type.MouseMove, QPoint(5000, 5000), True, middle)
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(5000, 5000), False, middle)
+    assert window.offset == QPointF(0, 0)
+
+
+def test_drawing_while_zoomed_uses_canvas_coordinates(overlay):
+    overlay.set_screens(_recorded_screens())
+    window = overlay.windows[0]
+    dpr = QGuiApplication.screens()[0].devicePixelRatio()
+    window.set_snapshot(_snapshot(window))
+    drag(window, [(40, 40), (80, 60)])  # at 100 %
+    window.set_zoom(2.0, QPointF(0, 0))
+    window._set_offset(QPointF(20, 30))
+    drag(window, [(0, 0), (40, 20)])  # canvas (20, 30) -> (40, 40)
+    _first, second = overlay.shapes()
+    assert second.points[0] == QPointF(20, 30) and second.points[-1] == QPointF(40, 40)
+
+    # The sidecar data describes the zoomed image: shapes in view pixels, plus the zoom.
+    drawings = overlay.drawings()
+    assert drawings[0]["from"] == {"screen": "screen1", "x": round(40 * dpr), "y": round(20 * dpr)}
+    assert drawings[1]["from"] == {"screen": "screen1", "x": 0, "y": 0}
+    assert overlay.zoom() == [
+        {
+            "screen": "screen1",
+            "factor": 2.0,
+            "x": round(20 * dpr),
+            "y": round(30 * dpr),
+            "width": round(window.width() / 2 * dpr),
+            "height": round(window.height() / 2 * dpr),
+        }
+    ]
+    # Shapes scrolled out of view are left out of the sidecar.
+    window.set_zoom(MAX_ZOOM, QPointF(window.width(), window.height()))
+    assert overlay.drawings() == []
+    window.reset_zoom()
+    assert len(overlay.drawings()) == 2 and overlay.zoom() == []
+
+
+def test_hide_resets_zoom(overlay):
+    window = overlay.windows[0]
+    window.set_snapshot(_snapshot(window))
+    window.set_zoom(3.0)
+    overlay.hide()
+    assert window.zoom == 1.0 and not window.has_snapshot()

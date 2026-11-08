@@ -47,7 +47,8 @@ recording, or the editor was closed without Process: do nothing), `failed` (see
 `message` and `recording.log` in the work folder).
 
 The user can press **Stop**, then choose **Process Recording**, **Video Editor**
-(process, then crop in the editor and press its green **Process** button),
+(process, then crop in the editor, optionally correct subtitles with **Edit**, and press
+its green **Process** button, which closes the editor),
 **Continue Recording** or **Discard Recording** (discarding returns the window to the
 Record state; the same session continues). Recording also stops automatically after the configured
 auto-stop time (default 2 hours) and is then processed.
@@ -88,6 +89,12 @@ For every instruction that refers to something on screen, fetch the matching fra
   an arrow (tail, head), `path` (a list of points) for a brush stroke. Every point is
   `{screen, x, y}`. The same list is stored in the sidecar of every screen of that tick,
   so read it from any frame.
+- `zoom` is a list (empty normally). While drawing, the user can zoom a screen in with
+  the mouse wheel (up to 800 %) and pan it: the image of that screen then shows a frozen,
+  magnified picture. An entry `{screen, factor, x, y, width, height}` says that the
+  image shows the region `x, y, width, height` (pixels of the unzoomed screen) magnified
+  `factor` times; `cursor` and `drawings` are in pixels of the zoomed image as shown.
+  To map an image point back to the real screen: `x + px / factor`, `y + py / factor`.
 - `describe --session <session_id>` returns the manifest, paths and the whole
   transcript at once. The manifest lists the screens (`screen1` is the primary) with
   their sizes and the capture interval.

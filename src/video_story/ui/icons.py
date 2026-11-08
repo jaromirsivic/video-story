@@ -113,4 +113,27 @@ def draw_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
-__all__ = ["draw_icon", "record_icon", "settings_icon", "stop_icon"]
+def pencil_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A pencil (eraser, body, sharpened tip) in the button text color."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.translate(s / 2, s / 2)
+        p.rotate(45)  # eraser to the top right, tip to the bottom left
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        # Eraser, separated from the body by a small gap.
+        p.drawRoundedRect(QRectF(-s * 0.11, -s * 0.47, s * 0.22, s * 0.12), s * 0.04, s * 0.04)
+        # Body.
+        p.drawRect(QRectF(-s * 0.11, -s * 0.31, s * 0.22, s * 0.50))
+        # Sharpened tip.
+        p.drawPolygon(
+            QPolygonF(
+                [QPointF(-s * 0.11, s * 0.23), QPointF(s * 0.11, s * 0.23), QPointF(0, s * 0.47)]
+            )
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
+__all__ = ["draw_icon", "pencil_icon", "record_icon", "settings_icon", "stop_icon"]

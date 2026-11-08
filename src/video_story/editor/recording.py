@@ -6,14 +6,14 @@ import bisect
 import json
 import logging
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from video_story.core.cursor import CursorPosition, cursor_from_json
 from video_story.core.manifest import Manifest, read_manifest
 from video_story.core.screens import Screen
 from video_story.core.session import SessionPaths
-from video_story.core.transcript import Transcript, read_transcript
+from video_story.core.transcript import Segment, Transcript, read_transcript, write_transcript
 from video_story.host.runner import FrameIndex, FrameRef
 
 log = logging.getLogger(__name__)
@@ -172,8 +172,8 @@ class LoadedRecording:
 
     # Transcript -------------------------------------------------------------
 
-    def subtitle_at(self, time_ms: int) -> str:
-        """Text of the single segment containing ``time_ms``.
+    def segment_at(self, time_ms: int) -> Segment | None:
+        """The single segment containing ``time_ms`` (the one shown as the subtitle).
 
         Segments are half-open (``start <= t < end``) so a playhead sitting exactly on
         a touching boundary shows only the segment that starts there; the end is
@@ -181,12 +181,38 @@ class LoadedRecording:
         """
         index = bisect.bisect_right(self._segment_starts, time_ms) - 1
         if index < 0:
-            return ""
+            return None
         segment = self._segments[index]
         last = index == len(self._segments) - 1
         if time_ms < segment.end_ms or (last and time_ms == segment.end_ms):
-            return segment.text.strip()
-        return ""
+            return segment
+        return None
+
+    def subtitle_at(self, time_ms: int) -> str:
+        """Text of the segment containing ``time_ms`` (see :meth:`segment_at`)."""
+        segment = self.segment_at(time_ms)
+        return segment.text.strip() if segment is not None else ""
+
+    def replace_segment(self, old: Segment, new: Segment) -> None:
+        """Replace ``old`` by ``new`` and rewrite ``transcript.json`` and ``transcript.txt``.
+
+        This changes what the agent reads as "what was said". The files are written
+        first; the recording in memory changes only when that succeeded (``OSError``
+        otherwise).
+        """
+        transcript = self.transcript
+        if transcript is None or old not in transcript.segments:
+            raise ValueError("the segment is not part of this recording's transcript")
+        segments = [new if s == old else s for s in transcript.segments]
+        segments.sort(key=lambda s: (s.start_ms, s.end_ms))
+        updated = replace(transcript, segments=segments)
+        base = self.paths.final_dir
+        write_transcript(
+            self.paths.transcript_txt_path(base), self.paths.transcript_json_path(base), updated
+        )
+        self.transcript = updated
+        self._segments = list(segments)
+        self._segment_starts = [s.start_ms for s in self._segments]
 
 
 __all__ = ["AudioFile", "LoadedRecording", "read_audio_info"]

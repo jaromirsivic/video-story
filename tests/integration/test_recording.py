@@ -34,7 +34,7 @@ def _record(tmp_path: Path, seconds: float, **cfg_changes) -> tuple[SessionPaths
 
 
 def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path):
-    paths, summary, cfg = _record(tmp_path, 2.0, capture_interval_ms=250)
+    paths, summary, cfg = _record(tmp_path, 2.0, capture_interval_ms=250, image_format="png")
     final = paths.final_dir
     assert final.is_dir() and not paths.work_dir.joinpath("frames").exists()
     manifest = read_manifest(paths.manifest_path(final))
@@ -54,6 +54,7 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         sidecar = json.loads(frame.with_suffix(".json").read_text(encoding="utf-8"))
         assert sidecar["screen"] == parsed.screen_id and sidecar["time_ms"] == parsed.time_ms
         assert sidecar["drawings"] == []  # no overlay in a headless recording
+        assert sidecar["zoom"] == []
         cursor = sidecar["cursor"]
         if cursor is not None:
             assert cursor["screen"] in screens

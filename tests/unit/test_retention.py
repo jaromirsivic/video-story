@@ -101,3 +101,10 @@ def test_frame_ref_exposes_drawings(tmp_path: Path):
     # Sidecars written before drawings existed still work.
     sidecar.write_text(json.dumps({"time_ms": 1000, "screen": "screen1"}), encoding="utf-8")
     assert FrameRef("screen1", 1000, image, sidecar).to_dict()["drawings"] == []
+    assert FrameRef("screen1", 1000, image, sidecar).to_dict()["zoom"] == []
+    zoom = {"screen": "screen1", "factor": 2.0, "x": 100, "y": 50, "width": 400, "height": 300}
+    sidecar.write_text(
+        json.dumps({"time_ms": 1000, "screen": "screen1", "drawings": [], "zoom": [zoom]}),
+        encoding="utf-8",
+    )
+    assert FrameRef("screen1", 1000, image, sidecar).to_dict()["zoom"] == [zoom]

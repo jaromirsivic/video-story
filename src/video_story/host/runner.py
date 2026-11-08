@@ -219,6 +219,7 @@ class FrameRef:
     def to_dict(self) -> dict[str, Any]:
         cursor = None
         drawings: list[Any] = []
+        zoom: list[Any] = []
         try:
             data = json.loads(self.sidecar.read_text(encoding="utf-8"))
             position = cursor_from_json(data.get("cursor"))
@@ -226,6 +227,9 @@ class FrameRef:
             raw_drawings = data.get("drawings")
             if isinstance(raw_drawings, list):
                 drawings = raw_drawings
+            raw_zoom = data.get("zoom")
+            if isinstance(raw_zoom, list):
+                zoom = raw_zoom
         except (OSError, ValueError, KeyError, AttributeError):
             pass
         return {
@@ -235,6 +239,7 @@ class FrameRef:
             "sidecar": str(self.sidecar),
             "cursor": cursor,
             "drawings": drawings,
+            "zoom": zoom,
         }
 
 

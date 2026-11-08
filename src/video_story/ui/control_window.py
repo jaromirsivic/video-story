@@ -322,10 +322,13 @@ class ControlWindow(QWidget):
             return
         set_screens = getattr(self._overlay, "set_screens", None)
         drawings = getattr(self._overlay, "drawings", None)
+        zoom = getattr(self._overlay, "zoom", None)
         if set_screens is not None:
             set_screens(list(getattr(recorder, "screens", [])))
         if drawings is not None:
             recorder.drawings_provider = drawings
+        if zoom is not None:
+            recorder.zoom_provider = zoom
 
     def _overlay_closed(self) -> None:
         self.draw_button.blockSignals(True)
@@ -336,6 +339,7 @@ class ControlWindow(QWidget):
         recorder = self.controller.recorder
         if recorder is not None:
             recorder.drawings_provider = None
+            recorder.zoom_provider = None
         if self._overlay is not None:
             try:
                 self._overlay.close()  # type: ignore[attr-defined]
