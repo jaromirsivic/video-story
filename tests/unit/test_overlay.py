@@ -198,6 +198,10 @@ def test_keyboard_shortcuts(overlay, qtbot):
     assert overlay.tool is Tool.ARROW
     qtbot.keyClick(window, Qt.Key.Key_B)
     assert overlay.tool is Tool.BRUSH
+    for number, entry in enumerate(PALETTE, start=1):
+        qtbot.keyClick(window, Qt.Key(Qt.Key.Key_0 + number))
+        assert overlay.color.name().upper() == entry.hex.upper()
+    qtbot.keyClick(window, Qt.Key.Key_1)
     drag(window, [(10, 10), (20, 20)])
     drag(window, [(30, 30), (40, 40)])
     qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
@@ -222,7 +226,9 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     drag(window, [(10, 10), (40, 40)])
     drag(window, [(50, 50), (80, 80)])
     shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
-    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Shift+C"}
+    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Shift+C", "R", "A", "B"} | {
+        str(n) for n in range(1, 9)
+    }
     assert all(
         s.context() == Qt.ShortcutContext.ApplicationShortcut and s.isEnabled()
         for s in shortcuts.values()
@@ -423,9 +429,9 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     assert toolbar is not None
     toolbar.move(QGuiApplication.primaryScreen().geometry().topLeft() + QPoint(16, 16))
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
-    assert tools == ["Rect", "Arrow", "Brush"]
+    assert tools == ["Rect (R)", "Arrow (A)", "Brush (B)"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
-    assert actions == ["Undo", "Clear", "Close"]
+    assert actions == ["Undo (Ctrl+Z)", "Clear (Ctrl+Shift+C)", "Close (Esc)"]
 
     # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
     start = toolbar.pos()
@@ -470,6 +476,32 @@ def test_press_on_toolbar_spot_moves_toolbar_instead_of_drawing(overlay):
     # Outside the toolbar the overlay draws as usual.
     drag(window, [(10, 10), (60, 60)])
     assert len(overlay.shapes()) == 1
+
+
+def test_toolbar_layout_rows_and_outline(overlay):
+    """Undo/Clear/Close above Rect/Arrow/Brush, two rows of four numbered colors below."""
+    from PySide6.QtWidgets import QPushButton
+
+    toolbar = overlay._toolbar
+    actions = toolbar.findChildren(QPushButton)
+    tools = [toolbar._tool_buttons[t] for t in (Tool.RECTANGLE, Tool.ARROW, Tool.BRUSH)]
+    assert len({b.y() for b in actions}) == 1 and len({b.y() for b in tools}) == 1
+    assert actions[0].y() < tools[0].y()
+    assert [b.x() for b in actions] == [b.x() for b in tools]  # same columns
+    swatches = list(toolbar._swatches.values())
+    assert [s.text() for s in swatches] == [str(n) for n in range(1, 9)]
+    rows = sorted({s.y() for s in swatches})
+    assert len(rows) == 2 and rows[0] > tools[0].y()
+    assert "border: 2px solid #000000" in toolbar.styleSheet()
+
+
+def test_toolbar_keeps_its_size_when_resized(overlay, qtbot):
+    """Moving across screens with different DPI must not leave the toolbar enlarged."""
+    toolbar = overlay._toolbar
+    size = toolbar.size()
+    toolbar.resize(size.width() * 2, size.height() * 3)
+    qtbot.wait(10)
+    assert toolbar.size() == size
 
 
 def test_toolbar_header_strip(overlay):

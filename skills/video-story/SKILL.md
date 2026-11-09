@@ -46,9 +46,9 @@ the editor; keep waiting), `processed` (done), `cancelled` (window closed withou
 recording, or the editor was closed without Process: do nothing), `failed` (see
 `message` and `recording.log` in the work folder).
 
-The user can press **Stop**, then choose **Process Recording**, **Video Editor**
-(process, then crop in the editor, optionally correct subtitles with **Edit**, and press
-its green **Process** button, which closes the editor),
+The user can press **Stop**, then choose **Video Editor** (the default: process, then
+crop in the editor, optionally correct subtitles with **Edit**, and press its green
+**Process** button, which closes the editor), **Process Recording**,
 **Continue Recording** or **Discard Recording** (discarding returns the window to the
 Record state; the same session continues). Recording also stops automatically after the configured
 auto-stop time (default 2 hours) and is then processed.

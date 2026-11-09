@@ -8,15 +8,17 @@ taken by ``mss``. Drawing is a mode of its own: while the overlay is shown, clic
 not reach the applications below it.
 
 A small floating toolbar (top-left of the primary screen at first; drag its title bar
-to move it whatever tool is selected, the cross closes drawing mode) offers the tools
-Rect / Arrow / Brush (rectangle is the default), Undo / Clear / Close and the 8-color
-palette. The left mouse button draws with the selected tool, the right mouse button
-always draws an arrow. Other windows (the control window) can be kept above the overlay
-with :meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
+to move it whatever tool is selected, the cross closes drawing mode; black outline,
+always sized to its contents) offers Undo / Clear / Close on the first row, the tools
+Rect / Arrow / Brush (rectangle is the default) on the second and the 8-color palette
+in two rows of four below; every button names its shortcut in brackets. The left mouse
+button draws with the selected tool, the right mouse button always draws an arrow.
+Other windows (the control window) can be kept above the overlay with
+:meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
 
 Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
-``Ctrl+Z`` undo, ``Ctrl+Shift+C`` clear. On the overlay windows also ``B`` / ``R`` /
-``A`` select a tool and ``0`` resets the zoom.
+``Ctrl+Z`` undo, ``Ctrl+Shift+C`` clear, ``R`` / ``A`` / ``B`` select a tool, ``1``-``8``
+a color. On the overlay windows also ``0`` resets the zoom.
 
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
 once; the mouse wheel zooms that screen's picture in (up to 800 %) around the cursor
@@ -67,7 +69,9 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -86,6 +90,16 @@ MIN_ZOOM = 1.0
 MAX_ZOOM = 8.0  # 800 %
 ZOOM_STEP = 1.25  # zoom factor per wheel notch (120 units of angle delta)
 TOOLBAR_RAISE_DELAYS_MS = (0, 150)  # re-raise the toolbar after window activation settles
+PALETTE_COLUMNS = 4  # the 8 colors are shown in two rows of four
+# Keyboard shortcut shown in brackets on every toolbar button (by button label).
+TOOLBAR_SHORTCUTS = {
+    "Undo": "Ctrl+Z",
+    "Clear": "Ctrl+Shift+C",
+    "Close": "Esc",
+    "Rect": "R",
+    "Arrow": "A",
+    "Brush": "B",
+}
 
 
 class Tool(StrEnum):
@@ -534,6 +548,8 @@ class OverlayWindow(QWidget):
             self._controller.set_tool(Tool.ARROW)
         elif key == Qt.Key.Key_0 and not ctrl:
             self.reset_zoom()
+        elif Qt.Key.Key_1 <= key < Qt.Key.Key_1 + len(PALETTE) and not ctrl:
+            self._controller.set_color(PALETTE[key - Qt.Key.Key_1])
         else:
             super().keyPressEvent(event)
             return
@@ -567,9 +583,12 @@ class OverlayToolbar(QWidget):
         )
         self.setObjectName("overlayToolbar")
         self.setWindowTitle("Video Story drawing tools")
+        # We paint the toolbar ourselves (frameless): the style sheet must draw its
+        # background and the black outline that keeps it visible on white backgrounds.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # Explicit colors: the toolbar must look the same in light and dark system themes.
         self.setStyleSheet(
-            "QWidget#overlayToolbar { background: #F4F4F4; border: 1px solid #707070; }"
+            "QWidget#overlayToolbar { background: #F4F4F4; border: 2px solid #000000; }"
             "QWidget#overlayToolbar QToolButton, QWidget#overlayToolbar QPushButton {"
             " background: #FFFFFF; color: #000000; border: 1px solid #909090;"
             " border-radius: 3px; padding: 3px 8px; }"
@@ -593,8 +612,12 @@ class OverlayToolbar(QWidget):
         self.user_moved = False  # True once the user dragged the toolbar somewhere
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(1, 1, 1, 1)
+        outer.setContentsMargins(2, 2, 2, 2)
         outer.setSpacing(0)
+        # The toolbar is always exactly as large as its contents. Without this, moving
+        # it between screens with different DPI scaling lets Windows' suggested
+        # (scaled) geometry stick, and the toolbar grows a little more on every move.
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
         # Title bar: a grab strip across the whole top; drag it (or any free spot of the
         # toolbar) to move the toolbar whatever tool is selected; the cross leaves
@@ -626,50 +649,74 @@ class OverlayToolbar(QWidget):
         root.setSpacing(4)
         outer.addLayout(root)
 
-        row = QHBoxLayout()
-        row.setSpacing(4)
+        # Every button shows its keyboard shortcut in brackets after its text.
+        # Row 1: Undo / Clear / Close; row 2: Rect / Arrow / Brush (same column widths).
+        buttons = QGridLayout()
+        buttons.setSpacing(4)
+        for column, (label, tip, signal) in enumerate(
+            (
+                ("Undo", "Undo the last shape", self.undo_requested),
+                ("Clear", "Remove all drawings", self.clear_requested),
+                ("Close", "Leave drawing mode", self.close_requested),
+            )
+        ):
+            button = QPushButton(label, self)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(signal.emit)
+            buttons.addWidget(button, 0, column)
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for tool, label, tip in (
-            (Tool.RECTANGLE, "Rect", "Rectangle: drag from corner to corner (R)"),
+        for column, (tool, label, tip) in enumerate(
             (
-                Tool.ARROW,
-                "Arrow",
-                "Arrow: drag from tail to head (A); the right mouse button always draws an arrow",
-            ),
-            (Tool.BRUSH, "Brush", "Brush: freehand line (B)"),
+                (Tool.RECTANGLE, "Rect", "Rectangle: drag from corner to corner"),
+                (
+                    Tool.ARROW,
+                    "Arrow",
+                    "Arrow: drag from tail to head; the right mouse button always draws an arrow",
+                ),
+                (Tool.BRUSH, "Brush", "Brush: freehand line"),
+            )
         ):
             button = QToolButton(self)
             button.setText(label)
             button.setToolTip(tip)
             button.setCheckable(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False, t=tool: self.tool_selected.emit(t))
             group.addButton(button)
-            row.addWidget(button)
+            buttons.addWidget(button, 1, column)
             self._tool_buttons[tool] = button
-        row.addSpacing(8)
-        for label, tip, signal in (
-            ("Undo", "Undo the last shape (Ctrl+Z)", self.undo_requested),
-            ("Clear", "Remove all drawings (Ctrl+Shift+C)", self.clear_requested),
-            ("Close", "Leave drawing mode (Esc)", self.close_requested),
-        ):
-            button = QPushButton(label, self)
-            button.setToolTip(tip)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(signal.emit)
-            row.addWidget(button)
-        root.addLayout(row)
+        for button in self.findChildren(QAbstractButton):
+            if button is self.close_cross:
+                continue
+            name = button.text()
+            shortcut = TOOLBAR_SHORTCUTS[name]
+            button.setText(f"{name} ({shortcut})")
+            button.setToolTip(f"{button.toolTip()} ({shortcut})")
+        widest = max(
+            b.sizeHint().width()
+            for b in self.findChildren(QAbstractButton)
+            if b is not self.close_cross
+        )
+        for column in range(3):
+            buttons.setColumnStretch(column, 1)
+            buttons.setColumnMinimumWidth(column, widest)  # three equal columns
+        root.addLayout(buttons)
 
+        # The palette: two rows of four swatches, each labelled with its number key.
         grid = QGridLayout()
-        grid.setSpacing(3)
+        grid.setSpacing(4)
         for index, entry in enumerate(PALETTE):
             swatch = QToolButton(self)
-            swatch.setFixedSize(22, 22)
-            swatch.setToolTip(entry.name)
+            swatch.setText(str(index + 1))
+            swatch.setMinimumSize(30, 28)
+            swatch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            swatch.setToolTip(f"{entry.name} ({index + 1})")
             swatch.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             swatch.clicked.connect(lambda _checked=False, e=entry: self.color_selected.emit(e))
-            grid.addWidget(swatch, index // 8, index % 8)
+            grid.addWidget(swatch, index // PALETTE_COLUMNS, index % PALETTE_COLUMNS)
             self._swatches[entry.hex.upper()] = swatch
         root.addLayout(grid)
 
@@ -726,7 +773,18 @@ class OverlayToolbar(QWidget):
             border = "3px solid #000000" if selected else "1px solid #808080"
             if selected and swatch_hex in ("#000000", "#000080", "#8B0000"):
                 border = "3px solid #FFFFFF"
-            swatch.setStyleSheet(f"QToolButton {{ background: {swatch_hex}; border: {border}; }}")
+            text = "#FFFFFF" if _is_dark(swatch_hex) else "#000000"
+            swatch.setStyleSheet(
+                f"QToolButton {{ background: {swatch_hex}; color: {text}; border: {border};"
+                " font-weight: bold; padding: 0px; }"
+            )
+
+
+def _is_dark(hex_value: str) -> bool:
+    """True when white text reads better than black on ``hex_value``."""
+    color = QColor(hex_value)
+    luminance = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+    return luminance < 140
 
 
 class DrawingOverlay(QObject):
@@ -1056,12 +1114,22 @@ class DrawingOverlay(QObject):
             QTimer.singleShot(0, child.click)  # after this mouse event has been handled
 
     def _create_shortcuts(self, parent: QWidget) -> None:
-        """Esc / Ctrl+Z / Ctrl+Shift+C for every Video Story window (enabled while shown)."""
-        for sequence, slot in (
+        """Drawing shortcuts for every Video Story window (enabled while shown).
+
+        Esc close, Ctrl+Z undo, Ctrl+Shift+C clear, R / A / B select a tool and
+        1-8 a palette color.
+        """
+        bindings: list[tuple[QKeySequence, object]] = [
             (QKeySequence(Qt.Key.Key_Escape), self._user_close),
             (QKeySequence("Ctrl+Z"), self.undo),
             (QKeySequence("Ctrl+Shift+C"), self.clear),
-        ):
+            (QKeySequence("R"), lambda: self.set_tool(Tool.RECTANGLE)),
+            (QKeySequence("A"), lambda: self.set_tool(Tool.ARROW)),
+            (QKeySequence("B"), lambda: self.set_tool(Tool.BRUSH)),
+        ]
+        for index, entry in enumerate(PALETTE):
+            bindings.append((QKeySequence(str(index + 1)), lambda e=entry: self.set_color(e)))
+        for sequence, slot in bindings:
             shortcut = QShortcut(sequence, parent)
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.setEnabled(self._visible)

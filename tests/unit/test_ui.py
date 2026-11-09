@@ -187,6 +187,24 @@ def test_stop_dialog_buttons_have_icons(qtbot):
     assert len(keys) == len(buttons)  # every choice has its own icon
 
 
+def test_stop_dialog_video_editor_is_first_and_default(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QPushButton
+
+    from video_story.ui.stop_dialog import StopChoice, StopDialog
+
+    dialog = StopDialog()
+    qtbot.addWidget(dialog)
+    layout = dialog.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    buttons = [w for w in widgets if isinstance(w, QPushButton)]
+    assert buttons[0] is dialog.editor_button and dialog.editor_button.isDefault()
+    assert not dialog.process_button.isDefault()
+    dialog.show()
+    qtbot.keyClick(dialog, Qt.Key.Key_Return)
+    assert dialog.choice is StopChoice.EDITOR
+
+
 def test_progress_dialog_shows_position_line(qtbot):
     from video_story.ui.progress_dialog import ELLIPSIS, ProgressDialog
 
