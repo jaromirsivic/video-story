@@ -50,6 +50,17 @@ uv run video-story doctor     # environment report
 uv run video-story run        # opens the control window and waits for the result
 ```
 
+### Starting without an agent
+
+Video Story also works on its own, without Claude Code or another agent: record, then watch, crop, correct subtitles and render the recording in the editor. Start it from the repository root with:
+
+| | Recording window | Editor with the stored recordings |
+| --- | --- | --- |
+| Windows | double-click `start-video-story.bat` | `start-video-story.bat edit` |
+| Linux, macOS | `./start-video-story.sh` | `./start-video-story.sh edit` |
+
+The starters need only [uv](https://docs.astral.sh/uv/) (Windows: `winget install astral-sh.uv`). The first start creates the Python environment and, when they are missing, downloads FFmpeg and the Whisper model (`video-story setup`, about 550 MB). Then the window opens in its own process and the console closes; when something goes wrong (uv missing, a window already open) the console stays open with the reason. On macOS, Finder opens `.sh` files in an editor: run the starter from Terminal, or make a copy named `start-video-story.command` to double-click it. Without an agent, **Process** (and **Auto process**) only closes the editor and keeps the recording; untick **Auto process** to keep the editor open once the transcript is complete.
+
 Agents use `run --detach`, then `wait --session <id>` until the session is final, then `frames --session <id> --at <ms>` to fetch the screenshot that matches a sentence. See [skills/video-story/SKILL.md](skills/video-story/SKILL.md) for the agent workflow and [docs/installation.md](docs/installation.md) for setup and host registration (Claude Code, Codex, Claude Desktop, ChatGPT).
 
 ## Development
