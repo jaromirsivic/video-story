@@ -32,7 +32,7 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
-from video_story.core.transcript import format_segment_line, read_transcript
+from video_story.core.transcript import format_segment_line, read_transcript, transcript_status
 from video_story.platform.process import gui_python, pid_alive, spawn_detached
 
 log = logging.getLogger(__name__)
@@ -167,6 +167,13 @@ def session_status(paths: SessionPaths) -> dict[str, Any]:
                 state.message = (
                     "The editor process ended without Process; act on the whole recording."
                 )
+                final = paths.final_dir
+                if transcript_status(paths.transcript_json_path(final)).pending:
+                    # The editor transcribes in the background; it died before the end.
+                    state.message += (
+                        f" The transcript is incomplete: run `video-story transcribe "
+                        f"{final}` first."
+                    )
             else:
                 state.status = Status.FAILED
                 state.error_code = "WINDOW_EXITED"
@@ -369,6 +376,14 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
         duration_ms = int(data["manifest_content"].get("recorded_duration_ms") or 0)
     crop = read_crop(paths.crop_path(base), duration_ms)
     data["crop"] = crop.to_dict()
+    status = transcript_status(paths.transcript_json_path(base))
+    data["transcript_complete"] = status.complete
+    if not status.complete:
+        data["transcribed_ms"] = status.transcribed_ms
+        data["transcript_note"] = (
+            "The transcript is incomplete (the editor transcribes in the background); "
+            f"segments reach {status.transcribed_ms} ms. `video-story transcribe` completes it."
+        )
     txt = paths.transcript_txt_path(base)
     if txt.exists():
         data["transcript"] = txt.read_text(encoding="utf-8")

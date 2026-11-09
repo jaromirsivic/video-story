@@ -1,4 +1,8 @@
-"""Modal dialog that edits one subtitle (transcript segment): From, To and the text."""
+"""Modal dialog that edits the text of one subtitle (transcript segment).
+
+From and To are shown read-only: the times come from whisper and the user corrects
+only the words, so a subtitle never moves away from the audio it belongs to.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +27,8 @@ TIME_TEXT = re.compile(r"^\d{2,}:\d{2}:\d{2}(\.\d{1,3})?$")  # HH:MM:SS[.mmm]
 
 
 class SubtitleDialog(QDialog):
-    """Edit the time range and the text of one segment; Save validates, Cancel discards.
+    """Edit the text of one segment (its times are read-only); Save validates, Cancel
+    discards.
 
     ``duration_ms`` (when positive) is the upper limit of both times. After ``exec()``
     returns ``Accepted``, :meth:`segment` holds the edited segment.
@@ -46,6 +51,10 @@ class SubtitleDialog(QDialog):
             font.setFamily("Consolas")
             font.setStyleHint(font.StyleHint.Monospace)
             edit.setFont(font)
+            # The times are whisper's and stay: only the words can be corrected.
+            edit.setReadOnly(True)
+            edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            edit.setToolTip("The time of a subtitle cannot be changed; edit the text only")
         self.text_edit = QPlainTextEdit(segment.text.strip())
         self.text_edit.setTabChangesFocus(True)
         self.text_edit.setMinimumHeight(self.text_edit.fontMetrics().height() * 5)

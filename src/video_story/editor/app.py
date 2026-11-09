@@ -92,6 +92,7 @@ def run_editor(
             settings=settings,
             editor_session=editor_session,
             recording_session=recording_session,
+            config_file=config_file,
         )
         window.restore_settings()
         window.show()

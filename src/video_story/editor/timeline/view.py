@@ -1,4 +1,10 @@
-"""Custom-painted timeline: ruler, one video track per screen, audio track, crop handles."""
+"""Custom-painted timeline: ruler, one video track per screen, audio track, crop handles.
+
+Below the audio track there is a narrow lane for the background transcription: while
+the recording is still being transcribed, a green arrow under the waveform marks how
+far the transcription got (the audio beyond it is shaded) with "transcribing" written
+under the arrow; the lane stays empty once the transcript is complete.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +33,9 @@ RULER_H = 26
 HEADER_W = 70
 TRACK_H = 60
 AUDIO_H = TRACK_H  # the audio track is as tall as each screen track
+PROGRESS_H = 30  # lane under the audio track: transcription arrow and its label
+ARROW_H = 10
+ARROW_HALF_W = 7
 GAP = 3
 HANDLE_HIT_PX = 7
 PLAYHEAD_HIT_PX = 2  # the playhead wins over a crop handle this close to its line
@@ -50,6 +59,15 @@ COLOR_WAVE = QColor("#5fb3a1")
 COLOR_SHADE = QColor(0, 0, 0, 130)
 COLOR_HANDLE = QColor("#f0c040")
 COLOR_PLAYHEAD = QColor("#ff4a4a")
+COLOR_TRANSCRIBING = QColor("#3ddc84")
+COLOR_UNTRANSCRIBED = QColor(0, 0, 0, 90)  # audio whisper has not reached yet
+
+TRANSCRIBING_LABEL = "transcribing"
+TRANSCRIPTION_LABELS = {
+    "transcribing": TRANSCRIBING_LABEL,
+    "pending": "transcription pending",
+    "failed": "transcription failed",
+}
 
 
 def tick_step_ms(zoom_px_per_s: float, min_px: int = MIN_TICK_PX) -> int:
@@ -95,15 +113,17 @@ class TimelineView(QWidget):
         self._syncing_scrollbar = False
         self._drag: str | None = None
         self._drag_offset = 0.0  # px between the grabbed handle and the press position
+        self._transcription: tuple[str, int] | None = None  # (state, transcribed_ms)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumHeight(RULER_H + TRACK_H + AUDIO_H + 3 * GAP + 20)
+        self.setMinimumHeight(RULER_H + TRACK_H + AUDIO_H + PROGRESS_H + 4 * GAP + 20)
         self.setMinimumWidth(HEADER_W + 200)
 
     # Public API -------------------------------------------------------------
 
     def set_recording(self, recording: LoadedRecording | None) -> None:
         self.recording = recording
+        self._transcription = None
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
@@ -115,9 +135,22 @@ class TimelineView(QWidget):
         self.updateGeometry()
         self._after_view_change()
 
+    def set_transcription(self, state: str | None, transcribed_ms: int = 0) -> None:
+        """What the lane under the audio track shows: ``None`` (complete: nothing),
+        ``"transcribing"`` (green arrow at ``transcribed_ms``), ``"pending"`` (another
+        recording is being transcribed first) or ``"failed"``."""
+        value = None if state is None else (state, max(0, int(transcribed_ms)))
+        if value != self._transcription:
+            self._transcription = value
+            self.update()
+
+    @property
+    def transcription(self) -> tuple[str, int] | None:
+        return self._transcription
+
     def sizeHint(self) -> QSize:  # noqa: N802
         tracks = max(1, len(self.model.screens))
-        height = RULER_H + GAP + tracks * (TRACK_H + GAP) + AUDIO_H + GAP
+        height = RULER_H + GAP + tracks * (TRACK_H + GAP) + AUDIO_H + GAP + PROGRESS_H + GAP
         return QSize(900, height + self.scrollbar.sizeHint().height())
 
     def zoom_in(self) -> None:
@@ -172,6 +205,20 @@ class TimelineView(QWidget):
     def audio_rect(self) -> QRect:
         y = self._tracks_top() + len(self.model.screens) * (TRACK_H + GAP)
         return QRect(0, y, self.width(), AUDIO_H)
+
+    def progress_rect(self) -> QRect:
+        """The lane under the audio track that holds the transcription arrow."""
+        audio = self.audio_rect()
+        return QRect(0, audio.bottom() + 1 + GAP, self.width(), PROGRESS_H)
+
+    def transcription_arrow_x(self) -> float | None:
+        """Where the transcription arrow is drawn (``None`` when nothing is shown)."""
+        if self._transcription is None:
+            return None
+        state, reached = self._transcription
+        if state != "transcribing":
+            return None
+        return min(max(self._x(reached), float(HEADER_W)), float(self.width() - 1))
 
     def track_at(self, pos: QPoint) -> str | None:
         for screen_id, rect in self.track_rects():
@@ -313,6 +360,7 @@ class TimelineView(QWidget):
             self._paint_video_track(painter, screen_id, rect)
         self._paint_audio_track(painter, self.audio_rect())
         self._paint_crop(painter, canvas)
+        self._paint_transcription(painter)
         self._paint_playhead(painter, canvas)
         painter.end()
 
@@ -447,23 +495,83 @@ class TimelineView(QWidget):
                 painter.drawPolygon(tri)
         painter.setClipping(False)
 
+    def _paint_transcription(self, painter: QPainter) -> None:
+        """Green arrow under the audio track at the transcription front, its label
+        below; the audio whisper has not reached yet is shaded."""
+        if self._transcription is None or self.recording is None:
+            return
+        state, reached = self._transcription
+        lane = self.progress_rect()
+        body_left = HEADER_W
+        body_right = self.width() - 1
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+        painter.setFont(font)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if state == "transcribing":
+            audio = self.audio_rect()
+            x_reached = self._x(reached)
+            if x_reached < body_right:
+                painter.setClipRect(QRect(body_left, audio.y(), self._body_width(), audio.height()))
+                painter.fillRect(
+                    QRectF(max(x_reached, float(body_left)), audio.y(), body_right - x_reached + 1,
+                           audio.height()),
+                    COLOR_UNTRANSCRIBED,
+                )  # fmt: skip
+                painter.setClipping(False)
+            x = self.transcription_arrow_x()
+            assert x is not None
+            top = lane.y() + 1
+            painter.setPen(QPen(COLOR_TRANSCRIBING, 2))
+            painter.setBrush(QBrush(COLOR_TRANSCRIBING))
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(x, top),
+                        QPointF(x - ARROW_HALF_W, top + ARROW_H),
+                        QPointF(x + ARROW_HALF_W, top + ARROW_H),
+                    ]
+                )
+            )
+            painter.drawLine(QPointF(x, top + ARROW_H), QPointF(x, top + ARROW_H + 4))
+            label = TRANSCRIBING_LABEL
+            metrics = painter.fontMetrics()
+            width = metrics.horizontalAdvance(label) + 8
+            left = min(max(x - width / 2, float(body_left)), float(body_right - width))
+            text_rect = QRectF(left, top + ARROW_H + 4, width, lane.height() - ARROW_H - 5)
+            painter.setPen(QPen(COLOR_TRANSCRIBING))
+            painter.drawText(
+                text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label
+            )
+        else:
+            painter.setPen(QPen(COLOR_TEXT_DIM))
+            painter.drawText(
+                QRect(body_left + 6, lane.y(), self._body_width() - 12, lane.height()),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                TRANSCRIPTION_LABELS.get(state, state),
+            )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
     def _paint_playhead(self, painter: QPainter, canvas: QRect) -> None:
         x = self._x(self.model.playhead_ms)
         if x < HEADER_W or x > self.width():
             return
         x = min(x, self.width() - 1)  # the end of the recording lands on the last column
         painter.setPen(QPen(COLOR_PLAYHEAD, 1))
-        painter.drawLine(QPointF(x, 0), QPointF(x, canvas.bottom()))
+        painter.drawLine(QPointF(x, 0), QPointF(x, self.audio_rect().bottom() + 1))
         painter.setBrush(QBrush(COLOR_PLAYHEAD))
         painter.drawPolygon(QPolygonF([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 9)]))
 
 
 __all__ = [
     "AUDIO_H",
+    "COLOR_TRANSCRIBING",
     "HEADER_W",
     "PLAYHEAD_HIT_PX",
+    "PROGRESS_H",
     "RULER_H",
     "TRACK_H",
+    "TRANSCRIBING_LABEL",
     "TimelineView",
     "tick_label",
     "tick_step_ms",

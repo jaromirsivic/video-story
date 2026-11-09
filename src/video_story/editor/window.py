@@ -23,6 +23,13 @@ Crop) and restored when the recording is loaded again.
 The Edit button next to the subtitle opens :class:`SubtitleDialog` for the segment under
 the playhead; Save rewrites ``transcript.json`` and ``transcript.txt``, so the agent
 reads the corrected words.
+
+A recording that arrives from the Stop dialog is not transcribed yet: the window
+starts :class:`TranscriptionManager` for the shown recording, the timeline shows a
+green arrow at the transcription front, subtitles appear as whisper produces them,
+and **Render** and **Process** stay disabled until the transcript is complete. With
+**Auto process** ticked, a complete transcript starts a five second countdown on the
+Process button that presses it by itself unless the user clicks or types.
 """
 
 from __future__ import annotations
@@ -30,9 +37,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QEvent,
     QItemSelection,
     QObject,
     QRegularExpression,
@@ -54,6 +63,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -78,6 +88,7 @@ from video_story.host.editor_session import (
     cancel_recording_session,
     finish_recording_session,
     take_attach_requests,
+    update_recording_session_progress,
     write_editor_event,
 )
 
@@ -89,6 +100,7 @@ from .render_dialog import ExportFn, ask_output_path, default_output_path, run_r
 from .subtitle_dialog import SubtitleDialog
 from .timeline.model import TimelineModel
 from .timeline.view import TimelineView
+from .transcription import TranscriptionManager
 from .workers import automatic_gc_paused, collect_garbage
 
 log = logging.getLogger(__name__)
@@ -101,6 +113,9 @@ TIME_TEXT = re.compile(r"^\d{2,}:\d{2}:\d{2}(\.\d{1,3})?$")  # HH:MM:SS[.mmm]
 CROP_SAVE_DEBOUNCE_MS = 300  # a handle drag writes crop.json once it comes to rest
 ATTACH_POLL_MS = 1000
 PROCESS_FEEDBACK_MS = 2000
+AUTO_PROCESS_SECONDS = 5  # Auto process: countdown before Process is pressed by itself
+AUTO_PROCESS_TICK_MS = 1000
+SESSION_PROGRESS_INTERVAL_S = 5.0  # how often state.json learns the transcription progress
 PROCESS_BUTTON_STYLE = """
 QPushButton {
     background-color: #1e9e3e; color: white; border: 1px solid #167a30; border-radius: 4px;
@@ -109,6 +124,15 @@ QPushButton:hover { background-color: #23b347; }
 QPushButton:pressed { background-color: #167a30; }
 QPushButton:disabled { background-color: #8fcf9f; color: #f4fff6; border-color: #7fbf8f; }
 """
+RENDER_BUTTON_STYLE = """
+QPushButton {
+    background-color: #1f6fd0; color: white; border: 1px solid #185aa8; border-radius: 4px;
+}
+QPushButton:hover { background-color: #2a7fe6; }
+QPushButton:pressed { background-color: #185aa8; }
+QPushButton:disabled { background-color: #9dbfe8; color: #f3f8ff; border-color: #8fb2dc; }
+"""
+TRANSCRIBING_NOTE = "Available once the transcription is complete"
 
 
 class _LoadSignals(QObject):
@@ -204,6 +228,7 @@ class EditorWindow(QMainWindow):
 
     recording_loaded = Signal(object)  # LoadedRecording | None
     processed = Signal(str, object)  # session id, Crop - after Process was sent
+    transcription_changed = Signal(str)  # session id whose transcript changed (tests)
 
     def __init__(
         self,
@@ -214,6 +239,8 @@ class EditorWindow(QMainWindow):
         parent: QWidget | None = None,
         editor_session: Path | None = None,
         recording_session: str | None = None,
+        config_file: Path | None = None,
+        transcription: TranscriptionManager | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
@@ -235,6 +262,17 @@ class EditorWindow(QMainWindow):
         self._syncing_zoom = False
         self._resume_after_scrub = False  # playback was paused for a playhead drag
         self._crop_dirty_for: LoadedRecording | None = None  # pending debounced write
+        self.transcription = transcription or TranscriptionManager(config, config_file, self)
+        self.transcription.started.connect(self._on_transcription_started)
+        self.transcription.segment.connect(self._on_transcription_segment)
+        self.transcription.progress.connect(self._on_transcription_progress)
+        self.transcription.finished.connect(self._on_transcription_finished)
+        self.transcription.failed.connect(self._on_transcription_failed)
+        self._transcription_failed: dict[str, str] = {}  # session id -> message
+        self._transcription_fraction: dict[str, float] = {}
+        self._session_progress_at = 0.0  # monotonic time of the last state.json update
+        self._countdown: int | None = None  # Auto process: seconds left, None when idle
+        self._auto_cancelled = False  # the user acted during the countdown
 
         self.setWindowTitle(WINDOW_TITLE)
         self._build_ui()
@@ -255,6 +293,12 @@ class EditorWindow(QMainWindow):
         self._attach_timer = QTimer(self)
         self._attach_timer.setInterval(ATTACH_POLL_MS)
         self._attach_timer.timeout.connect(self.check_attach_requests)
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(AUTO_PROCESS_TICK_MS)
+        self._auto_timer.timeout.connect(self._on_auto_tick)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)  # any click or key cancels the Auto process countdown
 
         if self.recording_session is not None:
             self._adopt_recording_session(self.recording_session)
@@ -360,20 +404,29 @@ class EditorWindow(QMainWindow):
         render_row = QHBoxLayout()
         render_row.setSpacing(12)
         render_row.addStretch(1)
+        self.auto_process_checkbox = QCheckBox("Auto process")
+        self.auto_process_checkbox.setToolTip(
+            f"Once the transcription is complete, count down {AUTO_PROCESS_SECONDS} s on the "
+            "Process button and press it by itself; any click or key stops the countdown"
+        )
+        self.auto_process_checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.auto_process_checkbox.toggled.connect(self._on_auto_process_toggled)
+        render_row.addWidget(self.auto_process_checkbox)
         self.render_button = QPushButton("Render")
-        self.render_button.setToolTip("Export the selected screen and crop to MP4 + SRT (Ctrl+R)")
+        self.render_tooltip = "Export the selected screen and crop to MP4 + SRT (Ctrl+R)"
+        self.render_button.setToolTip(self.render_tooltip)
         render_font = QFont(self.render_button.font())
         render_font.setBold(True)
         render_font.setPointSizeF(render_font.pointSizeF() + 2)
         self.render_button.setFont(render_font)
         self.render_button.setMinimumSize(180, 44)
+        self.render_button.setStyleSheet(RENDER_BUTTON_STYLE)
         self.render_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.render_button.clicked.connect(self.render)
         render_row.addWidget(self.render_button)
         self.process_button = QPushButton("Process")
-        self.process_button.setToolTip(
-            "Send the cropped range to the agent for processing (Ctrl+Enter)"
-        )
+        self.process_tooltip = "Send the cropped range to the agent for processing (Ctrl+Enter)"
+        self.process_button.setToolTip(self.process_tooltip)
         self.process_button.setFont(render_font)
         self.process_button.setMinimumSize(180, 44)
         self.process_button.setStyleSheet(PROCESS_BUTTON_STYLE)
@@ -481,6 +534,8 @@ class EditorWindow(QMainWindow):
         self._timer.stop()
         self.player.stop()
         self._flush_crop()  # a drag of the previous recording still waiting to be written
+        self._stop_countdown()
+        self._auto_cancelled = False  # a cancelled countdown belongs to the previous recording
         self.recording = recording
         self.preview.view.clear()
         self.timeline.set_recording(recording)
@@ -490,8 +545,6 @@ class EditorWindow(QMainWindow):
         self.player.set_range(self.model.in_ms, self.model.out_ms)
         self._crop_updated()
         self._sync_zoom_slider()
-        if not self._process_feedback_timer.isActive():
-            self.process_button.setEnabled(recording is not None)
         if recording is None:
             self.preview.view.set_message("No recording")
             self.preview.set_subtitle("")
@@ -501,6 +554,7 @@ class EditorWindow(QMainWindow):
                 self.preview.view.set_message("No frames")
             self.timeline.setFocus()
         self._sync_playhead()
+        self._update_transcription_ui()
         self._update_status()
 
     @property
@@ -757,6 +811,10 @@ class EditorWindow(QMainWindow):
         if self.recording is None:
             self._show_status_message("Select a recording first.")
             return None
+        if not self.actions_allowed:
+            self._show_status_message(TRANSCRIBING_NOTE + ".")
+            return None
+        self._stop_countdown()
         self._commit_time_edits()
         if self.player.playing:
             self.toggle_play()
@@ -772,7 +830,7 @@ class EditorWindow(QMainWindow):
         try:
             result = run_render(self, self.config, request, self._export_fn)
         finally:
-            self.render_button.setEnabled(True)
+            self._update_buttons()
         self.last_export_result = result
         if result is not None:
             self._show_status_message(f"Rendered {result.output}")
@@ -836,6 +894,10 @@ class EditorWindow(QMainWindow):
             return None
         if self._process_feedback_timer.isActive():
             return None  # "Sent to agent" is still showing: no second event
+        if not self.actions_allowed:
+            self._show_status_message(TRANSCRIBING_NOTE + ".")
+            return None
+        self._stop_countdown()
         self._commit_time_edits()
         if self.player.playing:
             self.toggle_play()
@@ -885,8 +947,202 @@ class EditorWindow(QMainWindow):
 
     def _restore_process_button(self) -> None:
         self.process_button.setText("Process")
-        self.process_button.setEnabled(self.recording is not None)
-        self.process_action.setEnabled(True)
+        self._update_buttons()
+
+    # Transcription ----------------------------------------------------------
+
+    @property
+    def actions_allowed(self) -> bool:
+        """Render and Process need a complete transcript (or one that cannot be made:
+        a failed transcription must not lock the user out)."""
+        recording = self.recording
+        if recording is None:
+            return False
+        return recording.transcript_complete or recording.session_id in self._transcription_failed
+
+    def _update_buttons(self) -> None:
+        allowed = self.actions_allowed
+        note = "" if allowed or self.recording is None else f"\n{TRANSCRIBING_NOTE}"
+        self.render_button.setEnabled(allowed)
+        self.render_action.setEnabled(allowed)
+        self.render_button.setToolTip(self.render_tooltip + note)
+        self.process_button.setToolTip(self.process_tooltip + note)
+        if not self._process_feedback_timer.isActive():
+            self.process_button.setEnabled(allowed)
+            self.process_action.setEnabled(allowed)
+
+    def _update_transcription_ui(self) -> None:
+        """Start the background transcription of the shown recording when it needs one
+        and reflect its state on the timeline, the buttons and the countdown."""
+        recording = self.recording
+        if recording is None:
+            self.timeline.set_transcription(None)
+        elif recording.transcript_complete:
+            self.timeline.set_transcription(None)
+        elif recording.session_id in self._transcription_failed:
+            self.timeline.set_transcription("failed")
+        else:
+            self.transcription.start(recording)  # adopts it when already running
+            state = (
+                "transcribing" if self.transcription.is_running(recording.session_id) else "pending"
+            )
+            self.timeline.set_transcription(state, recording.transcribed_ms)
+        self._update_buttons()
+        self._update_status()
+        self._maybe_start_countdown()
+
+    def _shown(self, session_id: str) -> LoadedRecording | None:
+        recording = self.recording
+        return recording if recording is not None and recording.session_id == session_id else None
+
+    def _on_transcription_started(self, session_id: str) -> None:
+        recording = self._shown(session_id)
+        if recording is not None:
+            self.timeline.set_transcription("transcribing", recording.transcribed_ms)
+            self._update_status()
+
+    def _on_transcription_segment(self, session_id: str, _segment: object) -> None:
+        recording = self._shown(session_id)
+        if recording is None:
+            return
+        self.timeline.set_transcription("transcribing", recording.transcribed_ms)
+        self.preview.set_subtitle(recording.subtitle_at(self.model.playhead_ms))
+        self.transcription_changed.emit(session_id)
+
+    def _on_transcription_progress(self, session_id: str, fraction: float, reached: int) -> None:
+        self._transcription_fraction[session_id] = fraction
+        recording = self._shown(session_id)
+        if recording is not None:
+            self.timeline.set_transcription("transcribing", max(reached, recording.transcribed_ms))
+            self._update_status()
+        if self.recording_session == session_id:
+            now = time.monotonic()
+            if now - self._session_progress_at >= SESSION_PROGRESS_INTERVAL_S:
+                self._session_progress_at = now
+                try:
+                    update_recording_session_progress(
+                        SessionPaths(self.config.recording_folder, session_id),
+                        fraction,
+                        f"Video Story Editor open; transcribing {int(fraction * 100)} % "
+                        "(waiting for Process).",
+                    )
+                except OSError as exc:
+                    log.debug("progress not written to state.json: %s", exc)
+
+    def _on_transcription_finished(self, session_id: str, done: object) -> None:
+        self._transcription_fraction.pop(session_id, None)
+        recording = self._shown(session_id)
+        if recording is None:
+            return
+        count = len(recording.transcript.segments) if recording.transcript else 0
+        self._show_status_message(
+            f"Transcription complete: {count} subtitle{'s' if count != 1 else ''}"
+            + (
+                f" ({recording.transcript.language})"
+                if recording.transcript and recording.transcript.language
+                else ""
+            )
+        )
+        self._sync_playhead()
+        self.refresh_recordings()  # the list shows the first line and drops "transcribing"
+        self._update_transcription_ui()
+        self.transcription_changed.emit(session_id)
+
+    def _on_transcription_failed(self, session_id: str, message: str) -> None:
+        self._transcription_failed[session_id] = message
+        self._transcription_fraction.pop(session_id, None)
+        if self._shown(session_id) is not None:
+            self._show_status_message(f"Transcription failed: {message}")
+            self._update_transcription_ui()
+        self.transcription_changed.emit(session_id)
+
+    # Auto process -----------------------------------------------------------
+
+    def _has_agent_session(self) -> bool:
+        """An agent waits for Process (the Stop dialog's recording session or an
+        ``edit --detach`` editor session that was not served yet)."""
+        if self.recording_session is not None:
+            return True
+        return self.editor_session is not None and not self.editor_event_sent
+
+    @property
+    def countdown(self) -> int | None:
+        """Seconds left on the Auto process countdown, ``None`` while idle."""
+        return self._countdown
+
+    def _on_auto_process_toggled(self, checked: bool) -> None:
+        self._auto_cancelled = False
+        if checked:
+            self._maybe_start_countdown()
+        else:
+            self._stop_countdown()
+
+    def _maybe_start_countdown(self) -> None:
+        if (
+            self._countdown is not None
+            or not self.auto_process_checkbox.isChecked()
+            or self._auto_cancelled
+            or self._process_feedback_timer.isActive()
+            or self.recording is None
+            or not self.recording.transcript_complete
+            or not self._has_agent_session()
+        ):
+            return
+        self._countdown = AUTO_PROCESS_SECONDS
+        self._show_countdown()
+        self._auto_timer.start()
+        self._show_status_message(
+            f"Auto process: Process is pressed in {AUTO_PROCESS_SECONDS} s; "
+            "any click or key cancels it."
+        )
+
+    def _show_countdown(self) -> None:
+        if self._countdown is not None and not self._process_feedback_timer.isActive():
+            self.process_button.setText(f"Process ({self._countdown})")
+
+    def _on_auto_tick(self) -> None:
+        if self._countdown is None:
+            self._auto_timer.stop()
+            return
+        if QApplication.activeModalWidget() is not None:
+            return  # a dialog is open: hold the countdown
+        self._countdown -= 1
+        if self._countdown > 0:
+            self._show_countdown()
+            return
+        self._stop_countdown()
+        log.info("Auto process: pressing Process")
+        self.process()
+
+    def _stop_countdown(self) -> None:
+        self._auto_timer.stop()
+        if self._countdown is None:
+            return
+        self._countdown = None
+        if not self._process_feedback_timer.isActive():
+            self.process_button.setText("Process")
+
+    def _cancel_countdown(self) -> None:
+        """The user did something: the countdown stops for good (until the checkbox is
+        toggled again or another transcript completes)."""
+        if self._countdown is None:
+            return
+        self._stop_countdown()
+        self._auto_cancelled = True
+        self._show_status_message("Auto process cancelled; press Process when you are ready.")
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        # Installed on the application. A key that matches one of the window's
+        # shortcuts (Space, I, O, arrows) never arrives as KeyPress: the shortcut map
+        # takes it after the ShortcutOverride, so that one counts as the user's action.
+        if self._countdown is not None and event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.KeyPress,
+            QEvent.Type.ShortcutOverride,
+            QEvent.Type.Wheel,
+        ):
+            self._cancel_countdown()
+        return super().eventFilter(watched, event)
 
     # Agent sessions ---------------------------------------------------------
 
@@ -994,6 +1250,7 @@ class EditorWindow(QMainWindow):
             else:
                 self._select_row(row)
         self._update_status()
+        self._maybe_start_countdown()  # an agent waits now
         # Un-minimize only: showNormal() would also drop a maximized window to normal.
         self.setWindowState(
             (self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
@@ -1021,9 +1278,23 @@ class EditorWindow(QMainWindow):
             return f"waiting for Process ({self.editor_session.stem})"
         return ""
 
+    def _transcription_status(self) -> str:
+        recording = self.recording
+        if recording is None or recording.transcript_complete:
+            return ""
+        if recording.session_id in self._transcription_failed:
+            return "transcription failed"
+        if self.transcription.is_running(recording.session_id):
+            fraction = self._transcription_fraction.get(recording.session_id)
+            if fraction is None and recording.duration_ms > 0:
+                fraction = recording.transcribed_ms / recording.duration_ms
+            percent = f" {int((fraction or 0.0) * 100)} %"
+            return f"transcribing{percent}"
+        return "transcription pending"
+
     def _update_status(self) -> None:
-        agent = self._agent_status()
-        suffix = f"   |   {agent}" if agent else ""
+        parts = [p for p in (self._transcription_status(), self._agent_status()) if p]
+        suffix = "".join(f"   |   {p}" for p in parts)
         if self.recording is None:
             self.status_label.setText("No recording selected" + suffix)
             return
@@ -1051,6 +1322,8 @@ class EditorWindow(QMainWindow):
         right_state = settings.value("splitter/right")
         if right_state is not None:
             self.right_splitter.restoreState(right_state)
+        auto = settings.value("process/auto", False, type=bool)
+        self.auto_process_checkbox.setChecked(bool(auto))
 
     def save_settings(self) -> None:
         settings = self._settings
@@ -1059,13 +1332,19 @@ class EditorWindow(QMainWindow):
         settings.setValue("window/geometry", self.saveGeometry())
         settings.setValue("splitter/main", self.main_splitter.saveState())
         settings.setValue("splitter/right", self.right_splitter.saveState())
+        settings.setValue("process/auto", self.auto_process_checkbox.isChecked())
         settings.sync()
 
     def shutdown(self) -> None:
         self._timer.stop()
         self._attach_timer.stop()
         self._process_feedback_timer.stop()
+        self._auto_timer.stop()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self.player.stop()
+        self.transcription.shutdown()  # the stored partial transcript resumes next time
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
         self.timeline.shutdown()
@@ -1073,6 +1352,8 @@ class EditorWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._attach_timer.stop()
+        self._stop_countdown()
+        self.transcription.stop()  # no more segments are stored once we start closing
         self._flush_crop()
         # Closing without Process: the agents learn that nothing is to be done.
         self._close_editor_session()
@@ -1083,4 +1364,11 @@ class EditorWindow(QMainWindow):
         super().closeEvent(event)
 
 
-__all__ = ["EditorWindow", "PROCESS_BUTTON_STYLE", "TimeEdit", "WINDOW_TITLE"]
+__all__ = [
+    "AUTO_PROCESS_SECONDS",
+    "EditorWindow",
+    "PROCESS_BUTTON_STYLE",
+    "RENDER_BUTTON_STYLE",
+    "TimeEdit",
+    "WINDOW_TITLE",
+]

@@ -353,9 +353,20 @@ def _fake_transcription(monkeypatch, progress_fraction: float | None = None):
     monkeypatch.setattr(pipeline_mod, "transcribe_recording", fake_transcribe, raising=False)
 
 
+def _no_transcription(monkeypatch):
+    """Stop -> Video Editor must not transcribe in the control window any more."""
+    import video_story.transcribe.pipeline as pipeline_mod
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("the control window transcribed instead of the editor")
+
+    monkeypatch.setattr(pipeline_mod, "transcribe_recording", unexpected, raising=False)
+
+
 def test_video_editor_choice_processes_and_hands_over(window, controller, monkeypatch, qtbot):
-    """Stop -> Video Editor: transcribe, then open the editor; the session stays non-final."""
-    _fake_transcription(monkeypatch)
+    """Stop -> Video Editor: save the recording and open the editor at once (it transcribes
+    in the background); the session stays non-final and no progress dialog is shown."""
+    _no_transcription(monkeypatch)
     launched: list[dict] = []
 
     def fake_launch(config, session_id=None, config_file=None, recording_session=None):
@@ -377,12 +388,20 @@ def test_video_editor_choice_processes_and_hands_over(window, controller, monkey
     assert state.status is Status.EDITING and not state.status.final
     assert state.pid == 4321 and state.crop is None
     assert state.recording_dir == str(controller.paths.final_dir)
-    assert (controller.paths.final_dir / "transcript.txt").exists()
+    assert "transcribing" in (state.message or "")
+    final = controller.paths.final_dir
+    assert (final / "manifest.json").exists()
+    assert not (final / "transcript.txt").exists() and not (final / "transcript.json").exists()
+    from video_story.core.manifest import read_manifest
+
+    assert read_manifest(final / "manifest.json").transcript is None
+    assert window._progress_dialog is None  # nothing to wait for: no transcription dialog
+    assert "Editor" in window.status_label.text()
 
 
 def test_video_editor_choice_falls_back_to_processed(window, controller, monkeypatch, qtbot):
     """When the editor cannot start, the session is processed with the whole range."""
-    _fake_transcription(monkeypatch)
+    _no_transcription(monkeypatch)
 
     def failing_launch(config, session_id=None, config_file=None, recording_session=None):
         raise RuntimeError("no editor today")

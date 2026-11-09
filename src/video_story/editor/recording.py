@@ -10,10 +10,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from video_story.core.cursor import CursorPosition, cursor_from_json
-from video_story.core.manifest import Manifest, read_manifest
+from video_story.core.manifest import Manifest, TranscriptInfo, read_manifest, write_manifest
 from video_story.core.screens import Screen
-from video_story.core.session import SessionPaths
-from video_story.core.transcript import Segment, Transcript, read_transcript, write_transcript
+from video_story.core.session import SessionPaths, now_iso
+from video_story.core.transcript import (
+    Segment,
+    Transcript,
+    drop_credit_hallucinations,
+    normalize_segments,
+    read_transcript,
+    write_transcript,
+)
 from video_story.host.runner import FrameIndex, FrameRef
 
 log = logging.getLogger(__name__)
@@ -172,6 +179,92 @@ class LoadedRecording:
 
     # Transcript -------------------------------------------------------------
 
+    @property
+    def transcript_complete(self) -> bool:
+        """False while the recording still needs (more) transcription."""
+        return self.transcript is not None and self.transcript.complete
+
+    @property
+    def transcribed_ms(self) -> int:
+        """How far into the recording the stored segments reach (the whole when complete)."""
+        transcript = self.transcript
+        if transcript is None:
+            return 0
+        if transcript.complete:
+            return self.duration_ms
+        if transcript.transcribed_ms is not None:
+            return transcript.transcribed_ms
+        return max((s.end_ms for s in transcript.segments), default=0)
+
+    def _store_transcript(self, updated: Transcript) -> None:
+        """Write ``transcript.txt``/``.json`` and adopt ``updated`` (files first)."""
+        base = self.paths.final_dir
+        write_transcript(
+            self.paths.transcript_txt_path(base), self.paths.transcript_json_path(base), updated
+        )
+        self.transcript = updated
+        self._segments = sorted(updated.segments, key=lambda s: s.start_ms)
+        self._segment_starts = [s.start_ms for s in self._segments]
+
+    def add_segments(self, segments: list[Segment], transcribed_ms: int) -> list[Segment]:
+        """Segments the background transcription produced: stored as an incomplete
+        transcript (``complete`` false, ``transcribed_ms`` = how far whisper got) and
+        written, so that an interrupted transcription resumes there. Returns the
+        segments that were new."""
+        transcript = self.transcript or Transcript(
+            language=None, segments=[], complete=False, transcribed_ms=0
+        )
+        known = set(transcript.segments)
+        new = [
+            s for s in drop_credit_hallucinations(normalize_segments(segments)) if s not in known
+        ]
+        reached = max(
+            int(transcribed_ms),
+            transcript.transcribed_ms or 0,
+            *(s.end_ms for s in new),
+        )
+        merged = sorted([*transcript.segments, *new], key=lambda s: (s.start_ms, s.end_ms))
+        self._store_transcript(
+            replace(transcript, segments=merged, complete=False, transcribed_ms=reached)
+        )
+        return new
+
+    def finish_transcript(
+        self, language: str | None, model: str | None, backend: str | None
+    ) -> None:
+        """The background transcription reached the end: mark the transcript complete,
+        write it and record it in ``manifest.json``."""
+        transcript = self.transcript or Transcript(language=None, segments=[])
+        updated = replace(
+            transcript,
+            language=language or transcript.language,
+            model=model or transcript.model,
+            backend=backend or transcript.backend,
+            segments=drop_credit_hallucinations(normalize_segments(transcript.segments)),
+            complete=True,
+            transcribed_ms=None,
+        )
+        self._store_transcript(updated)
+        manifest_path = self.paths.manifest_path(self.paths.final_dir)
+        try:
+            manifest = read_manifest(manifest_path)
+        except (OSError, ValueError, KeyError) as exc:
+            log.warning("cannot update manifest %s: %s", manifest_path, exc)
+            return
+        manifest.transcript = TranscriptInfo(
+            language=updated.language,
+            model=updated.model,
+            backend=updated.backend,
+            segments=len(updated.segments),
+        )
+        manifest.finished_at = manifest.finished_at or now_iso()
+        try:
+            write_manifest(manifest_path, manifest)
+        except OSError as exc:
+            log.warning("cannot write manifest %s: %s", manifest_path, exc)
+            return
+        self.manifest = manifest
+
     def segment_at(self, time_ms: int) -> Segment | None:
         """The single segment containing ``time_ms`` (the one shown as the subtitle).
 
@@ -205,14 +298,7 @@ class LoadedRecording:
             raise ValueError("the segment is not part of this recording's transcript")
         segments = [new if s == old else s for s in transcript.segments]
         segments.sort(key=lambda s: (s.start_ms, s.end_ms))
-        updated = replace(transcript, segments=segments)
-        base = self.paths.final_dir
-        write_transcript(
-            self.paths.transcript_txt_path(base), self.paths.transcript_json_path(base), updated
-        )
-        self.transcript = updated
-        self._segments = list(segments)
-        self._segment_starts = [s.start_ms for s in self._segments]
+        self._store_transcript(replace(transcript, segments=segments))
 
 
 __all__ = ["AudioFile", "LoadedRecording", "read_audio_info"]

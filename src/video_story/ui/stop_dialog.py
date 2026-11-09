@@ -38,8 +38,9 @@ class StopDialog(QDialog):
 
         self.editor_button = QPushButton(pencil_icon(), "Video Editor")
         self.editor_button.setToolTip(
-            "Stop recording, transcribe the audio and open the recording in the Video Story "
-            "Editor to crop it before the agent processes it"
+            "Stop recording and open it at once in the Video Story Editor, which transcribes "
+            "the audio in the background while you crop it; its green Process button hands "
+            "the result to the agent"
         )
         # Video Editor is the first and default choice (Enter picks it).
         self.editor_button.setDefault(True)

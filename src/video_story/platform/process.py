@@ -47,6 +47,18 @@ def gui_python() -> str:
     return str(exe)
 
 
+def console_python() -> str:
+    """Interpreter for a worker whose stdout is read through a pipe: ``python.exe``
+    rather than ``pythonw.exe`` on Windows (the parent, a GUI process, creates it
+    without a console window)."""
+    exe = Path(sys.executable)
+    if sys.platform.startswith("win") and exe.name.lower() == "pythonw.exe":
+        candidate = exe.with_name("python.exe")
+        if candidate.exists():
+            return str(candidate)
+    return str(exe)
+
+
 def spawn_detached(args: list[str], log_path: Path, cwd: Path | None = None) -> int:
     """Start a process that outlives the caller; stdout/stderr go to ``log_path``."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,4 +84,4 @@ def spawn_detached(args: list[str], log_path: Path, cwd: Path | None = None) -> 
     return proc.pid
 
 
-__all__ = ["gui_python", "pid_alive", "spawn_detached"]
+__all__ = ["console_python", "gui_python", "pid_alive", "spawn_detached"]

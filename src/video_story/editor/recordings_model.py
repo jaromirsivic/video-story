@@ -13,7 +13,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, QPersistent
 from video_story.core.manifest import read_manifest
 from video_story.core.session import SessionPaths, list_sessions
 from video_story.core.timeline import format_timestamp
-from video_story.core.transcript import read_transcript
+from video_story.core.transcript import read_transcript, transcript_status
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class RecordingItem:
     duration_ms: int
     screen_count: int
     first_line: str
+    transcript_complete: bool = True  # False: the editor still has to transcribe it
 
     @property
     def session_id(self) -> str:
@@ -44,7 +45,8 @@ class RecordingItem:
         length = format_timestamp(max(0, self.duration_ms))
         if length.startswith("00:"):
             length = length[3:]  # MM:SS.mmm unless the recording is an hour or longer
-        return f"{length}  |  {screens}"
+        suffix = "" if self.transcript_complete else "  |  transcribing"
+        return f"{length}  |  {screens}{suffix}"
 
     @property
     def display_text(self) -> str:
@@ -108,6 +110,7 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
                 duration_ms=manifest.recorded_duration_ms,
                 screen_count=len(manifest.screens),
                 first_line=_first_transcript_line(paths, base),
+                transcript_complete=transcript_status(paths.transcript_json_path(base)).complete,
             )
         )
     return items

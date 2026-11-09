@@ -497,7 +497,9 @@ class PreviewPanel(QWidget):
         self.edit_subtitle_button.setIcon(pencil_icon(20))
         self.edit_subtitle_button.setText("Edit")
         self.edit_subtitle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.edit_subtitle_button.setToolTip("Edit this subtitle: its time and what was said")
+        self.edit_subtitle_button.setToolTip(
+            "Edit the text of this subtitle (its time cannot be changed)"
+        )
         self.edit_subtitle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.edit_subtitle_button.setEnabled(False)
         self.edit_subtitle_button.clicked.connect(self.edit_subtitle.emit)

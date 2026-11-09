@@ -171,7 +171,8 @@ uv run video-story wait --editor <editor_session>         # ... waits for the gr
 
 ```bash
 uv run video-story doctor
-uv run video-story run            # opens the window and waits; press Record, talk, Stop, Video Editor, Process
+uv run video-story run            # opens the window and waits; press Record, talk, Stop, Video Editor,
+                                  # wait for the green transcription arrow to reach the end, Process
 ```
 
 Recordings land in the recording folder as `<YYYYMMDD-HHMMSS>/` with `manifest.json`,

@@ -138,17 +138,23 @@ class SessionController:
     ) -> Path:
         """Stop, transcribe and finalise. Blocking: run in a worker thread.
 
-        Returns the final recording directory. With ``hand_to_editor`` the session ends
-        in the non-final ``editing`` state instead of ``processed``: the window then
-        opens the editor (:meth:`editor_opened`) or, when that fails,
-        :meth:`editor_failed` finishes the session with the whole range.
+        Returns the final recording directory. With ``hand_to_editor`` the audio is
+        *not* transcribed here: the recording is finalised at once (manifest without a
+        transcript) and the session ends in the non-final ``editing`` state instead of
+        ``processed``. The window then opens the editor (:meth:`editor_opened`), which
+        transcribes in the background while the user already works with the recording;
+        when the editor cannot start, :meth:`editor_failed` finishes the session with
+        the whole range.
         """
         from video_story.transcribe.pipeline import transcribe_recording
 
         summary = self.stop_recording()
-        message = (
-            "Auto stop reached; processing." if summary.auto_stopped else "Processing recording."
-        )
+        if hand_to_editor:
+            message = "Saving the recording; the Video Story Editor transcribes it."
+        elif summary.auto_stopped:
+            message = "Auto stop reached; processing."
+        else:
+            message = "Processing recording."
         self._set_status(
             Status.PROCESSING,
             message,
@@ -169,11 +175,14 @@ class SessionController:
                 progress(fraction, text)
 
         try:
-            result = transcribe_recording(
-                self.paths, self.config, base_dir=self.paths.work_dir, progress=_progress
-            )
             manifest = summary.to_manifest(self.config, self.platform.name)
-            manifest.transcript = result.info
+            if hand_to_editor:
+                _progress(0.5, "Saving the recording")
+            else:
+                result = transcribe_recording(
+                    self.paths, self.config, base_dir=self.paths.work_dir, progress=_progress
+                )
+                manifest.transcript = result.info
             manifest.finished_at = now_iso()
             if summary.error:
                 manifest.notes.append(summary.error)
@@ -202,8 +211,9 @@ class SessionController:
         if hand_to_editor:
             self._set_status(
                 Status.EDITING,
-                "Recording processed; opening the Video Story Editor (waiting for Process).",
-                progress=1.0,
+                "Recording saved; opening the Video Story Editor, which transcribes it "
+                "(waiting for Process).",
+                progress=0.0,
                 **paths_fields,
             )
         else:
@@ -222,7 +232,8 @@ class SessionController:
         """The editor process now owns the ``editing`` session (liveness by its pid)."""
         self._set_status(
             Status.EDITING,
-            "Video Story Editor open; waiting for the user to press Process.",
+            "Video Story Editor open; transcribing in the background, waiting for the user "
+            "to press Process.",
             pid=editor_pid,
         )
 

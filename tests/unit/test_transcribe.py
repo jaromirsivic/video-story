@@ -586,14 +586,15 @@ def test_transcribe_recording_writes_files_and_progress(session):
         {"wav": paths.audio_16k_path(paths.work_dir), "language": "auto", "threads": 2}
     ]
     assert not paths.audio_16k_path(paths.work_dir).exists(), "audio16k.wav is removed"
-    assert result.transcript.segments == [Segment(0, 1200, "first"), Segment(1500, 1500, "second")]
+    # The end of a segment never lies past the end of the audio (1 s here).
+    assert result.transcript.segments == [Segment(0, 1000, "first"), Segment(1500, 1500, "second")]
     assert result.transcript.language == "cs" and result.audio_duration_ms == 1000
     assert result.info.language == "cs" and result.info.segments == 2
     assert result.info.model == "ggml-small" and result.info.backend == "fake"
     assert result.info.duration_s is not None and result.info.duration_s >= 0
     txt = paths.transcript_txt_path(paths.work_dir).read_text(encoding="utf-8")
     assert txt.splitlines() == [
-        "[00:00:00.000 --> 00:00:01.200] first",
+        "[00:00:00.000 --> 00:00:01.000] first",
         "[00:00:01.500 --> 00:00:01.500] second",
     ]
     stored = read_transcript(paths.transcript_json_path(paths.work_dir))

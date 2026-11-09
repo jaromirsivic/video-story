@@ -300,6 +300,34 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
+    """Transcribe from ``--from-ms`` on, one JSON event per line (the editor's worker).
+
+    Nothing is written to the recording: the editor that started this process stores
+    the segments. The last line is the ``done`` event (``ok`` true); a failure is the
+    usual error object on stderr with a non-zero exit code.
+    """
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.pipeline import stream_transcription
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    base = paths.current_dir
+    if not paths.audio_path(base).exists():
+        raise CliError("NO_AUDIO", f"no audio.wav in {base}")
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    return stream_transcription(
+        paths, cfg, base_dir=base, start_ms=max(0, args.from_ms), emit=emit_event
+    )
+
+
 def default_export_output(paths: SessionPaths, screen: str) -> Path:
     """``<recording_folder>/<session_id>_<screen>.mp4`` when no output is given."""
     return paths.recording_folder / f"{paths.session_id}_{screen}.mp4"
@@ -474,6 +502,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
     p.add_argument("directory", help="session id or recording directory")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("transcribe-stream", help=argparse.SUPPRESS)  # internal: editor worker
+    p.add_argument("directory", help="session id or recording directory")
+    p.add_argument("--from-ms", type=int, default=0, help="resume at this time")
+    p.set_defaults(func=cmd_transcribe_stream)
 
     p = sub.add_parser("export", help="render a recording to MP4 (+ SRT) with ffmpeg")
     p.add_argument("--session", required=True, help="session id or recording directory")

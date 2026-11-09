@@ -211,6 +211,23 @@ def adopt_recording_session(paths: SessionPaths) -> None:
     write_state(paths.state_path, state)
 
 
+def update_recording_session_progress(paths: SessionPaths, fraction: float, message: str) -> None:
+    """The editor reports how far its background transcription got (``editing`` only).
+
+    Advisory for the agent polling ``wait``: a session that is no longer ``editing``
+    (or whose state file cannot be read) is left alone.
+    """
+    try:
+        state = read_state(paths.state_path)
+    except RuntimeError:
+        return
+    if state.status is not Status.EDITING:
+        return
+    state.progress = max(0.0, min(1.0, fraction))
+    state.message = message
+    write_state(paths.state_path, state)
+
+
 def finish_recording_session(
     paths: SessionPaths, crop: Crop, shown_session_id: str | None = None
 ) -> None:
@@ -281,6 +298,7 @@ __all__ = [
     "new_editor_session",
     "read_editor_event",
     "take_attach_requests",
+    "update_recording_session_progress",
     "wait_for_editor",
     "write_attach_request",
     "write_editor_event",

@@ -40,18 +40,24 @@ Loop until `final` is `true`:
 
 Each call returns after at most 240 s with the current `status` and `timed_out`. Call it
 again when `timed_out` is true. Do not start other work while waiting; the user is
-recording. Statuses: `ready` (window open), `recording`, `processing` (transcribing),
-`editing` (the user chose **Video Editor** after Stop and is cropping the recording in
-the editor; keep waiting), `processed` (done), `cancelled` (window closed without a
-recording, or the editor was closed without Process: do nothing), `failed` (see
-`message` and `recording.log` in the work folder).
+recording. Statuses: `ready` (window open), `recording`, `processing` (saving the
+recording), `editing` (the user chose **Video Editor** after Stop: the editor is open,
+transcribes the audio in the background - `progress` and `message` say how far - and
+the user crops the recording; keep waiting), `processed` (done), `cancelled` (window
+closed without a recording, or the editor was closed without Process: do nothing),
+`failed` (see `message` and `recording.log` in the work folder).
 
-The user can press **Stop**, then choose **Video Editor** (the default: process, then
-crop in the editor, optionally correct subtitles with **Edit**, and press its green
-**Process** button, which closes the editor), **Continue Recording** or
-**Discard Recording**; a stopped recording always goes through the editor (discarding returns the window to the
-Record state; the same session continues). Recording also stops automatically after the configured
-auto-stop time (default 2 hours) and is then processed.
+The user can press **Stop**, then choose **Video Editor** (the default: the editor
+opens at once and transcribes while the user crops, optionally corrects subtitles with
+**Edit**, and presses its green **Process** button, which closes the editor; Render and
+Process are available only once the transcript is complete, and **Auto process** presses
+Process by itself five seconds after that unless the user clicks or types), **Continue
+Recording** or **Discard Recording**; a stopped recording always goes through the editor
+(discarding returns the window to the Record state; the same session continues).
+Recording also stops automatically after the configured auto-stop time (default 2
+hours) and is then transcribed in the control window and processed without the editor.
+Hallucinated subtitle credits ("Titulky vytvořil ...", "Subtitles by ...") are dropped
+from the transcript.
 
 ## 4. Read the material (status `processed`)
 
@@ -119,7 +125,10 @@ recording folder untouched (the user may want it later).
   window starts.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
-- `transcribe <recording_dir>` - redo the transcription of an existing recording.
+- `transcribe <recording_dir>` - redo (or complete) the transcription of an existing
+  recording. `describe` reports `transcript_complete` false with a `transcript_note`
+  when the editor's background transcription did not finish (the editor died); run
+  `transcribe` first in that case.
 - `sessions` - recent sessions; `status --session <id>` - one session.
 - `mcp` - run the MCP server (stdio by default) for hosts without shell access.
 

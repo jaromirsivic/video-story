@@ -208,18 +208,24 @@ class ControlWindow(QWidget):
         self._close_overlay()
         self.record_button.setEnabled(False)
         self.draw_button.setEnabled(False)
-        self.status_label.setText("Processing recording...")
-
-        self._progress_dialog = ProgressDialog(self)
         self._thread = QThread(self)
         self._worker = ProcessingWorker(self.controller, hand_to_editor=open_editor)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._progress_dialog.set_progress)
+        if open_editor:
+            # No transcription here: the recording is saved and the editor opens at once
+            # (it transcribes in the background), so there is nothing to wait for in a
+            # dialog; the status line says what happens.
+            self.status_label.setText("Opening the Video Story Editor...")
+        else:
+            self.status_label.setText("Processing recording...")
+            self._progress_dialog = ProgressDialog(self)
+            self._worker.progress.connect(self._progress_dialog.set_progress)
         self._worker.finished.connect(self._on_processed)
         self._worker.failed.connect(self._on_processing_failed)
         self._thread.start()
-        self._progress_dialog.show()
+        if self._progress_dialog is not None:
+            self._progress_dialog.show()
 
     def _stop_thread(self) -> None:
         if self._progress_dialog is not None:
@@ -254,7 +260,8 @@ class ControlWindow(QWidget):
                 self,
                 "Video Editor",
                 f"The editor could not be opened: {exc}\n\n"
-                "The recording was processed; the agent will use the whole recording.",
+                "The recording was saved; the agent will use the whole recording "
+                "(it can transcribe it with `video-story transcribe`).",
             )
             self._finish("processed")
             return

@@ -48,13 +48,19 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
 
 What the user can do in the window: select a recording on the left; press Space to
 play (subtitles always shown under the preview; the mouse wheel zooms
-the preview up to 800 %); correct a subtitle with the **Edit** button next to it (From,
-To and the text; Save rewrites `transcript.json` and `transcript.txt`, so the
-transcript you read is the user's corrected version of what was said); drag the In/Out
-handles on the timeline or press `I`/`O` at the playhead to crop (one crop for all
-screens, remembered per recording in `crop.json`); click a screen track to choose what
-is previewed and exported; press **Render** (Ctrl+R) for an MP4, or the green
-**Process** (Ctrl+Enter) to hand the cropped range to you. Process closes the editor.
+the preview up to 800 %); correct the words of a subtitle with the **Edit** button next
+to it (the From/To times are read-only; Save rewrites `transcript.json` and
+`transcript.txt`, so the transcript you read is the user's corrected version of what was
+said); drag the In/Out handles on the timeline or press `I`/`O` at the playhead to crop
+(one crop for all screens, remembered per recording in `crop.json`); click a screen
+track to choose what is previewed and exported; press the blue **Render** (Ctrl+R) for an
+MP4, or the green **Process** (Ctrl+Enter) to hand the cropped range to you. Process
+closes the editor. A recording that came straight from the Stop dialog is transcribed in
+the background of the editor: a green arrow under the audio track marks how far whisper
+got, subtitles appear as they are produced, and Render and Process stay disabled until
+the transcript is complete (closing the editor early keeps the partial transcript;
+selecting the recording again resumes it). **Auto process** presses Process by itself
+five seconds after the transcript completes unless the user clicks or types.
 
 ## 3. Export without the window
 
