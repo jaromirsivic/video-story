@@ -302,6 +302,10 @@ class ControlWindow(QWidget):
                     closed = getattr(self._overlay, "closed", None)
                     if closed is not None:
                         closed.connect(self._overlay_closed)
+                    keep_above = getattr(self._overlay, "keep_above", None)
+                    if keep_above is not None:
+                        # Stay movable and clickable above the drawing surface.
+                        keep_above(self)
                     self._connect_overlay_to_recorder()
                 except Exception as exc:
                     log.exception("cannot create overlay")
@@ -309,9 +313,10 @@ class ControlWindow(QWidget):
                     self.draw_button.setChecked(False)
                     return
             if self._overlay is not None:
+                # The overlay takes the keyboard focus (B / R / A pick a tool); the overlay
+                # keeps this window above it (keep_above).
                 self._overlay.show()  # type: ignore[attr-defined]
                 self.raise_()
-                self.activateWindow()
         elif self._overlay is not None:
             self._overlay.hide()  # type: ignore[attr-defined]
 

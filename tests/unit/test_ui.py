@@ -164,6 +164,29 @@ def test_draw_icon_uses_button_text_color(qtbot):
     assert image.pixelColor(19, 19).alpha() == 0 and image.pixelColor(4, 4).alpha() == 0
 
 
+def test_stop_dialog_buttons_have_icons(qtbot):
+    from video_story.ui.stop_dialog import StopDialog
+
+    dialog = StopDialog()
+    qtbot.addWidget(dialog)
+    buttons = (
+        dialog.process_button,
+        dialog.editor_button,
+        dialog.continue_button,
+        dialog.discard_button,
+    )
+    keys = set()
+    for button in buttons:
+        icon = button.icon()
+        assert not icon.isNull(), button.text()
+        image = icon.pixmap(24, 24).toImage()
+        assert any(image.pixelColor(x, y).alpha() > 0 for x in range(24) for y in range(24)), (
+            button.text()
+        )
+        keys.add(icon.cacheKey())
+    assert len(keys) == len(buttons)  # every choice has its own icon
+
+
 def test_progress_dialog_shows_position_line(qtbot):
     from video_story.ui.progress_dialog import ELLIPSIS, ProgressDialog
 

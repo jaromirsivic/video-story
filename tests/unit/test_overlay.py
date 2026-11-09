@@ -202,7 +202,106 @@ def test_keyboard_shortcuts(overlay, qtbot):
     drag(window, [(30, 30), (40, 40)])
     qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    qtbot.keyClick(window, Qt.Key.Key_C)
+    qtbot.keyClick(window, Qt.Key.Key_C)  # plain C no longer clears (too easy to hit)
+    assert len(overlay.shapes()) == 1
+    ctrl_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_shift)
+    assert overlay.shapes() == []
+
+
+def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
+    """Esc / Ctrl+Z / Ctrl+Shift+C are application-wide while the overlay is shown."""
+    from PySide6.QtWidgets import QWidget
+
+    other = QWidget()
+    qtbot.addWidget(other)
+    other.show()
+    other.activateWindow()
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is other, timeout=1000)
+    window = overlay.windows[0]
+    drag(window, [(10, 10), (40, 40)])
+    drag(window, [(50, 50), (80, 80)])
+    shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
+    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Shift+C"}
+    assert all(
+        s.context() == Qt.ShortcutContext.ApplicationShortcut and s.isEnabled()
+        for s in shortcuts.values()
+    )
+    qtbot.keyClick(other, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert len(overlay.shapes()) == 1
+    ctrl_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+    qtbot.keyClick(other, Qt.Key.Key_C, ctrl_shift)
+    assert overlay.shapes() == []
+    with qtbot.waitSignal(overlay.closed, timeout=1000):
+        qtbot.keyClick(other, Qt.Key.Key_Escape)
+    assert not overlay.is_visible()
+    assert not any(s.isEnabled() for s in shortcuts.values())  # off while hidden
+
+
+def test_right_button_always_draws_an_arrow(overlay):
+    window = overlay.windows[0]
+    right = Qt.MouseButton.RightButton
+    for tool in (Tool.RECTANGLE, Tool.BRUSH, Tool.ARROW):
+        overlay.set_tool(tool)
+        _mouse(window, QEvent.Type.MouseButtonPress, QPoint(100, 100), True, right)
+        _mouse(window, QEvent.Type.MouseMove, QPoint(150, 120), True, right)
+        # A left press during the right-button drag does not start another shape.
+        _mouse(window, QEvent.Type.MouseButtonPress, QPoint(150, 120), True)
+        _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(150, 120), False)
+        _mouse(window, QEvent.Type.MouseMove, QPoint(200, 160), True, right)
+        _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(200, 160), False, right)
+        assert overlay.tool is tool  # the selected tool is left alone
+    shapes = overlay.shapes()
+    assert [s.tool for s in shapes] == [Tool.ARROW] * 3
+    assert all(s.points == [QPointF(100, 100), QPointF(200, 160)] for s in shapes)
+    # The left button still draws with the selected tool.
+    overlay.set_tool(Tool.RECTANGLE)
+    drag(window, [(300, 300), (350, 340)])
+    assert overlay.shapes()[-1].tool is Tool.RECTANGLE
+
+
+def test_kept_window_can_be_moved_and_clicked_through_the_overlay(overlay, qtbot):
+    """A window kept above the overlay (the control window) may still end up below it:
+    a press on its spot moves it or clicks its button, and draws nothing."""
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    other = QWidget(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+    qtbot.addWidget(other)
+    button = QPushButton("Stop", other)
+    QVBoxLayout(other).addWidget(button)
+    clicks: list[bool] = []
+    button.clicked.connect(lambda: clicks.append(True))
+    other.resize(160, 60)
+    other.move(QGuiApplication.primaryScreen().geometry().topLeft() + QPoint(400, 300))
+    other.show()
+    overlay.keep_above(other)
+    window = overlay.windows[0]
+
+    start = other.pos()
+    inside = window.mapFromGlobal(other.mapToGlobal(QPoint(4, 4)))
+    drag(window, [(inside.x(), inside.y()), (inside.x() + 120, inside.y() + 70)])
+    assert overlay.shapes() == []
+    assert other.pos() == start + QPoint(120, 70)
+    assert clicks == []
+
+    # A click without moving lands on the button under the cursor.
+    on_button = window.mapFromGlobal(button.mapToGlobal(button.rect().center()))
+    drag(window, [(on_button.x(), on_button.y()), (on_button.x(), on_button.y())])
+    qtbot.waitUntil(lambda: clicks == [True], timeout=1000)
+    assert other.pos() == start + QPoint(120, 70) and overlay.shapes() == []
+
+    # The right button does not draw under it either.
+    _mouse(window, QEvent.Type.MouseButtonPress, on_button, True, Qt.MouseButton.RightButton)
+    _mouse(
+        window, QEvent.Type.MouseMove, on_button + QPoint(80, 80), True, Qt.MouseButton.RightButton
+    )
+    _mouse(
+        window,
+        QEvent.Type.MouseButtonRelease,
+        on_button + QPoint(80, 80),
+        False,
+        Qt.MouseButton.RightButton,
+    )
     assert overlay.shapes() == []
 
 

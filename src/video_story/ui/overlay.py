@@ -10,9 +10,13 @@ not reach the applications below it.
 A small floating toolbar (top-left of the primary screen at first; drag its title bar
 to move it whatever tool is selected, the cross closes drawing mode) offers the tools
 Rect / Arrow / Brush (rectangle is the default), Undo / Clear / Close and the 8-color
-palette. Keyboard shortcuts on the overlay windows:
-``Esc`` close, ``C`` clear, ``Ctrl+Z`` undo, ``B`` / ``R`` / ``A`` select a tool,
-``0`` reset the zoom.
+palette. The left mouse button draws with the selected tool, the right mouse button
+always draws an arrow. Other windows (the control window) can be kept above the overlay
+with :meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
+
+Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
+``Ctrl+Z`` undo, ``Ctrl+Shift+C`` clear. On the overlay windows also ``B`` / ``R`` /
+``A`` select a tool and ``0`` resets the zoom.
 
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
 once; the mouse wheel zooms that screen's picture in (up to 800 %) around the cursor
@@ -42,8 +46,10 @@ from PySide6.QtCore import QEvent, QLineF, QObject, QPoint, QPointF, QRectF, Qt,
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QContextMenuEvent,
     QGuiApplication,
     QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -51,9 +57,12 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QScreen,
+    QShortcut,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QApplication,
     QButtonGroup,
     QGridLayout,
     QHBoxLayout,
@@ -201,6 +210,16 @@ def paint_shape(painter: QPainter, shape: Shape) -> None:
         painter.drawPolygon(polygon)
 
 
+@dataclass
+class _FloatingDrag:
+    """A left-button press on the spot of a floating window lying below the overlay."""
+
+    window: QWidget
+    press: QPoint  # global position of the press
+    offset: QPoint  # press position relative to the window's frame
+    moved: bool = False  # False while it is still a click
+
+
 def _overlay_window_flags() -> Qt.WindowType:
     flags = (
         Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -223,7 +242,8 @@ class OverlayWindow(QWidget):
         self._zoom = MIN_ZOOM
         self._offset = QPointF(0.0, 0.0)  # canvas point shown at the window's top-left
         self._pan_anchor: tuple[QPointF, QPointF] | None = None  # (view press, offset)
-        self._toolbar_drag = False  # a press on the toolbar's spot moves the toolbar
+        self._draw_button = Qt.MouseButton.NoButton  # the button dragging self._current
+        self._floating_drag = False  # a press on a floating window's spot moves that window
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -337,10 +357,22 @@ class OverlayWindow(QWidget):
         self._controller._refresh_drawings()
         return shape
 
+    def cancel_gesture(self) -> None:
+        """Drop a drag in progress (the overlay is hidden before the button is released)."""
+        self._floating_drag = False
+        self._draw_button = Qt.MouseButton.NoButton
+        if self._pan_anchor is not None:
+            self._pan_anchor = None
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        if self._current is not None:
+            self._current = None
+            self.update()
+
     def clear_shapes(self) -> None:
         if self._shapes or self._current is not None:
             self._shapes.clear()
             self._current = None
+            self._draw_button = Qt.MouseButton.NoButton
             self.update()
             self._controller._refresh_drawings()
 
@@ -386,30 +418,36 @@ class OverlayWindow(QWidget):
         event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.MiddleButton:
-            if self._zoom > MIN_ZOOM and self._current is None and not self._toolbar_drag:
+        button = event.button()
+        busy = self._current is not None or self._floating_drag or self._pan_anchor is not None
+        if button == Qt.MouseButton.MiddleButton:
+            if self._zoom > MIN_ZOOM and not busy:
                 self._pan_anchor = (event.position(), QPointF(self._offset))
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 event.accept()
             else:
                 event.ignore()
             return
-        if event.button() != Qt.MouseButton.LeftButton or self._pan_anchor is not None:
+        if button not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton) or busy:
             event.ignore()
             return
         global_pos = event.globalPosition().toPoint()
-        if self._controller._toolbar_contains(global_pos):
-            # The toolbar sits right here but below this window: move it, whatever tool
-            # is selected, instead of drawing under it.
-            self._toolbar_drag = True
-            self._controller._begin_toolbar_drag(global_pos)
+        floating = self._controller._floating_at(global_pos)
+        if floating is not None:
+            # A floating window (toolbar, control window) sits right here but below this
+            # window: never draw under it. The left button moves it (or clicks the
+            # button under the cursor), whatever tool is selected.
+            if button == Qt.MouseButton.LeftButton:
+                self._floating_drag = True
+                self._controller._begin_floating_drag(floating, global_pos)
             event.accept()
             return
-        self._controller._raise_toolbar()
+        self._controller._raise_floating()
+        # The left button draws with the selected tool, the right button always an arrow.
+        tool = self._controller.tool if button == Qt.MouseButton.LeftButton else Tool.ARROW
         pos = self.to_canvas(event.position())
-        self._current = Shape(
-            self._controller.tool, QColor(self._controller.color), [pos, pos], self.screen_index
-        )
+        self._draw_button = button
+        self._current = Shape(tool, QColor(self._controller.color), [pos, pos], self.screen_index)
         self.update()
         self._controller._refresh_drawings()
         event.accept()
@@ -425,11 +463,11 @@ class OverlayWindow(QWidget):
             self._controller._refresh_drawings()
             event.accept()
             return
-        if self._toolbar_drag and event.buttons() & Qt.MouseButton.LeftButton:
-            self._controller._drag_toolbar_to(event.globalPosition().toPoint())
+        if self._floating_drag and event.buttons() & Qt.MouseButton.LeftButton:
+            self._controller._drag_floating_to(event.globalPosition().toPoint())
             event.accept()
             return
-        if self._current is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+        if self._current is None or not (event.buttons() & self._draw_button):
             event.ignore()
             return
         pos = self.to_canvas(event.position())
@@ -447,16 +485,17 @@ class OverlayWindow(QWidget):
             self.setCursor(Qt.CursorShape.CrossCursor)
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton and self._toolbar_drag:
-            self._toolbar_drag = False
-            self._controller._end_toolbar_drag()
+        if event.button() == Qt.MouseButton.LeftButton and self._floating_drag:
+            self._floating_drag = False
+            self._controller._end_floating_drag(event.globalPosition().toPoint())
             event.accept()
             return
-        if event.button() != Qt.MouseButton.LeftButton or self._current is None:
+        if self._current is None or event.button() != self._draw_button:
             event.ignore()
             return
         shape = self._current
         self._current = None
+        self._draw_button = Qt.MouseButton.NoButton
         pos = self.to_canvas(event.position())
         if shape.tool is Tool.BRUSH:
             if pos != shape.points[-1]:
@@ -470,15 +509,22 @@ class OverlayWindow(QWidget):
             self._controller._commit_shape(self, shape)
         event.accept()
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        event.accept()  # the right button draws arrows; there is no context menu
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # Esc, Ctrl+Z and Ctrl+Shift+C are application-wide shortcuts of the controller
+        # (they work whichever Video Story window has the focus); they are handled here
+        # too in case a key event reaches the overlay without passing the shortcut map.
         key = event.key()
         modifiers = event.modifiers()
         ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         if key == Qt.Key.Key_Escape:
             self._controller._user_close()
         elif key == Qt.Key.Key_Z and ctrl:
             self._controller.undo()
-        elif key == Qt.Key.Key_C and not ctrl:
+        elif key == Qt.Key.Key_C and ctrl and shift:
             self._controller.clear()
         elif key == Qt.Key.Key_B and not ctrl:
             self._controller.set_tool(Tool.BRUSH)
@@ -586,7 +632,11 @@ class OverlayToolbar(QWidget):
         group.setExclusive(True)
         for tool, label, tip in (
             (Tool.RECTANGLE, "Rect", "Rectangle: drag from corner to corner (R)"),
-            (Tool.ARROW, "Arrow", "Arrow: drag from tail to head (A)"),
+            (
+                Tool.ARROW,
+                "Arrow",
+                "Arrow: drag from tail to head (A); the right mouse button always draws an arrow",
+            ),
             (Tool.BRUSH, "Brush", "Brush: freehand line (B)"),
         ):
             button = QToolButton(self)
@@ -601,7 +651,7 @@ class OverlayToolbar(QWidget):
         row.addSpacing(8)
         for label, tip, signal in (
             ("Undo", "Undo the last shape (Ctrl+Z)", self.undo_requested),
-            ("Clear", "Remove all drawings (C)", self.clear_requested),
+            ("Clear", "Remove all drawings (Ctrl+Shift+C)", self.clear_requested),
             ("Close", "Leave drawing mode (Esc)", self.close_requested),
         ):
             button = QPushButton(label, self)
@@ -699,6 +749,9 @@ class DrawingOverlay(QObject):
         self._windows: list[OverlayWindow] = []
         self._history: list[OverlayWindow] = []  # window of each committed shape, in order
         self._toolbar: OverlayToolbar | None = None
+        self._keep_above: list[QWidget] = []  # other windows kept above the overlay
+        self._floating: _FloatingDrag | None = None
+        self._shortcuts: list[QShortcut] = []
         self._visible = False
         self._screens: list[Screen] = []
         self._drawings: list[dict[str, object]] = []
@@ -720,6 +773,26 @@ class DrawingOverlay(QObject):
 
     def is_visible(self) -> bool:
         return self._visible
+
+    def keep_above(self, window: QWidget) -> None:
+        """Keep ``window`` (e.g. the control window) above the overlay while it is shown.
+
+        Activating an overlay window (every click on it) puts it above the other
+        always-on-top windows; ``window`` is raised again like the toolbar, and a press
+        on its spot while it lies below the overlay moves it (or clicks its button)
+        instead of drawing under it.
+        """
+        if window in self._keep_above:
+            return
+        self._keep_above.append(window)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_window(w))
+        self._raise_floating()
+
+    def _forget_window(self, window: QWidget) -> None:
+        if window in self._keep_above:
+            self._keep_above.remove(window)
+        if self._floating is not None and self._floating.window is window:
+            self._floating = None
 
     def show(self) -> None:
         screens = QGuiApplication.screens()
@@ -748,21 +821,25 @@ class DrawingOverlay(QObject):
         toolbar.show()
         toolbar.raise_()
         self._visible = True
+        self._enable_shortcuts(True)
         focus_window = self._window_for_screen(primary) or self._windows[0]
         focus_window.activateWindow()
         focus_window.setFocus(Qt.FocusReason.OtherFocusReason)
-        # Activation raises the overlay window above the toolbar: put the toolbar back on
-        # top now and again once the (asynchronous) activation has settled.
-        toolbar.raise_()
+        # Activation raises the overlay window above the toolbar and the control window:
+        # put them back on top now and again once the (asynchronous) activation settled.
+        self._raise_floating()
         self._schedule_toolbar_raise()
         self._refresh_drawings()
 
     def hide(self) -> None:
         self._visible = False
+        self._enable_shortcuts(False)
+        self._floating = None
         if self._toolbar is not None:
             self._toolbar.end_drag()
             self._toolbar.hide()
         for window in self._windows:
+            window.cancel_gesture()
             window.hide()
             window.set_snapshot(None)  # a fresh picture is grabbed at the next show()
         self._refresh_drawings()
@@ -771,8 +848,9 @@ class DrawingOverlay(QObject):
         self.hide()
         self._destroy_windows()
         if self._toolbar is not None:
-            self._toolbar.deleteLater()
+            self._toolbar.deleteLater()  # deletes the shortcuts with it
             self._toolbar = None
+            self._shortcuts = []
 
     def clear(self) -> None:
         for window in self._windows:
@@ -858,6 +936,7 @@ class DrawingOverlay(QObject):
             toolbar.close_requested.connect(self._user_close)
             toolbar.set_tool(self._tool)
             toolbar.set_color(self._color.name().upper())
+            self._create_shortcuts(toolbar)
             self._toolbar = toolbar
         return self._toolbar
 
@@ -920,33 +999,78 @@ class DrawingOverlay(QObject):
         self._drawings = result
         self._zoom = zoom
 
-    def _raise_toolbar(self) -> None:
-        if self._visible and self._toolbar is not None and self._toolbar.isVisible():
-            self._toolbar.raise_()
+    def _floating_windows(self) -> list[QWidget]:
+        """Visible windows kept above the overlay, bottom to top (the toolbar last)."""
+        windows = [w for w in self._keep_above if w.isVisible()]
+        if self._toolbar is not None and self._toolbar.isVisible():
+            windows.append(self._toolbar)
+        return windows
+
+    def _raise_floating(self) -> None:
+        if not self._visible:
+            return
+        for window in self._floating_windows():
+            window.raise_()
 
     def _schedule_toolbar_raise(self) -> None:
         for delay in TOOLBAR_RAISE_DELAYS_MS:
-            QTimer.singleShot(delay, self, self._raise_toolbar)
+            QTimer.singleShot(delay, self, self._raise_floating)
 
-    def _toolbar_contains(self, global_pos: QPoint) -> bool:
-        toolbar = self._toolbar
-        return bool(
-            toolbar is not None
-            and toolbar.isVisible()
-            and toolbar.frameGeometry().contains(global_pos)
-        )
+    def _floating_at(self, global_pos: QPoint) -> QWidget | None:
+        """The topmost floating window whose frame contains ``global_pos``."""
+        for window in reversed(self._floating_windows()):
+            if window.frameGeometry().contains(global_pos):
+                return window
+        return None
 
-    def _begin_toolbar_drag(self, global_pos: QPoint) -> None:
-        if self._toolbar is not None:
-            self._toolbar.begin_drag(global_pos)
+    def _begin_floating_drag(self, window: QWidget, global_pos: QPoint) -> None:
+        window.raise_()
+        if window is not self._toolbar:
+            self._raise_floating()  # keep the toolbar above the other floating windows
+        offset = global_pos - window.frameGeometry().topLeft()
+        self._floating = _FloatingDrag(window, QPoint(global_pos), offset)
 
-    def _drag_toolbar_to(self, global_pos: QPoint) -> None:
-        if self._toolbar is not None:
-            self._toolbar.drag_to(global_pos)
+    def _drag_floating_to(self, global_pos: QPoint) -> None:
+        drag = self._floating
+        if drag is None:
+            return
+        if not drag.moved:
+            if (global_pos - drag.press).manhattanLength() < QApplication.startDragDistance():
+                return  # still a click, not a drag
+            drag.moved = True
+        drag.window.move(global_pos - drag.offset)
+        if drag.window is self._toolbar:
+            self._toolbar.user_moved = True
 
-    def _end_toolbar_drag(self) -> None:
-        if self._toolbar is not None:
-            self._toolbar.end_drag()
+    def _end_floating_drag(self, global_pos: QPoint) -> None:
+        drag, self._floating = self._floating, None
+        if drag is None or drag.moved:
+            return
+        # A click (no drag): the window is on top again now; pass the click on to the
+        # button under the cursor so the user does not have to click twice.
+        local = drag.window.mapFromGlobal(global_pos)
+        child = drag.window.childAt(local)
+        while child is not None and not isinstance(child, QAbstractButton):
+            child = child.parentWidget()
+        if isinstance(child, QAbstractButton) and child.isEnabled():
+            QTimer.singleShot(0, child.click)  # after this mouse event has been handled
+
+    def _create_shortcuts(self, parent: QWidget) -> None:
+        """Esc / Ctrl+Z / Ctrl+Shift+C for every Video Story window (enabled while shown)."""
+        for sequence, slot in (
+            (QKeySequence(Qt.Key.Key_Escape), self._user_close),
+            (QKeySequence("Ctrl+Z"), self.undo),
+            (QKeySequence("Ctrl+Shift+C"), self.clear),
+        ):
+            shortcut = QShortcut(sequence, parent)
+            shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            shortcut.setEnabled(self._visible)
+            shortcut.activated.connect(slot)
+            self._shortcuts.append(shortcut)
+
+    def _enable_shortcuts(self, enabled: bool) -> None:
+        for shortcut in self._shortcuts:
+            shortcut.setEnabled(enabled)
 
     def _user_close(self) -> None:
         if not self._visible:

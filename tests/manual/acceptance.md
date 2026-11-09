@@ -52,6 +52,7 @@ person with the window on screen.
 | V6 | Standalone editor: the agent waits on `wait --editor`; Process sends session id and crop; closing without Process sends `closed` and the agent does nothing | `tests/unit/test_editor_session.py::test_editor_session_events_and_wait`, `tests/unit/test_editor_process.py` | "Edit Video Story", pick an older recording, Process; then repeat and close instead |
 | V7 | Closing the editor without Process after Video Editor cancels the session (recording kept) | `tests/unit/test_editor_session.py::test_recording_session_finish_and_cancel`, `tests/unit/test_editor_process.py` | Record, Stop, Video Editor, close the editor |
 | V8 | Crop is stored in `crop.json` on every change and restored when the recording is reopened | `tests/unit/test_editor_process.py`, `tests/unit/test_editor_session.py::test_crop_round_trip_and_clamping` | Crop, close the editor, reopen it |
+| V9 | Drawing: the left button uses the selected tool, the right button always draws an arrow; the control window stays above the drawing layer and can be dragged and clicked; Esc leaves, Ctrl+Z undoes, Ctrl+Shift+C clears (also with the focus in the control window); the Stop dialog buttons have icons | `tests/unit/test_overlay.py` (right button, kept window, shortcuts), `tests/unit/test_ui.py::test_stop_dialog_buttons_have_icons` | Record, Draw on Screen, draw with both buttons, drag the control window by its title bar, press Ctrl+Z, Ctrl+Shift+C, Esc, then Stop |
 
 ### Manual editor script (5 minutes)
 

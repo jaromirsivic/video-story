@@ -10,12 +10,15 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPalette,
+    QPen,
     QPixmap,
     QPolygonF,
 )
 
 RECORD_RED = QColor("#E53935")
 STOP_RED = QColor("#C62828")
+PROCESS_GREEN = QColor("#2E7D32")
+DISCARD_RED = QColor("#C62828")
 INK = QColor("#333333")
 
 
@@ -136,4 +139,69 @@ def pencil_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
-__all__ = ["draw_icon", "pencil_icon", "record_icon", "settings_icon", "stop_icon"]
+def process_icon(size: int = 24) -> QIcon:
+    """A white check mark on a green disc: finish and process the recording."""
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(PROCESS_GREEN)
+        margin = s * 0.08
+        p.drawEllipse(QRectF(margin, margin, s - 2 * margin, s - 2 * margin))
+        pen = QPen(QColor("#FFFFFF"), s * 0.12)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(s * 0.28, s * 0.52),
+                    QPointF(s * 0.44, s * 0.67),
+                    QPointF(s * 0.72, s * 0.36),
+                ]
+            )
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
+def discard_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A trash can (lid with handle, tapered bin with ribs): delete the recording."""
+    ink = QColor(color) if color is not None else DISCARD_RED
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        # Handle and lid.
+        p.drawRoundedRect(QRectF(s * 0.39, s * 0.10, s * 0.22, s * 0.10), s * 0.03, s * 0.03)
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.18, s * 0.68, s * 0.09), s * 0.03, s * 0.03)
+        # Bin with three ribs cut out.
+        body = QPainterPath()
+        body.addPolygon(
+            QPolygonF(
+                [
+                    QPointF(s * 0.23, s * 0.32),
+                    QPointF(s * 0.77, s * 0.32),
+                    QPointF(s * 0.70, s * 0.90),
+                    QPointF(s * 0.30, s * 0.90),
+                ]
+            )
+        )
+        body.closeSubpath()
+        ribs = QPainterPath()
+        for x in (0.36, 0.47, 0.58):
+            ribs.addRect(QRectF(s * x, s * 0.40, s * 0.06, s * 0.42))
+        p.drawPath(body.subtracted(ribs))
+
+    return QIcon(_pixmap(size, draw))
+
+
+__all__ = [
+    "discard_icon",
+    "draw_icon",
+    "pencil_icon",
+    "process_icon",
+    "record_icon",
+    "settings_icon",
+    "stop_icon",
+]

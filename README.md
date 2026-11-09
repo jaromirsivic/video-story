@@ -11,7 +11,7 @@ Video Story is a plugin and skill for Claude Code, Codex and Claude Desktop (and
 ## How it works
 
 1. Say "Start Video Story" to your agent. A small window stays on top of other windows.
-2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (rectangle by default, brush, arrow, 8 colors) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
+2. Press **Record** and talk while you work. **Draw on Screen** opens a drawing layer (rectangle by default, brush, arrow, 8 colors; the right mouse button always draws an arrow; `Esc` leaves, `Ctrl+Z` undoes, `Ctrl+Shift+C` clears) that is captured in the screenshots and described in each frame's sidecar JSON. Recording stops automatically after the configured time (2 hours by default).
 3. Press **Stop** and choose **Process Recording**, **Video Editor** (process, then crop the recording in the editor and press its green **Process** button so the agent acts only on that range), **Continue Recording** or **Discard Recording**. Recording continues until you decide.
 4. The audio is transcribed on your CPU (Whisper large-v3-turbo, 5-bit quantised, automatic language detection). The window closes and the agent receives `transcript.txt`, `transcript.json`, `manifest.json` and `frames/` with one screenshot per screen and interval plus a sidecar JSON holding the cursor screen and position and the drawings visible at that moment.
 5. Recordings older than the configured retention (30 days by default) are deleted when Video Story starts; **Settings** also offers **Open Folder** and **Delete All Recordings**.
