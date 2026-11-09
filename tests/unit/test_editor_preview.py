@@ -339,3 +339,33 @@ def test_panel_keeps_the_zoom_view_and_transport(qtbot):
     assert isinstance(panel.view, PreviewWidget)
     assert panel.view.zoom == 1.0
     assert panel.play_button.text() == "Play"
+
+
+def test_panel_centres_transport_then_time_then_subtitle(qtbot):
+    """Buttons centred under the picture, the time centred below them, then the subtitle."""
+    panel = PreviewPanel()
+    qtbot.addWidget(panel)
+    panel.resize(1000, 600)
+    panel.show()
+    qtbot.waitExposed(panel)
+    buttons = [
+        panel.in_button,
+        panel.back_button,
+        panel.play_button,
+        panel.stop_button,
+        panel.forward_button,
+        panel.out_button,
+    ]
+    left = buttons[0].geometry().left()
+    right = buttons[-1].geometry().right()
+    centre = panel.width() / 2
+    assert abs((left + right) / 2 - centre) <= 6
+    time = panel.time_label.geometry()
+    assert time.top() > buttons[0].geometry().bottom()
+    assert abs(time.center().x() - centre) <= 6
+    assert panel.time_label.alignment() & Qt.AlignmentFlag.AlignHCenter
+    assert panel.subtitle_label.geometry().top() > time.bottom()
+    assert not hasattr(panel, "subtitles_check")
+    panel.set_subtitle("always shown")
+    assert panel.subtitle_label.text() == "always shown"
+    assert panel.edit_subtitle_button.isEnabled()

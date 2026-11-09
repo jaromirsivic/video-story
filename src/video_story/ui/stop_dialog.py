@@ -7,12 +7,14 @@ from enum import Enum
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from .icons import discard_icon, pencil_icon, process_icon, record_icon
+from .icons import discard_icon, pencil_icon, record_icon
 
 BUTTON_ICON_SIZE = QSize(20, 20)
 
 
 class StopChoice(Enum):
+    # PROCESS is not offered in the dialog (after Stop the user always goes through the
+    # editor); it remains for auto stop and for tests that process directly.
     PROCESS = "process"
     EDITOR = "editor"  # process, then open the recording in the Video Story Editor
     CONTINUE = "continue"
@@ -20,7 +22,7 @@ class StopChoice(Enum):
 
 
 class StopDialog(QDialog):
-    """Four choices. Recording keeps running while this dialog is open."""
+    """Three choices. Recording keeps running while this dialog is open."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -30,14 +32,10 @@ class StopDialog(QDialog):
         self.choice: StopChoice = StopChoice.CONTINUE
 
         layout = QVBoxLayout(self)
-        info = QLabel(
-            "Recording continues until you choose Video Editor, Process Recording or discard it."
-        )
+        info = QLabel("Recording continues until you choose Video Editor or discard it.")
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        self.process_button = QPushButton(process_icon(), "Process Recording")
-        self.process_button.setToolTip("Stop recording and transcribe the audio")
         self.editor_button = QPushButton(pencil_icon(), "Video Editor")
         self.editor_button.setToolTip(
             "Stop recording, transcribe the audio and open the recording in the Video Story "
@@ -52,7 +50,6 @@ class StopDialog(QDialog):
         self.discard_button.setToolTip("Delete all files of this recording")
         for button, choice in (
             (self.editor_button, StopChoice.EDITOR),
-            (self.process_button, StopChoice.PROCESS),
             (self.continue_button, StopChoice.CONTINUE),
             (self.discard_button, StopChoice.DISCARD),
         ):

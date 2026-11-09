@@ -64,7 +64,8 @@ WAIT_AGAIN_HINT = "call video_story_wait again until final is true"
 INSTRUCTIONS = """\
 Video Story records the user's narration, periodic screenshots of every screen and the
 cursor position, then transcribes the audio offline. Workflow: call video_story_start
-(opens the control window; the user records and presses "Process Recording"), then call
+(opens the control window; the user records, stops, crops in the Video Story Editor and
+presses its "Process" button), then call
 video_story_wait with the returned session_id in a loop until "final" is true. When the
 status is "processed", call video_story_describe or video_story_get_transcript to read the
 timed transcript, video_story_list_frames to find the screenshots taken at a moment of the
@@ -505,7 +506,7 @@ def create_server(config_file: Path | None = None) -> MCPServer:
 
     def video_story_start() -> dict[str, Any]:
         """Open the Video Story control window for the user. Returns the session_id to
-        pass to video_story_wait; the user records and then presses Process Recording."""
+        pass to video_story_wait; the user records, stops and presses Process in the editor."""
         return tool_start(config_file)
 
     async def video_story_wait(

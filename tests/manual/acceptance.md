@@ -23,8 +23,9 @@ person with the window on screen.
    cursor to the second screen. Press **Draw on Screen**, draw a rectangle, press Esc.
 4. Press **Stop**, choose **Continue Recording**, say one more sentence.
 5. Press **Stop**, choose **Discard Recording**, then **Keep Recording** (files stay).
-6. Press **Stop**, choose **Process Recording**. The "Transcribing Audio" dialog shows
-   progress; the window closes.
+6. Press **Stop**, choose **Video Editor** (the only way to process; there is no
+   Process Recording button). The "Transcribing Audio" dialog shows progress, the editor
+   opens; press its green **Process**.
 7. The agent reads the transcript, calls `frames --at <ms>` and opens the screenshot of
    the screen the cursor was on; the rectangle is visible in frames taken while drawn.
 8. `video-story sessions` lists the recording as `processed`.

@@ -44,7 +44,18 @@ import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from PySide6.QtCore import QEvent, QLineF, QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QLineF,
+    QObject,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -79,6 +90,7 @@ from PySide6.QtWidgets import (
 
 from video_story.core.screens import Screen
 
+from .icons import arrow_icon, draw_icon, rectangle_icon
 from .palette import DEFAULT_COLOR, PALETTE, PaletteColor
 
 STROKE_WIDTH = 4.0  # logical pixels
@@ -90,7 +102,9 @@ MIN_ZOOM = 1.0
 MAX_ZOOM = 8.0  # 800 %
 ZOOM_STEP = 1.25  # zoom factor per wheel notch (120 units of angle delta)
 TOOLBAR_RAISE_DELAYS_MS = (0, 150)  # re-raise the toolbar after window activation settles
-PALETTE_COLUMNS = 4  # the 8 colors are shown in two rows of four
+PALETTE_COLUMNS = 8  # the 8 colors are shown in one row
+TOOL_ICON_SIZE = 18  # logical pixels of the Rect / Arrow / Brush icons
+TOOL_ICON_INK = QColor("#000000")  # the toolbar has fixed light colors in every theme
 # Keyboard shortcut shown in brackets on every toolbar button (by button label).
 TOOLBAR_SHORTCUTS = {
     "Undo": "Ctrl+Z",
@@ -667,19 +681,33 @@ class OverlayToolbar(QWidget):
             buttons.addWidget(button, 0, column)
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for column, (tool, label, tip) in enumerate(
+        for column, (tool, label, tip, icon) in enumerate(
             (
-                (Tool.RECTANGLE, "Rect", "Rectangle: drag from corner to corner"),
+                (
+                    Tool.RECTANGLE,
+                    "Rect",
+                    "Rectangle: drag from corner to corner",
+                    rectangle_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
+                ),
                 (
                     Tool.ARROW,
                     "Arrow",
                     "Arrow: drag from tail to head; the right mouse button always draws an arrow",
+                    arrow_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
                 ),
-                (Tool.BRUSH, "Brush", "Brush: freehand line"),
+                (
+                    Tool.BRUSH,
+                    "Brush",
+                    "Brush: freehand line",
+                    draw_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
+                ),
             )
         ):
             button = QToolButton(self)
             button.setText(label)
+            button.setIcon(icon)
+            button.setIconSize(QSize(TOOL_ICON_SIZE, TOOL_ICON_SIZE))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.setToolTip(tip)
             button.setCheckable(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -705,7 +733,7 @@ class OverlayToolbar(QWidget):
             buttons.setColumnMinimumWidth(column, widest)  # three equal columns
         root.addLayout(buttons)
 
-        # The palette: two rows of four swatches, each labelled with its number key.
+        # The palette: one row of eight swatches, each labelled with its number key.
         grid = QGridLayout()
         grid.setSpacing(4)
         for index, entry in enumerate(PALETTE):

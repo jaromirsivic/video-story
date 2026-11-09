@@ -92,8 +92,6 @@ def test_edit_button_beside_subtitle_enabled_only_with_a_subtitle(editor):
     assert not button.isEnabled()
     _at(editor, 1800)
     assert button.isEnabled()
-    editor.preview.subtitles_check.setChecked(False)
-    assert not button.isEnabled()
 
 
 def test_save_rewrites_transcript_files_and_subtitle(editor, scripted, folder: Path):

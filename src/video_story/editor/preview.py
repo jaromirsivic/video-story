@@ -31,7 +31,6 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
-    QCheckBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -461,8 +460,10 @@ class PreviewPanel(QWidget):
         self.view = PreviewWidget(self)
         layout.addWidget(self.view, 1)
 
+        # Transport buttons centred under the picture, the time centred below them.
         row = QHBoxLayout()
         row.setSpacing(4)
+        row.addStretch(1)
         self.in_button = self._button("|<", "Go to In (Home)", self.go_in.emit, row)
         self.back_button = self._button(
             "<", "Step back 1/24 s (Left)", lambda: self.step.emit(-1), row
@@ -474,19 +475,16 @@ class PreviewPanel(QWidget):
             ">", "Step forward 1/24 s (Right)", lambda: self.step.emit(1), row
         )
         self.out_button = self._button(">|", "Go to Out (End)", self.go_out.emit, row)
-        row.addSpacing(12)
+        row.addStretch(1)
+        layout.addLayout(row)
+
         self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.time_label.font()
         font.setFamily("Consolas")
         font.setStyleHint(font.StyleHint.Monospace)
         self.time_label.setFont(font)
-        row.addWidget(self.time_label)
-        row.addStretch(1)
-        self.subtitles_check = QCheckBox("Subtitles")
-        self.subtitles_check.setChecked(True)
-        self.subtitles_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        row.addWidget(self.subtitles_check)
-        layout.addLayout(row)
+        layout.addWidget(self.time_label)
 
         self.subtitle_label = QLabel("")
         self.subtitle_label.setWordWrap(True)
@@ -509,7 +507,6 @@ class PreviewPanel(QWidget):
         subtitle_row.addWidget(self.edit_subtitle_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(subtitle_row)
         self._subtitle_text = ""
-        self.subtitles_check.toggled.connect(lambda _on: self._apply_subtitle())
 
     @staticmethod
     def _button(text: str, tooltip: str, slot, row: QHBoxLayout) -> QPushButton:
@@ -529,14 +526,11 @@ class PreviewPanel(QWidget):
         )
 
     def set_subtitle(self, text: str) -> None:
+        """Subtitles are always shown (there is no switch to hide them)."""
         self._subtitle_text = text
-        self._apply_subtitle()
-
-    def _apply_subtitle(self) -> None:
-        shown = self._subtitle_text if self.subtitles_check.isChecked() else ""
-        if self.subtitle_label.text() != shown:
-            self.subtitle_label.setText(shown)
-        self.edit_subtitle_button.setEnabled(bool(shown))
+        if self.subtitle_label.text() != text:
+            self.subtitle_label.setText(text)
+        self.edit_subtitle_button.setEnabled(bool(text))
 
     def paint_rect(self) -> QRect:
         return self.view.rect()

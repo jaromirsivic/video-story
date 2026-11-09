@@ -139,6 +139,44 @@ def pencil_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+def rectangle_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """An outlined rectangle: the Rect drawing tool."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = QPen(ink, max(1.5, s * 0.10))
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(s * 0.14, s * 0.24, s * 0.72, s * 0.52))
+
+    return QIcon(_pixmap(size, draw))
+
+
+def arrow_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A diagonal arrow (tail bottom left, head top right): the Arrow drawing tool."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = QPen(ink, max(1.5, s * 0.10))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(QPointF(s * 0.16, s * 0.84), QPointF(s * 0.68, s * 0.32))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(s * 0.88, s * 0.12),
+                    QPointF(s * 0.44, s * 0.24),
+                    QPointF(s * 0.76, s * 0.56),
+                ]
+            )
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
 def process_icon(size: int = 24) -> QIcon:
     """A white check mark on a green disc: finish and process the recording."""
 
@@ -197,11 +235,13 @@ def discard_icon(size: int = 24, color: QColor | None = None) -> QIcon:
 
 
 __all__ = [
+    "arrow_icon",
     "discard_icon",
     "draw_icon",
     "pencil_icon",
     "process_icon",
     "record_icon",
+    "rectangle_icon",
     "settings_icon",
     "stop_icon",
 ]

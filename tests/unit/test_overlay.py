@@ -479,7 +479,7 @@ def test_press_on_toolbar_spot_moves_toolbar_instead_of_drawing(overlay):
 
 
 def test_toolbar_layout_rows_and_outline(overlay):
-    """Undo/Clear/Close above Rect/Arrow/Brush, two rows of four numbered colors below."""
+    """Undo/Clear/Close above Rect/Arrow/Brush (with icons), one row of 8 colors below."""
     from PySide6.QtWidgets import QPushButton
 
     toolbar = overlay._toolbar
@@ -491,7 +491,10 @@ def test_toolbar_layout_rows_and_outline(overlay):
     swatches = list(toolbar._swatches.values())
     assert [s.text() for s in swatches] == [str(n) for n in range(1, 9)]
     rows = sorted({s.y() for s in swatches})
-    assert len(rows) == 2 and rows[0] > tools[0].y()
+    assert len(rows) == 1 and rows[0] > tools[0].y()
+    assert [s.x() for s in swatches] == sorted(s.x() for s in swatches)
+    assert all(not b.icon().isNull() for b in tools)
+    assert len({b.icon().cacheKey() for b in tools}) == 3
     assert "border: 2px solid #000000" in toolbar.styleSheet()
 
 

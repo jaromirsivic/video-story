@@ -170,7 +170,6 @@ def test_stop_dialog_buttons_have_icons(qtbot):
     dialog = StopDialog()
     qtbot.addWidget(dialog)
     buttons = (
-        dialog.process_button,
         dialog.editor_button,
         dialog.continue_button,
         dialog.discard_button,
@@ -199,7 +198,13 @@ def test_stop_dialog_video_editor_is_first_and_default(qtbot):
     widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
     buttons = [w for w in widgets if isinstance(w, QPushButton)]
     assert buttons[0] is dialog.editor_button and dialog.editor_button.isDefault()
-    assert not dialog.process_button.isDefault()
+    # No direct processing: after Stop the user always goes through the editor.
+    assert [b.text() for b in buttons] == [
+        "Video Editor",
+        "Continue Recording",
+        "Discard Recording",
+    ]
+    assert not hasattr(dialog, "process_button")
     dialog.show()
     qtbot.keyClick(dialog, Qt.Key.Key_Return)
     assert dialog.choice is StopChoice.EDITOR

@@ -26,7 +26,7 @@ from .waveform import BLOCK_MS, WaveformLoader, column_peaks
 RULER_H = 26
 HEADER_W = 70
 TRACK_H = 60
-AUDIO_H = 48
+AUDIO_H = TRACK_H  # the audio track is as tall as each screen track
 GAP = 3
 HANDLE_HIT_PX = 7
 PLAYHEAD_HIT_PX = 2  # the playhead wins over a crop handle this close to its line

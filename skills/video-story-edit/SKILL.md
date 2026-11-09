@@ -47,7 +47,7 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
 4. `NO_RECORDINGS` means there is nothing to edit yet; suggest recording with Video Story.
 
 What the user can do in the window: select a recording on the left; press Space to
-play (subtitles under the preview, toggle with the Subtitles box; the mouse wheel zooms
+play (subtitles always shown under the preview; the mouse wheel zooms
 the preview up to 800 %); correct a subtitle with the **Edit** button next to it (From,
 To and the text; Save rewrites `transcript.json` and `transcript.txt`, so the
 transcript you read is the user's corrected version of what was said); drag the In/Out

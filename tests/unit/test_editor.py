@@ -457,6 +457,11 @@ def test_window_session_argument_selects_that_recording(qtbot, folder: Path):
     assert window.recording.session_id == NEWEST
 
 
+def test_audio_track_is_as_tall_as_the_screen_tracks(editor):
+    heights = {rect.height() for _screen, rect in editor.timeline.track_rects()}
+    assert heights == {editor.timeline.audio_rect().height()}
+
+
 def test_track_click_selects_screen_and_preview(editor, qtbot):
     rects = dict(editor.timeline.track_rects())
     rect = rects["screen2"]
@@ -551,10 +556,7 @@ def test_subtitle_label_follows_playhead(editor):
     editor.model.set_playhead(1800)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == "second line"
-    editor.preview.subtitles_check.setChecked(False)
-    assert editor.preview.subtitle_label.text() == ""
-    editor.preview.subtitles_check.setChecked(True)
-    assert editor.preview.subtitle_label.text() == "second line"
+    assert not hasattr(editor.preview, "subtitles_check")  # subtitles are always shown
 
 
 def test_render_passes_selection_and_crop(editor, qtbot, monkeypatch, tmp_path: Path):
