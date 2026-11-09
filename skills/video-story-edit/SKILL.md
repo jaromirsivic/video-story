@@ -40,11 +40,14 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
    `timed_out` true: call it again. Event `process`: the result carries `session_id`,
    `crop` `{start_ms, end_ms}` and **`instructions`** (the user's master instructions
    for the whole recording, `""` when none - read them first, they frame everything
-   said in the recording and win over single sentences of the transcript); run
-   `describe --session <session_id>` and act on `transcript_in_range` (only the speech
-   inside the crop) and on frames inside the range (`frames --at <ms>` with times
-   between `start_ms` and `end_ms`), following the same rules as the video-story skill
-   (keypoints, clipboard in the sidecars, drawings). The crop applies to every screen.
+   said in the recording and win over single sentences of the transcript). Then work
+   text first, exactly as in section 4 of the video-story skill: run
+   `timeline --session <session_id>` (the cropped range as one text timeline: speech
+   with the cursor position, finished drawings with geometry and frame times, copied
+   text, cursor moves between screens, zoom, keypoints), decide from it which moments
+   really need a picture and fetch only those with
+   `frames --session <session_id> --at <ms> --screen <screenId> --no-drawings` (for a
+   shape the `after` time of its `DRAW` line). The crop applies to every screen.
    Event `closed`: the user closed the editor without Process; say so in one line and
    do nothing else.
 4. `NO_RECORDINGS` means there is nothing to edit yet; suggest recording with Video Story.

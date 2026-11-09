@@ -135,7 +135,7 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
 ```
 
 Tools: `video_story_start`, `video_story_wait`, `video_story_status`,
-`video_story_describe`, `video_story_get_transcript`, `video_story_list_frames`,
+`video_story_describe`, `video_story_get_transcript`, `video_story_timeline`, `video_story_list_frames`,
 `video_story_get_frame`, `video_story_config`, `video_story_doctor`, `video_story_edit`,
 `video_story_export`.
 

@@ -225,7 +225,7 @@ class FrameRef:
     image: Path
     sidecar: Path
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, include_drawings: bool = True) -> dict[str, Any]:
         cursor = None
         drawings: list[Any] = []  # finished shapes (released mouse button)
         drawing_now: dict[str, Any] | None = None  # the shape being drawn, no geometry
@@ -249,7 +249,7 @@ class FrameRef:
                 clipboard = raw_clipboard
         except (OSError, ValueError, KeyError, AttributeError):
             pass
-        return {
+        result: dict[str, Any] = {
             "screen": self.screen_id,
             "time_ms": self.time_ms,
             "image": str(self.image),
@@ -260,6 +260,10 @@ class FrameRef:
             "zoom": zoom,
             "clipboard": clipboard,
         }
+        if not include_drawings:
+            del result["drawings"]
+            result["drawing_ids"] = [d.get("id") for d in drawings if isinstance(d, dict)]
+        return result
 
 
 class FrameIndex:
@@ -311,12 +315,14 @@ def frames_at(
     at_ms: int,
     screen: str = "cursor",
     window_ms: int = 0,
+    include_drawings: bool = True,
 ) -> dict[str, Any]:
     """Frames matching a moment of the timeline.
 
     ``screen``: ``cursor`` (the screen the cursor was on at that moment), ``all``
     (every screen) or a screen id. ``window_ms`` > 0 also returns every frame within
-    ``at_ms`` +/- ``window_ms``.
+    ``at_ms`` +/- ``window_ms``. ``include_drawings`` False replaces the (repeated)
+    drawings list of every frame by ``drawing_ids``.
     """
     base = paths.current_dir
     frames_dir = paths.frames_dir(base)
@@ -359,10 +365,13 @@ def frames_at(
     for sid in selected:
         ref = index.at(sid, at_ms)
         if ref is not None:
-            result["frames"].append(ref.to_dict())
+            result["frames"].append(ref.to_dict(include_drawings))
     if window_ms > 0:
         result["window"] = {
-            sid: [r.to_dict() for r in index.window(sid, at_ms - window_ms, at_ms + window_ms)]
+            sid: [
+                r.to_dict(include_drawings)
+                for r in index.window(sid, at_ms - window_ms, at_ms + window_ms)
+            ]
             for sid in selected
         }
     if manifest is not None:

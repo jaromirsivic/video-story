@@ -258,7 +258,29 @@ def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
     cfg = _load(args)
     paths = _session_paths(args, cfg)
     try:
-        return frames_at(paths, args.at, screen=args.screen, window_ms=args.window)
+        return frames_at(
+            paths,
+            args.at,
+            screen=args.screen,
+            window_ms=args.window,
+            include_drawings=not args.no_drawings,
+        )
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
+    """Speech and screen events of the cropped range as one compact text timeline."""
+    from video_story.host.events import build_timeline
+    from video_story.host.runner import SessionError
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    start_ms, end_ms = args.start_ms, args.end_ms
+    if args.all:
+        start_ms, end_ms = 0, 10**12
+    try:
+        return build_timeline(paths, start_ms, end_ms)
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
 
@@ -497,7 +519,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="cursor (screen the cursor was on), all, or a screen id like screen2",
     )
     p.add_argument("--window", type=int, default=0, help="also list frames within +/- N ms")
+    p.add_argument(
+        "--no-drawings",
+        action="store_true",
+        help="leave out the drawings list of every frame (the timeline already has them)",
+    )
     p.set_defaults(func=cmd_frames)
+
+    p = sub.add_parser(
+        "timeline", help="speech, drawings, clipboard, cursor and keypoints as one text timeline"
+    )
+    p.add_argument("--session")
+    p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
+    p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
+    p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.set_defaults(func=cmd_timeline)
 
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
     p.add_argument("directory", help="session id or recording directory")

@@ -206,6 +206,17 @@ def test_get_transcript_formats(recording: SessionPaths, config_file: Path):
     assert bad["ok"] is False and bad["code"] == "USAGE"
 
 
+def test_timeline(recording: SessionPaths, config_file: Path):
+    result = mcp_server.tool_timeline(recording.session_id, config_file=config_file)
+    assert result["ok"] is True and result["counts"]["speech"] == 2
+    assert "0-400 SAY ahoj" in result["timeline"]
+    assert "CURSOR -> screen2" in result["timeline"]
+    part = mcp_server.tool_timeline(recording.session_id, 500, 900, config_file)
+    assert "SAY ahoj" not in part["timeline"] and "SAY svete" in part["timeline"]
+    bad = mcp_server.tool_timeline(recording.session_id, 900, 100, config_file)
+    assert bad["ok"] is False and bad["code"] == "USAGE"
+
+
 # frames -----------------------------------------------------------------------
 
 
@@ -414,6 +425,7 @@ def test_create_server_registers_tools(config_file: Path, recording: SessionPath
         "video_story_list_frames",
         "video_story_start",
         "video_story_status",
+        "video_story_timeline",
         "video_story_wait",
         "video_story_wait_editor",
     ]

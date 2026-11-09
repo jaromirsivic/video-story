@@ -67,92 +67,115 @@ processed without the editor. Hallucinated subtitle credits ("Titulky vytvořil 
 The final result holds `recording_dir`, `manifest`, `transcript_txt`, `transcript_json`,
 `frames_dir`, **`instructions`** and **`crop`** `{start_ms, end_ms}`.
 
-**`instructions` come first.** They are the user's master instructions for the whole
-recording, typed with the editor's **Instructions** button (also stored as
-`instructions.txt` in the recording folder and returned by `describe`). They say what
-the recording is for and what you must produce or respect - "create an implementation
-plan from what I describe", "answer in Czech", "only fix the bug, do not refactor" -
-and they override anything a single sentence of the transcript might suggest: read them
-before the transcript, keep them in mind for every request you carry out, and let them
-shape the result (its form, language, scope). An empty string means the user typed
-none; then the transcript alone is your brief.
+Work text first: everything that happened is available as text, and a screenshot costs
+far more than the lines describing it. Follow these steps in order.
+
+**Step 1 - the instructions.** `instructions` are the user's master instructions for the
+whole recording, typed with the editor's **Instructions** button (also stored as
+`instructions.txt` in the recording folder and returned by `timeline` and `describe`).
+They say what the recording is for and what you must produce or respect - "create an
+implementation plan from what I describe", "answer in Czech", "only fix the bug, do not
+refactor" - and they override anything a single sentence of the transcript might
+suggest: read them before anything else, keep them in mind for every request you carry
+out, and let them shape the result (its form, language, scope). An empty string means
+the user typed none; then the speech alone is your brief.
+
+**Step 2 - the timeline.** One call returns the whole part to act on as text:
+
+```text
+<launcher> timeline --session <session_id>
+```
 
 `crop` is the part of the recording the user wants you to act on (the whole recording
-unless they cropped it in the editor). Act only on speech and frames inside that range;
-`describe` returns `transcript_in_range` with just those segments. Then read the
-transcript. Lines look like:
+unless they cropped it in the editor); `timeline` covers exactly that range
+(`--start-ms`/`--end-ms` or `--all` change it). Its `timeline` field holds one event per
+line, ordered by time in milliseconds since the recording started:
 
 ```text
-[00:00:03.480 --> 00:00:07.120] And here, where my cursor is, add a button.
+0 START cursor screen1 2208,202
+15360-20140 SAY The Instructions button down here. [cursor screen1 654,1545 -> screen1 2238,300]
+24000 DRAW #1 rectangle #FF0000 screen1 corners 2118,1434 2334,1494 (pressed 22400, released 24000; frames before 22001, after 24500)
+32500 REMOVED #1 (last seen 32000: Undo, Clear or the drawing layer closed)
+43000 CLIPBOARD "Say what you want to get out of this recording, ..." (225 chars)
+51000 CURSOR -> screen2 412,388
+60000 KEYPOINT 1
+70500 ZOOM screen1 2.441x region 135,244 1049x656
 ```
 
-The transcript keeps the spoken language; do not translate or clean it up silently.
-Quote it when you need to confirm what was said.
+- `SAY` is a transcript segment with the cursor screen and position at its start and
+  end. The text keeps the spoken language; do not translate or clean it up silently,
+  quote it when you need to confirm what was said. "Here", "this" and "that" usually
+  mean the cursor position or a shape drawn around that time.
+- `DRAW #id` is a finished shape: `tool` (`rectangle`, `arrow`, `brush`), color, screen
+  and geometry in pixels of that screen's image, origin top-left - `corners` (two
+  opposite corners) of a rectangle, `tail`/`head` of an arrow, `bbox` of a brush stroke
+  (its full `path` is in the sidecar). `pressed`/`released` are the mouse press and
+  release; `frames before` is the last frame without the shape, `frames after` the
+  first one showing it. A shape enters the timeline only once the mouse button is
+  released, so the geometry is final. Ids count 1, 2, ... in the order the shapes were
+  finished. `(drawn before the range)` marks a shape already on screen when the crop
+  starts. Recordings made before shapes had ids say `seen <ms> to <ms>` instead of
+  press and release times.
+- `REMOVED` - shapes that disappeared (Undo, Clear, or the drawing layer was closed).
+- `CLIPBOARD` - text the user copied (Ctrl+C) just before that moment, cut after 200
+  characters; `frames --at <ms>` returns the whole text in `clipboard` (texts over 65535
+  characters end with `...`; what was in the clipboard before the recording is never
+  stored). When the user says "this text" or "what I copied", it is the nearest
+  preceding `CLIPBOARD` line.
+- `CURSOR` - the cursor moved to another screen.
+- `ZOOM` / `ZOOM END` - while drawing, the user zoomed a screen in (mouse wheel, up to
+  800 %): its image then shows the region `x,y widthxheight` of the real screen magnified
+  `factor` times, and cursor and drawing coordinates are in pixels of that zoomed image
+  (`(zoomed view)` on a `DRAW` line). To map an image point back to the real screen:
+  `x + px / factor`, `y + py / factor`; `frames --at` returns the exact `zoom` of a frame.
+- `KEYPOINT n` - a moment the user marked with **Insert keypoint** as important (the
+  green lines in the editor); use them as anchors when the user refers to "the first
+  keypoint" or when you look for the important parts of a long recording.
 
-For every instruction that refers to something on screen, fetch the matching frame:
+The result also carries `screens` (ids and image sizes; `screen1` is the primary),
+`counts` and `transcript_complete`; when it is false, run `transcribe` first (see
+below).
+
+**Step 3 - pick the moments that need a picture.** Read the whole timeline once, work
+out what the user asks for and list the requests in order. For each, decide whether the
+text already answers it: a request without a reference to the screen, a copied text, or
+a place you can name from the cursor or shape coordinates in code you can read needs no
+image. A picture is needed when you must see what is at a place ("this button", "the
+dialog here", the look of something). Skip the rest.
+
+**Step 4 - fetch only those frames.** One frame per moment, on the screen it concerns:
 
 ```text
-<launcher> frames --session <session_id> --at <milliseconds> --screen cursor
+<launcher> frames --session <session_id> --at <ms> --screen <screenId> --no-drawings
 ```
 
-- `--at` is a point on the timeline (use the segment start, or the middle for long
-  segments). The frame returned is the latest one at or before that moment.
-- `--screen cursor` (default) returns the screen the cursor was on; `--screen all`
-  returns every screen; `--screen screen2` a specific one. `--window 1000` also lists the
-  frames within one second for context.
-- Each frame entry has `image` (open it with your image viewing tool), `sidecar`,
-  `cursor`: `{screen, x, y}` in pixels of that image, origin top-left, and `drawings`:
-  what the user had drawn on the screens at that moment. "Here", "this" and "that" in
-  the speech usually mean the cursor location or the drawing.
-- `drawings` is a list of the finished shapes (empty when nothing was drawn). A shape
-  enters it only when the user releases the mouse button, so the geometry is always
-  final. Each entry has `id` (1, 2, ... in the order the shapes were finished; it stays
-  the same in every later frame, and disappears after Undo or Clear), `tool`
-  (`rectangle`, `arrow` or `brush`), `color` (`#RRGGBB`), `screen`, `started_ms` and
-  `finished_ms` (press and release, on the same timeline as the transcript; match them
-  with what was said around that time) and the geometry in pixels of that screen's
-  image: `from`/`to` for a rectangle (two opposite corners) or an arrow (tail, head),
-  `path` (a list of points) for a brush stroke. Every point is `{screen, x, y}`. The
-  list is ordered by `id` and stored in the sidecar of every screen of that tick, so
-  read it from any frame; the last frame of a segment usually holds every shape it
-  talks about, there is no need to scan the frames in between.
-- `drawing_now` is `{tool, color, screen, started_ms}` while the user is dragging a
-  shape (no geometry yet) and `null` otherwise. The image of such a frame already shows
-  the half-drawn shape, which is not in `drawings` yet: take its final geometry from a
-  later frame, where it appears in `drawings` with the same `started_ms`.
-- `zoom` is a list (empty normally). While drawing, the user can zoom a screen in with
-  the mouse wheel (up to 800 %) and pan it: the image of that screen then shows a frozen,
-  magnified picture. An entry `{screen, factor, x, y, width, height}` says that the
-  image shows the region `x, y, width, height` (pixels of the unzoomed screen) magnified
-  `factor` times; `cursor` and `drawings` are in pixels of the zoomed image as shown.
-  To map an image point back to the real screen: `x + px / factor`, `y + py / factor`.
-- `clipboard` is the text the user copied (Ctrl+C) just before that frame: it appears in
-  the sidecars of exactly one tick after each change of the text clipboard (`null` in
-  every other frame; texts over 65535 characters are cut and end with `...`). What was
-  in the clipboard before the recording started is never stored. When the user says
-  "this text", "what I copied" or pastes something, look for the nearest preceding
-  frame whose `clipboard` is not null (`--window` helps), or scan the sidecars in
-  `frames_dir` for the `clipboard` key.
-- `keypoints` (in `describe` and in the manifest, `[{index, time_ms}]`) are the moments
-  the user marked with **Insert keypoint** while recording - "this is important", a
-  place they may crop from. The editor shows them as green lines; use them as anchors
-  when the user refers to "the first keypoint" or when you look for the important parts
-  of a long recording. The list is empty when none were inserted.
-- `describe --session <session_id>` returns the manifest, paths, `instructions`,
-  `keypoints` and the whole transcript at once. The manifest lists the screens
-  (`screen1` is the primary) with their sizes and the capture interval.
+- For a shape use the `after` time of its `DRAW` line (the shape on top of the content);
+  add the `before` time only when the shape hides what you need to see. For speech
+  without a shape use a moment inside the segment (its start, or the middle of a long
+  one) and the cursor screen the `SAY` line names (or `--screen cursor`).
+- The frame returned is the latest one at or before `--at`. Each entry has `image`
+  (open it with your image viewing tool), `sidecar`, `cursor` `{screen, x, y}` (pixels
+  of that image), `drawing_now`, `zoom` and `clipboard`; `--no-drawings` replaces the
+  repeated list of shapes (already in the timeline) by `drawing_ids`. Without it each
+  frame carries `drawings`: every finished shape on screen with `id`, `tool`, `color`,
+  `screen`, `started_ms`, `finished_ms` and `from`/`to` or `path` (points
+  `{screen, x, y}`).
+- Avoid `--screen all` and `--window` unless one image does not settle it; they list
+  many frames.
 
 Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` with a sidecar
-`<same>.json`; you can also browse `frames_dir` directly.
+`<same>.json` in `frames_dir`. `describe --session <session_id>` returns the paths, the
+manifest (screens, capture interval, keypoints), `instructions`, the whole transcript and
+`transcript_in_range`; you rarely need it next to `timeline`.
 
 ## 5. Act
 
 Apply the `instructions` to the whole task, then carry out the requests the user spoke,
-in order, combining the words with the frames and cursor positions. When speech and
-image disagree or something is unclear, ask, citing the time stamp. When the
-instructions and the speech disagree, the instructions win; say so. Mention the detected
-language if it is unexpected. Keep the recording folder untouched (the user may want it
-later).
+in order, combining the words with the shapes, cursor positions and the few frames you
+fetched. When speech and image disagree or something is unclear, ask, citing the time
+stamp. When the instructions and the speech disagree, the instructions win; say so.
+Mention the detected language if it is unexpected. Keep the recording folder untouched
+(the user may want it later).
 
 ## Other commands
 

@@ -1,7 +1,8 @@
 """MCP server exposing Video Story to Claude Desktop, Codex and ChatGPT.
 
 The tools mirror the CLI one to one (``start``, ``wait``, ``status``, ``describe``,
-``get_transcript``, ``list_frames``, ``get_frame``, ``config``, ``export``, ``doctor``).
+``get_transcript``, ``timeline``, ``list_frames``, ``get_frame``, ``config``, ``export``,
+``doctor``).
 Every tool
 returns a JSON-serialisable dict; expected failures are reported as
 ``{"ok": false, "code": ..., "message": ...}`` instead of raising, so the agent can read
@@ -35,6 +36,7 @@ from video_story.core.config import (
 )
 from video_story.core.naming import parse_frame_filename
 from video_story.core.session import SessionPaths
+from video_story.host.events import build_timeline
 from video_story.host.runner import (
     POLL_INTERVAL_S,
     FrameRef,
@@ -67,9 +69,12 @@ cursor position, then transcribes the audio offline. Workflow: call video_story_
 (opens the control window; the user records, stops, crops in the Video Story Editor and
 presses its "Process" button), then call
 video_story_wait with the returned session_id in a loop until "final" is true. When the
-status is "processed", call video_story_describe or video_story_get_transcript to read the
-timed transcript, video_story_list_frames to find the screenshots taken at a moment of the
-transcript and video_story_get_frame to look at one of them. "discarded", "cancelled" and
+status is "processed", read the "instructions" first, then call video_story_timeline: the
+cropped range as one text timeline (speech with the cursor position, finished drawings
+with their geometry and times, copied text, keypoints). Decide from that text which
+moments really need a picture and only then call video_story_get_frame for those (one
+frame each, at the times the timeline names); video_story_describe and
+video_story_get_transcript return paths and the plain transcript. "discarded", "cancelled" and
 "failed" are final too: there is nothing to read then, tell the user what happened.
 A processed session also carries "instructions": the user's master instructions typed in
 the editor, which frame the whole recording (what to produce, in which language, ...).
@@ -253,17 +258,32 @@ def tool_get_transcript(
     return _guard(run)
 
 
+def tool_timeline(
+    session_id: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    config_file: Path | None = None,
+) -> dict[str, Any]:
+    """Speech and screen events of the cropped range (or ``start_ms``..``end_ms``)."""
+    return _guard(lambda: build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms))
+
+
 def tool_list_frames(
     session_id: str,
     at_ms: int,
     screen: str = "cursor",
     window_ms: int = 0,
     config_file: Path | None = None,
+    include_drawings: bool = True,
 ) -> dict[str, Any]:
     """Frames matching a moment of the timeline (latest frame at or before ``at_ms``)."""
     return _guard(
         lambda: frames_at(
-            _paths(_load(config_file), session_id), at_ms, screen=screen, window_ms=window_ms
+            _paths(_load(config_file), session_id),
+            at_ms,
+            screen=screen,
+            window_ms=window_ms,
+            include_drawings=include_drawings,
         )
     )
 
@@ -560,14 +580,31 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         segments with start_ms, end_ms and text."""
         return tool_get_transcript(session_id, format, config_file)
 
+    def video_story_timeline(
+        session_id: str, start_ms: int | None = None, end_ms: int | None = None
+    ) -> dict[str, Any]:
+        """Read this first after the instructions: the whole cropped range as one text
+        timeline (no images). Lines: SAY (speech with the cursor screen and position),
+        DRAW #id (a finished shape with its geometry, press/release times and the frame
+        times before and after it), REMOVED, CLIPBOARD (copied text), CURSOR (moved to
+        another screen), ZOOM, KEYPOINT. Times are ms; pass them to
+        video_story_get_frame only where the words and coordinates are not enough.
+        start_ms / end_ms override the crop."""
+        return tool_timeline(session_id, start_ms, end_ms, config_file)
+
     def video_story_list_frames(
-        session_id: str, at_ms: int, screen: str = "cursor", window_ms: int = 0
+        session_id: str,
+        at_ms: int,
+        screen: str = "cursor",
+        window_ms: int = 0,
+        include_drawings: bool = True,
     ) -> dict[str, Any]:
         """Screenshots taken at at_ms (latest frame at or before it). screen: "cursor"
         (the screen the cursor was on), "all" or a screen id like "screen2"; window_ms > 0
         also lists every frame within at_ms +/- window_ms. Returns paths and cursor
-        positions, not images: use video_story_get_frame to see one."""
-        return tool_list_frames(session_id, at_ms, screen, window_ms, config_file)
+        positions, not images: use video_story_get_frame to see one. include_drawings
+        false lists only the drawing ids per frame (video_story_timeline has the shapes)."""
+        return tool_list_frames(session_id, at_ms, screen, window_ms, config_file, include_drawings)
 
     def video_story_get_frame(
         session_id: str,
@@ -667,6 +704,7 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     server.add_tool(video_story_status)
     server.add_tool(video_story_describe)
     server.add_tool(video_story_get_transcript)
+    server.add_tool(video_story_timeline)
     server.add_tool(video_story_list_frames)
     server.add_tool(video_story_get_frame, structured_output=False)
     server.add_tool(video_story_config)
@@ -722,6 +760,7 @@ __all__ = [
     "tool_list_frames",
     "tool_start",
     "tool_status",
+    "tool_timeline",
     "tool_wait",
     "wait_with_progress",
 ]
