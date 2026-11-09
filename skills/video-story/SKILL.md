@@ -104,12 +104,22 @@ For every instruction that refers to something on screen, fetch the matching fra
   `cursor`: `{screen, x, y}` in pixels of that image, origin top-left, and `drawings`:
   what the user had drawn on the screens at that moment. "Here", "this" and "that" in
   the speech usually mean the cursor location or the drawing.
-- `drawings` is a list (empty when nothing was drawn). Each entry has `tool`
-  (`rectangle`, `arrow` or `brush`), `color` (`#RRGGBB`), `screen` and the geometry in
-  pixels of that screen's image: `from`/`to` for a rectangle (two opposite corners) or
-  an arrow (tail, head), `path` (a list of points) for a brush stroke. Every point is
-  `{screen, x, y}`. The same list is stored in the sidecar of every screen of that tick,
-  so read it from any frame.
+- `drawings` is a list of the finished shapes (empty when nothing was drawn). A shape
+  enters it only when the user releases the mouse button, so the geometry is always
+  final. Each entry has `id` (1, 2, ... in the order the shapes were finished; it stays
+  the same in every later frame, and disappears after Undo or Clear), `tool`
+  (`rectangle`, `arrow` or `brush`), `color` (`#RRGGBB`), `screen`, `started_ms` and
+  `finished_ms` (press and release, on the same timeline as the transcript; match them
+  with what was said around that time) and the geometry in pixels of that screen's
+  image: `from`/`to` for a rectangle (two opposite corners) or an arrow (tail, head),
+  `path` (a list of points) for a brush stroke. Every point is `{screen, x, y}`. The
+  list is ordered by `id` and stored in the sidecar of every screen of that tick, so
+  read it from any frame; the last frame of a segment usually holds every shape it
+  talks about, there is no need to scan the frames in between.
+- `drawing_now` is `{tool, color, screen, started_ms}` while the user is dragging a
+  shape (no geometry yet) and `null` otherwise. The image of such a frame already shows
+  the half-drawn shape, which is not in `drawings` yet: take its final geometry from a
+  later frame, where it appears in `drawings` with the same `started_ms`.
 - `zoom` is a list (empty normally). While drawing, the user can zoom a screen in with
   the mouse wheel (up to 800 %) and pan it: the image of that screen then shows a frozen,
   magnified picture. An entry `{screen, factor, x, y, width, height}` says that the

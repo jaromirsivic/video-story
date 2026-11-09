@@ -144,6 +144,10 @@ def test_record_draw_process(qapp_real, tmp_path: Path, monkeypatch):
     assert rect["color"] == "#FF0000" and rect["screen"] == "screen1"
     assert rect["from"] == {"screen": "screen1", "x": round(200 * dpr), "y": round(300 * dpr)}
     assert rect["to"] == {"screen": "screen1", "x": round(500 * dpr), "y": round(450 * dpr)}
+    # The shape carries its id and the recording-timeline time it was drawn.
+    assert rect["id"] == 1 and rect["started_ms"] == rect["finished_ms"]
+    assert 0 < rect["finished_ms"] <= draw_time_ms
+    assert frame["drawing_now"] is None
     # Every screen's sidecar of that tick carries the drawings, not only screen1.
     for other in frames_at(paths, frame["time_ms"], screen="all")["frames"]:
         assert any(d["tool"] == "rectangle" for d in other["drawings"]), other

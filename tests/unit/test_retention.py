@@ -108,3 +108,10 @@ def test_frame_ref_exposes_drawings(tmp_path: Path):
         encoding="utf-8",
     )
     assert FrameRef("screen1", 1000, image, sidecar).to_dict()["zoom"] == [zoom]
+    assert FrameRef("screen1", 1000, image, sidecar).to_dict()["drawing_now"] is None
+    now = {"tool": "brush", "color": "#FF0000", "screen": "screen1", "started_ms": 900}
+    sidecar.write_text(
+        json.dumps({"time_ms": 1000, "screen": "screen1", "drawings": [], "drawing_now": now}),
+        encoding="utf-8",
+    )
+    assert FrameRef("screen1", 1000, image, sidecar).to_dict()["drawing_now"] == now

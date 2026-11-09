@@ -227,7 +227,8 @@ class FrameRef:
 
     def to_dict(self) -> dict[str, Any]:
         cursor = None
-        drawings: list[Any] = []
+        drawings: list[Any] = []  # finished shapes (released mouse button)
+        drawing_now: dict[str, Any] | None = None  # the shape being drawn, no geometry
         zoom: list[Any] = []
         clipboard: str | None = None  # text copied during the recording (see ui.clipboard)
         try:
@@ -237,6 +238,9 @@ class FrameRef:
             raw_drawings = data.get("drawings")
             if isinstance(raw_drawings, list):
                 drawings = raw_drawings
+            raw_drawing_now = data.get("drawing_now")
+            if isinstance(raw_drawing_now, dict):
+                drawing_now = raw_drawing_now
             raw_zoom = data.get("zoom")
             if isinstance(raw_zoom, list):
                 zoom = raw_zoom
@@ -252,6 +256,7 @@ class FrameRef:
             "sidecar": str(self.sidecar),
             "cursor": cursor,
             "drawings": drawings,
+            "drawing_now": drawing_now,
             "zoom": zoom,
             "clipboard": clipboard,
         }

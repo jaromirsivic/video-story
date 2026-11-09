@@ -434,12 +434,20 @@ class ControlWindow(QWidget):
         if recorder is None or self._overlay is None:
             return
         set_screens = getattr(self._overlay, "set_screens", None)
+        set_clock = getattr(self._overlay, "set_clock", None)
         drawings = getattr(self._overlay, "drawings", None)
+        drawing_now = getattr(self._overlay, "drawing_now", None)
         zoom = getattr(self._overlay, "zoom", None)
         if set_screens is not None:
             set_screens(list(getattr(recorder, "screens", [])))
+        clock = getattr(recorder, "clock", None)
+        if set_clock is not None and clock is not None:
+            # started_ms / finished_ms of the shapes share the timeline of the frames.
+            set_clock(clock.elapsed_ms)
         if drawings is not None:
             recorder.drawings_provider = drawings
+        if drawing_now is not None:
+            recorder.drawing_now_provider = drawing_now
         if zoom is not None:
             recorder.zoom_provider = zoom
 
@@ -452,6 +460,7 @@ class ControlWindow(QWidget):
         recorder = self.controller.recorder
         if recorder is not None:
             recorder.drawings_provider = None
+            recorder.drawing_now_provider = None
             recorder.zoom_provider = None
         if self._overlay is not None:
             try:

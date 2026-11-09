@@ -384,11 +384,22 @@ def test_drawings_snapshot_in_screen_pixels(overlay):
     ]
     assert all(p["screen"] == "screen1" for p in brush["path"])
 
-    # The shape being dragged is on screen, so it is part of the snapshot.
+    assert [d["id"] for d in drawings] == [1, 2, 3]
+    assert overlay.drawing_now() is None
+
+    # The shape being dragged is on screen but not finished: only drawing_now reports it.
     _mouse(window, QEvent.Type.MouseButtonPress, QPoint(1, 1), True)
     _mouse(window, QEvent.Type.MouseMove, QPoint(3, 3), True)
-    assert len(overlay.drawings()) == 4
+    assert len(overlay.drawings()) == 3
+    assert overlay.drawing_now() == {
+        "tool": "brush",
+        "color": "#00FF00",
+        "screen": "screen1",
+        "started_ms": None,  # no clock set
+    }
     _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(3, 3), False)
+    assert len(overlay.drawings()) == 4 and overlay.drawing_now() is None
+    assert overlay.drawings()[-1]["id"] == 4
 
     overlay.undo()
     assert len(overlay.drawings()) == 3
@@ -398,6 +409,52 @@ def test_drawings_snapshot_in_screen_pixels(overlay):
     assert len(overlay.drawings()) == 3
     overlay.clear()
     assert overlay.drawings() == []
+
+
+def test_shapes_carry_id_and_draw_times_from_the_clock(overlay):
+    overlay.set_screens(_recorded_screens())
+    window = overlay.windows[0]
+    now = [1000]
+    overlay.set_clock(lambda: now[0])
+    overlay.set_tool(Tool.RECTANGLE)
+
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(10, 10), True)
+    assert overlay.drawing_now() == {
+        "tool": "rectangle",
+        "color": "#FF0000",
+        "screen": "screen1",
+        "started_ms": 1000,
+    }
+    now[0] = 1400
+    _mouse(window, QEvent.Type.MouseMove, QPoint(50, 40), True)
+    assert overlay.drawings() == []  # still dragging: no geometry in the sidecars yet
+    now[0] = 1800
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(60, 50), False)
+    assert overlay.drawing_now() is None
+    (rect,) = overlay.drawings()
+    assert (rect["id"], rect["started_ms"], rect["finished_ms"]) == (1, 1000, 1800)
+
+    # A click without movement draws nothing and clears drawing_now.
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(5, 5), True)
+    assert overlay.drawing_now() is not None
+    _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(5, 5), False)
+    assert overlay.drawing_now() is None and len(overlay.drawings()) == 1
+
+    # Hiding mid-drag drops the gesture.
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(5, 5), True)
+    overlay.hide()
+    assert overlay.drawing_now() is None
+    overlay.show()
+    assert overlay.drawing_now() is None and len(overlay.drawings()) == 1
+
+    # Programmatic shapes get the next id and the current time; ids are never reused.
+    now[0] = 2500
+    overlay.add_shape(Shape(Tool.ARROW, QColor("#0000FF"), [QPointF(1, 1), QPointF(9, 9)], 0))
+    overlay.undo()
+    overlay.add_shape(Shape(Tool.ARROW, QColor("#0000FF"), [QPointF(1, 1), QPointF(9, 9)], 0))
+    first, second = overlay.drawings()
+    assert first["id"] == 1
+    assert (second["id"], second["started_ms"], second["finished_ms"]) == (3, 2500, 2500)
 
 
 def test_shape_to_json_clamps_to_image():

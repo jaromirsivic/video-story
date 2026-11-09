@@ -92,6 +92,7 @@ class RecordingSummary:
 
 
 DrawingsProvider = Callable[[], list[dict[str, Any]]]
+DrawingNowProvider = Callable[[], dict[str, Any] | None]
 ClipboardProvider = Callable[[], str | None]
 KEYPOINT_MIN_GAP_MS = 3000  # a keypoint can follow the previous one after three seconds
 
@@ -102,6 +103,7 @@ class _Tick:
     cursor: CursorPosition | None
     frames: list[RawFrame] = field(default_factory=list)
     drawings: list[dict[str, Any]] = field(default_factory=list)
+    drawing_now: dict[str, Any] | None = None
     zoom: list[dict[str, Any]] = field(default_factory=list)
     clipboard: str | None = None
 
@@ -137,10 +139,14 @@ class Recorder:
         self._error: str | None = None
         self._lock = threading.Lock()
         self._summary: RecordingSummary | None = None
-        # Called from the capture thread at every tick; returns what is drawn on the
-        # screen right now (see ui.overlay.DrawingOverlay.drawings). Stored in the
+        # Called from the capture thread at every tick; returns the finished shapes on
+        # the screen right now (see ui.overlay.DrawingOverlay.drawings). Stored in the
         # sidecar of every frame of the tick as ``drawings``.
         self.drawings_provider: DrawingsProvider | None = None
+        # The shape being drawn right now ({tool, color, screen, started_ms}, no
+        # geometry; ui.overlay.DrawingOverlay.drawing_now), stored as ``drawing_now``
+        # (null while nothing is being drawn).
+        self.drawing_now_provider: DrawingNowProvider | None = None
         # Same for the zoom of the drawing canvas (ui.overlay.DrawingOverlay.zoom):
         # which screens show a magnified region, stored in the sidecars as ``zoom``.
         self.zoom_provider: DrawingsProvider | None = None
@@ -332,6 +338,13 @@ class Recorder:
                 tick.drawings = list(provider())
             except Exception:  # pragma: no cover - never let drawing data stop capture
                 log.exception("drawings provider failed")
+        drawing_now_provider = self.drawing_now_provider
+        if drawing_now_provider is not None:
+            try:
+                now = drawing_now_provider()
+                tick.drawing_now = dict(now) if now else None
+            except Exception:  # pragma: no cover - never let drawing data stop capture
+                log.exception("drawing_now provider failed")
         zoom_provider = self.zoom_provider
         if zoom_provider is not None:
             try:
@@ -362,6 +375,7 @@ class Recorder:
                 "screen": frame.screen_id,
                 "cursor": tick.cursor.to_json() if tick.cursor else None,
                 "drawings": tick.drawings,
+                "drawing_now": tick.drawing_now,
                 "zoom": tick.zoom,
                 "clipboard": tick.clipboard,
                 "captured_at": now_iso(),
@@ -393,6 +407,7 @@ __all__ = [
     "ENCODE_WORKERS",
     "KEYPOINT_MIN_GAP_MS",
     "ClipboardProvider",
+    "DrawingNowProvider",
     "DrawingsProvider",
     "Recorder",
     "RecorderEvent",

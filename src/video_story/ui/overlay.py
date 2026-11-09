@@ -31,17 +31,23 @@ All geometry is kept in Qt logical "canvas" coordinates of the window the shape 
 drawn in (the unzoomed screen); Qt maps them to physical pixels per screen (Windows
 per-monitor DPI is handled by Qt).
 
-For the frame sidecars the overlay also keeps a JSON-ready snapshot of what is drawn
-(:meth:`DrawingOverlay.drawings`), with every point converted to pixels of the recorded
-screen image (that is, of the zoomed view while zoomed), and of the zoom of every
-screen (:meth:`DrawingOverlay.zoom`): the recorder reads both from its capture thread
-at every tick.
+For the frame sidecars the overlay also keeps a JSON-ready snapshot of the finished
+shapes (:meth:`DrawingOverlay.drawings`), with every point converted to pixels of the
+recorded screen image (that is, of the zoomed view while zoomed), of the shape being
+drawn right now (:meth:`DrawingOverlay.drawing_now`: tool, color, screen and start time
+only, no geometry) and of the zoom of every screen (:meth:`DrawingOverlay.zoom`): the
+recorder reads them from its capture thread at every tick. A shape therefore enters
+``drawings`` only when its mouse button is released, with its ``id`` and the
+``started_ms`` / ``finished_ms`` of the press and the release (recording timeline, from
+:meth:`DrawingOverlay.set_clock`); while it is dragged the frame images already show it.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from PySide6.QtCore import (
@@ -93,6 +99,8 @@ from video_story.core.screens import Screen
 from .icons import arrow_icon, draw_icon, rectangle_icon
 from .palette import DEFAULT_COLOR, PALETTE, PaletteColor
 
+log = logging.getLogger(__name__)
+
 STROKE_WIDTH = 4.0  # logical pixels
 ARROW_HEAD_LENGTH = 18.0  # logical pixels
 ARROW_HEAD_HALF_ANGLE = 26.0  # degrees between the shaft and each side of the head
@@ -130,13 +138,19 @@ class Shape:
     """One drawn annotation in the logical coordinates of its overlay window.
 
     ``points`` holds the polyline for a brush stroke and ``[start, end]`` for a
-    rectangle (two opposite corners) or an arrow (tail, head).
+    rectangle (two opposite corners) or an arrow (tail, head). ``id`` (1, 2, ... in the
+    order the shapes were finished; 0 until then) and ``started_ms`` / ``finished_ms``
+    (the press and the release on the recording timeline; ``None`` without a clock)
+    are filled in by :class:`DrawingOverlay`.
     """
 
     tool: Tool
     color: QColor
     points: list[QPointF] = field(default_factory=list)
     screen_index: int = 0
+    id: int = 0
+    started_ms: int | None = None
+    finished_ms: int | None = None
 
     def is_degenerate(self) -> bool:
         if self.tool is Tool.BRUSH:
@@ -172,7 +186,8 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
 
     Rectangles and arrows carry ``from`` and ``to`` (two opposite corners, or tail and
     head); brush strokes carry ``path``. Every point is ``{screen, x, y}`` like the
-    cursor entry of a sidecar.
+    cursor entry of a sidecar. ``id``, ``started_ms`` and ``finished_ms`` say which
+    shape it is and when it was drawn (press and release on the recording timeline).
     """
 
     def point(p: QPointF) -> dict[str, object]:
@@ -181,10 +196,13 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
         return {"screen": screen.id, "x": x, "y": y}
 
     data: dict[str, object] = {
+        "id": shape.id,
         "tool": str(shape.tool),
         "color": shape.color.name().upper(),
         "screen": screen.id,
         "stroke_width": round(STROKE_WIDTH * device_pixel_ratio),
+        "started_ms": shape.started_ms,
+        "finished_ms": shape.finished_ms,
     }
     if shape.tool is Tool.BRUSH:
         path: list[dict[str, object]] = []
@@ -292,18 +310,28 @@ class OverlayWindow(QWidget):
             shapes.append(self._current)
         return shapes
 
-    def view_shapes(self) -> list[Shape]:
-        """Visible shapes mapped to window (view) coordinates; off-view shapes are left out."""
+    @property
+    def current_shape(self) -> Shape | None:
+        """The shape being dragged right now (not finished, so not in :attr:`shapes`)."""
+        return self._current
+
+    def view_shapes(self, include_current: bool = True) -> list[Shape]:
+        """Visible shapes mapped to window (view) coordinates; off-view shapes are left out.
+
+        ``include_current=False`` leaves out the shape still being dragged (the sidecars
+        describe finished shapes only).
+        """
+        shapes = self.painted_shapes if include_current else self.shapes
         if self._zoom == MIN_ZOOM:
-            return self.painted_shapes
+            return shapes
         margin = STROKE_WIDTH + 1.0
         view = QRectF(self.rect()).adjusted(-margin, -margin, margin, margin)
         result: list[Shape] = []
-        for shape in self.painted_shapes:
+        for shape in shapes:
             if not shape.points:
                 continue
             points = [self.to_view(p) for p in shape.points]
-            mapped = Shape(shape.tool, shape.color, points, shape.screen_index)
+            mapped = replace(shape, points=points)
             if mapped.bounding_rect().adjusted(-1, -1, 1, 1).intersects(view):
                 result.append(mapped)
         return result
@@ -395,6 +423,7 @@ class OverlayWindow(QWidget):
         if self._current is not None:
             self._current = None
             self.update()
+            self._controller._refresh_drawings()
 
     def clear_shapes(self) -> None:
         if self._shapes or self._current is not None:
@@ -475,9 +504,15 @@ class OverlayWindow(QWidget):
         tool = self._controller.tool if button == Qt.MouseButton.LeftButton else Tool.ARROW
         pos = self.to_canvas(event.position())
         self._draw_button = button
-        self._current = Shape(tool, QColor(self._controller.color), [pos, pos], self.screen_index)
+        self._current = Shape(
+            tool,
+            QColor(self._controller.color),
+            [pos, pos],
+            self.screen_index,
+            started_ms=self._controller._now_ms(),
+        )
         self.update()
-        self._controller._refresh_drawings()
+        self._controller._refresh_drawings()  # drawing_now: a shape is being drawn
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -503,8 +538,8 @@ class OverlayWindow(QWidget):
             self._current.points.append(pos)
         else:
             self._current.points[-1] = pos
+        # Only the screen changes: the sidecars describe the shape once it is finished.
         self.update()
-        self._controller._refresh_drawings()
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -530,6 +565,7 @@ class OverlayWindow(QWidget):
                 shape.points.append(pos)
         else:
             shape.points[-1] = pos
+        shape.finished_ms = self._controller._now_ms()
         if shape.is_degenerate():
             self.update()
             self._controller._refresh_drawings()
@@ -841,7 +877,10 @@ class DrawingOverlay(QObject):
         self._visible = False
         self._screens: list[Screen] = []
         self._drawings: list[dict[str, object]] = []
+        self._drawing_now: dict[str, object] | None = None
         self._zoom: list[dict[str, object]] = []
+        self._clock: Callable[[], int] | None = None
+        self._next_id = 0  # id of the last finished shape
 
     # -- public API ---------------------------------------------------------------
 
@@ -976,14 +1015,27 @@ class DrawingOverlay(QObject):
         self._screens = list(screens)
         self._refresh_drawings()
 
-    def drawings(self) -> list[dict[str, object]]:
-        """JSON-ready snapshot of everything currently visible on the overlay windows.
+    def set_clock(self, clock: Callable[[], int] | None) -> None:
+        """Time source for ``started_ms`` / ``finished_ms`` (the recording timeline)."""
+        self._clock = clock
 
+    def drawings(self) -> list[dict[str, object]]:
+        """JSON-ready snapshot of the finished shapes visible on the overlay windows.
+
+        A shape appears here only once its mouse button was released (the one being
+        dragged is reported by :meth:`drawing_now`, without geometry), ordered by ``id``.
         Safe to call from any thread: the list is rebuilt on the GUI thread whenever
         the drawing changes and never mutated afterwards. Empty while the overlay is
         hidden (nothing is on screen then) or until :meth:`set_screens` was called.
         """
         return self._drawings
+
+    def drawing_now(self) -> dict[str, object] | None:
+        """``{tool, color, screen, started_ms}`` while a shape is being drawn, else ``None``.
+
+        Thread-safety as for :meth:`drawings`.
+        """
+        return self._drawing_now
 
     def zoom(self) -> list[dict[str, object]]:
         """JSON-ready zoom state of every zoomed screen (empty when nothing is zoomed).
@@ -1045,17 +1097,37 @@ class DrawingOverlay(QObject):
         self._windows = []
         self._history.clear()
 
+    def _now_ms(self) -> int | None:
+        """Now on the recording timeline (``None`` without a clock or when it fails)."""
+        clock = self._clock
+        if clock is None:
+            return None
+        try:
+            return int(clock())
+        except Exception:  # pragma: no cover - a timestamp is never worth a crash
+            log.exception("drawing clock failed")
+            return None
+
     def _commit_shape(self, window: OverlayWindow, shape: Shape) -> None:
+        if not shape.id:
+            self._next_id += 1
+            shape.id = self._next_id
+        if shape.finished_ms is None:
+            shape.finished_ms = self._now_ms()
+        if shape.started_ms is None:
+            shape.started_ms = shape.finished_ms
         window.add_shape(shape)
         self._history.append(window)
 
     def _refresh_drawings(self) -> None:
         if not self._visible or not self._screens:
             self._drawings = []
+            self._drawing_now = None
             self._zoom = []
             return
         qscreens = QGuiApplication.screens()
         result: list[dict[str, object]] = []
+        drawing_now: dict[str, object] | None = None
         zoom: list[dict[str, object]] = []
         for window in self._windows:
             qscreen = (
@@ -1067,9 +1139,17 @@ class DrawingOverlay(QObject):
             if screen is None:
                 continue
             ratio = float(qscreen.devicePixelRatio())
-            for shape in window.view_shapes():
+            for shape in window.view_shapes(include_current=False):
                 if shape.points:
                     result.append(shape_to_json(shape, screen, ratio))
+            current = window.current_shape
+            if current is not None and drawing_now is None:
+                drawing_now = {
+                    "tool": str(current.tool),
+                    "color": current.color.name().upper(),
+                    "screen": screen.id,
+                    "started_ms": current.started_ms,
+                }
             if window.zoom > MIN_ZOOM:
                 visible = window.visible_canvas_rect()
                 zoom.append(
@@ -1082,7 +1162,9 @@ class DrawingOverlay(QObject):
                         "height": round(visible.height() * ratio),
                     }
                 )
-        self._drawings = result
+        result.sort(key=lambda d: int(d["id"]))  # type: ignore[call-overload]
+        self._drawings = result  # in the order the shapes were finished
+        self._drawing_now = drawing_now
         self._zoom = zoom
 
     def _floating_windows(self) -> list[QWidget]:
