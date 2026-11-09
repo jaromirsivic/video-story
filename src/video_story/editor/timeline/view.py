@@ -11,6 +11,10 @@ with a green arrow at the top of the ruler, drawn like the red playhead: they ca
 moved, show "Keypoint N" on hover and act as a magnet for the crop handles and the
 playhead. A white arrow on the ruler marks where Play was last pressed
 (Stop returns there). The +/- zoom keeps the playhead in the middle of the view.
+
+A full screen / normal toggle in the audio header stretches the waveform vertically so
+that the loudest sound of the recording reaches the full height of the track: quiet
+speech becomes visible. Only the drawing is scaled; the audio itself is unchanged.
 """
 
 from __future__ import annotations
@@ -53,6 +57,9 @@ KEYPOINT_ARROW_HALF_W = 6  # the green arrow on the ruler: the size of the playh
 KEYPOINT_ARROW_H = 9
 KEYPOINT_HIT_PX = 5  # hover distance that shows the keypoint tooltip
 THUMB_SPACING_PX = 160
+FIT_BUTTON = 20  # the audio header's full screen / normal toggle (square, px)
+FIT_TOOLTIP_ON = "Stretch the waveform so the loudest sound fills the track"
+FIT_TOOLTIP_OFF = "Show the waveform at its real level"
 MIN_TICK_PX = 70
 TICK_STEPS_MS = (
     100, 200, 500, 1000, 2000, 5000, 10_000, 15_000, 30_000, 60_000, 120_000, 300_000,
@@ -165,7 +172,7 @@ class TimelineView(QWidget):
         self.thumbnails = ThumbnailCache(self)
         self.thumbnails.ready.connect(self.update)
         self.waveform = WaveformLoader(self)
-        self.waveform.ready.connect(lambda _peaks: self.update())
+        self.waveform.ready.connect(self._on_peaks_ready)
         self.scrollbar = QScrollBar(Qt.Orientation.Horizontal, self)
         self.scrollbar.valueChanged.connect(self._on_scrollbar)
         self._syncing_scrollbar = False
@@ -174,6 +181,8 @@ class TimelineView(QWidget):
         self._transcription: tuple[str, int] | None = None  # (state, transcribed_ms)
         self._eta_s: float | None = None  # estimated seconds until the transcription ends
         self._hover_keypoint: int | None = None  # keypoint under the mouse (tooltip shown)
+        self._audio_fit = False  # the waveform is stretched to the loudest sound
+        self._audio_peak: float | None = None  # loudest sample of the loaded audio (0..1)
         self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -193,6 +202,7 @@ class TimelineView(QWidget):
         self.model.set_keypoints(recording.keypoints if recording else [])
         self.model.fit(self._body_width())
         audio = recording.audio if recording else None
+        self._audio_peak = None
         self.waveform.load(audio.path if audio else None)
         # Every track must stay visible: the splitter may not shrink the timeline below it.
         self.setMinimumHeight(self.sizeHint().height())
@@ -220,6 +230,44 @@ class TimelineView(QWidget):
     @property
     def eta_s(self) -> float | None:
         return self._eta_s
+
+    @property
+    def audio_fit(self) -> bool:
+        return self._audio_fit
+
+    def set_audio_fit(self, fit: bool) -> None:
+        """Stretch the waveform to the loudest sound (``True``) or show the real level."""
+        if fit != self._audio_fit:
+            self._audio_fit = fit
+            self.update()
+
+    def toggle_audio_fit(self) -> None:
+        self.set_audio_fit(not self._audio_fit)
+
+    def waveform_gain(self) -> float:
+        """Vertical scale of the waveform: 1, or 1 / loudest sample when fitted."""
+        if not self._audio_fit or not self._audio_peak or self._audio_peak <= 0:
+            return 1.0
+        return 1.0 / self._audio_peak
+
+    def _on_peaks_ready(self, peaks) -> None:
+        self._audio_peak = float(abs(peaks).max()) if peaks is not None and len(peaks) else None
+        self.update()
+
+    def fit_button_rect(self) -> QRect | None:
+        """The toggle in the bottom left corner of the audio header (``None`` without
+        a waveform)."""
+        peaks = self.waveform.peaks
+        if peaks is None or len(peaks) == 0:
+            return None
+        audio = self.audio_rect()
+        return QRect(audio.x() + 6, audio.bottom() - 5 - FIT_BUTTON, FIT_BUTTON, FIT_BUTTON)
+
+    def _on_fit_button(self, pos: QPoint) -> QRect | None:
+        fit = self.fit_button_rect()
+        if fit is not None and fit.adjusted(-2, -2, 2, 2).contains(pos):
+            return fit
+        return None
 
     def set_theme(self, dark: bool) -> None:
         """Dark (the default) or light colours for the ruler, headers and tracks."""
@@ -391,6 +439,11 @@ class TimelineView(QWidget):
         pos = event.position().toPoint()
         if pos.y() >= self._canvas_height():
             return
+        fit = self._on_fit_button(pos)
+        if fit is not None:
+            self.toggle_audio_fit()
+            self._show_fit_tooltip(event.globalPosition().toPoint(), fit)
+            return
         self.setFocus()
         handle = self._handle_at(pos)
         on_playhead = (
@@ -419,11 +472,20 @@ class TimelineView(QWidget):
         elif self._drag == "playhead":
             self._move_playhead_to(pos.x())
         else:
+            fit = self._on_fit_button(pos)
+            if fit is not None:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                self._show_fit_tooltip(event.globalPosition().toPoint(), fit)
+                return
             near_handle = self._handle_at(pos) is not None
             self.setCursor(
                 Qt.CursorShape.SizeHorCursor if near_handle else Qt.CursorShape.ArrowCursor
             )
             self._update_keypoint_tooltip(pos, event.globalPosition().toPoint())
+
+    def _show_fit_tooltip(self, global_pos: QPoint, rect: QRect) -> None:
+        text = FIT_TOOLTIP_OFF if self._audio_fit else FIT_TOOLTIP_ON
+        QToolTip.showText(global_pos, text, self, rect.adjusted(-2, -2, 2, 2))
 
     def _update_keypoint_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
         keypoint = self.keypoint_at(pos)
@@ -578,15 +640,52 @@ class TimelineView(QWidget):
         reduced = column_peaks(peaks, BLOCK_MS, self.model.scroll_ms, ms_per_px, columns)
         mid = body.y() + body.height() / 2.0
         half = body.height() / 2.0 - 2
+        gain = self.waveform_gain()
         painter.setPen(QPen(COLOR_WAVE))
         for col in range(columns):
             lo, hi = float(reduced[col, 0]), float(reduced[col, 1])
             if lo == 0.0 and hi == 0.0:
                 continue
+            lo, hi = max(-1.0, lo * gain), min(1.0, hi * gain)
             x = body.x() + col
             painter.drawLine(QPointF(x, mid - hi * half), QPointF(x, mid - lo * half))
         painter.setPen(QPen(self.colors["tick"]))
         painter.drawLine(body.x(), int(mid), body.right(), int(mid))
+        self._paint_fit_button(painter)
+
+    def _paint_fit_button(self, painter: QPainter) -> None:
+        """Four corner brackets: pointing out (full screen) while the waveform shows its
+        real level, pointing in (back to normal) while it is stretched."""
+        rect = self.fit_button_rect()
+        if rect is None:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._audio_fit:
+            highlight = QColor(COLOR_SELECTED)
+            highlight.setAlpha(70)
+            painter.fillRect(rect, highlight)
+        pen = QPen(self.colors["text"], 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        r = QRectF(rect).adjusted(3.5, 3.5, -3.5, -3.5)
+        arm = r.width() * (0.30 if self._audio_fit else 0.38)
+        corners = (
+            (r.topLeft(), 1, 1),
+            (r.topRight(), -1, 1),
+            (r.bottomLeft(), 1, -1),
+            (r.bottomRight(), -1, -1),
+        )
+        for corner, dx, dy in corners:
+            if self._audio_fit:  # brackets pointing in: their corner sits inside
+                tip = QPointF(corner.x() + dx * arm, corner.y() + dy * arm)
+                painter.drawLine(QPointF(corner.x(), tip.y()), tip)
+                painter.drawLine(QPointF(tip.x(), corner.y()), tip)
+            else:
+                painter.drawLine(corner, QPointF(corner.x() + dx * arm, corner.y()))
+                painter.drawLine(corner, QPointF(corner.x(), corner.y() + dy * arm))
+        painter.restore()
 
     def _paint_crop(self, painter: QPainter, canvas: QRect) -> None:
         top = self._tracks_top()

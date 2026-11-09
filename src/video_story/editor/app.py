@@ -65,6 +65,7 @@ def run_editor(
     from PySide6.QtWidgets import QApplication
 
     from video_story.editor.window import EditorWindow
+    from video_story.ui.icons import install_app_icon
 
     config = load_config(config_file)
     config.recording_folder.mkdir(parents=True, exist_ok=True)
@@ -83,6 +84,7 @@ def run_editor(
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Video Story Editor")
+    install_app_icon(app, "VideoStory.Editor")
     app.setOrganizationName("VideoStory")
     settings = QSettings("VideoStory", "Editor")
     try:

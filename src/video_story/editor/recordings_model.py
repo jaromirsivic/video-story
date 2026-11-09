@@ -46,6 +46,7 @@ class RecordingItem:
     transcript_complete: bool = True  # False: the editor still has to transcribe it
     screen_ids: tuple[str, ...] = ()  # manifest order, screen1 (the primary) first
     segments: tuple[SegmentText, ...] = ()  # non-empty transcript segments by start
+    screen_sizes: tuple[tuple[int, int], ...] = ()  # image size of each screen, as screen_ids
 
     @property
     def session_id(self) -> str:
@@ -62,6 +63,14 @@ class RecordingItem:
         """The length without milliseconds; the screens are the dots of the row."""
         suffix = "" if self.transcript_complete else "  |  transcribing"
         return f"{format_length(self.duration_ms)}{suffix}"
+
+    def screen_label(self, screen_id: str) -> str:
+        """``screen1 2560x1600`` - the tooltip of a screen dot (as the track header)."""
+        try:
+            width, height = self.screen_sizes[self.screen_ids.index(screen_id)]
+        except (ValueError, IndexError):
+            return screen_id
+        return f"{screen_id} {width}x{height}" if width > 0 and height > 0 else screen_id
 
     def text_at(self, time_ms: int) -> str:
         """The transcript text spoken at ``time_ms``: the last segment starting at or
@@ -142,6 +151,7 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
                 transcript_complete=transcript_status(paths.transcript_json_path(base)).complete,
                 screen_ids=tuple(screen.id for screen in manifest.screens),
                 segments=segments,
+                screen_sizes=tuple((s.image_width, s.image_height) for s in manifest.screens),
             )
         )
     return items

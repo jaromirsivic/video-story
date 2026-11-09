@@ -132,7 +132,7 @@ def test_rows_have_separators_thumbnail_and_one_dot_per_screen(editor, qtbot):
     line = QFontMetrics(view.font()).lineSpacing()
     dots = view.delegate.dot_rects(rect, 2, line)
     assert len(dots) == 2 and dots[-1].right() <= rect.right()
-    assert view.delegate.dot_rects(rect, 5, line).__len__() == 3  # at most three
+    assert view.delegate.dot_rects(rect, 5, line).__len__() == 4  # at most four
 
 
 def test_clicking_a_dot_switches_the_screen_without_opening_the_recording(editor, qtbot):

@@ -50,19 +50,22 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QEvent,
-    QItemSelection,
+    QModelIndex,
     QObject,
+    QPoint,
     QRegularExpression,
     QRunnable,
     QSettings,
     Qt,
     QThreadPool,
     QTimer,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
+    QDesktopServices,
     QFocusEvent,
     QFont,
     QKeyEvent,
@@ -70,6 +73,7 @@ from PySide6.QtGui import (
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QFrame,
@@ -77,6 +81,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSplitter,
@@ -100,7 +106,7 @@ from video_story.host.editor_session import (
     update_recording_session_progress,
     write_editor_event,
 )
-from video_story.ui.icons import instructions_icon
+from video_story.host.retention import IN_USE_REASON, delete_recording, recording_in_use
 
 from .instructions_dialog import InstructionsDialog
 from .player import Player
@@ -154,6 +160,8 @@ QPushButton:hover { background-color: #2a7fe6; }
 QPushButton:pressed { background-color: #185aa8; }
 QPushButton:disabled { background-color: #9dbfe8; color: #f3f8ff; border-color: #8fb2dc; }
 """
+DELETE_ONE_LABEL = "Delete Video"
+DELETE_MANY_LABEL = "Delete Video(s)"
 TRANSCRIBING_NOTE = "Available once the transcription is complete"
 
 
@@ -336,7 +344,7 @@ class EditorWindow(QMainWindow):
 
         self.recordings = RecordingsModel(config.recording_folder, self)
         self.list_view.setModel(self.recordings)
-        self.list_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.list_view.selectionModel().currentChanged.connect(self._on_current_changed)
         self._select_row(self.recordings.default_row(session_id))
         self._update_status()
         self._decline_attach_requests()  # left behind by an editor that was closing
@@ -357,6 +365,9 @@ class EditorWindow(QMainWindow):
         title.setFont(title_font)
         left_layout.addWidget(title)
         self.list_view = RecordingsListView()
+        self.list_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_view.customContextMenuRequested.connect(self._show_list_menu)
         left_layout.addWidget(self.list_view, 1)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Rescan the recording folder (F5)")
@@ -457,7 +468,7 @@ class EditorWindow(QMainWindow):
         self.process_button.setEnabled(False)
         self.process_button.clicked.connect(self.process)
         render_row.addWidget(self.process_button)
-        self.instructions_button = QPushButton(instructions_icon(), INSTRUCTIONS_LABEL)
+        self.instructions_button = QPushButton(INSTRUCTIONS_LABEL)
         self.instructions_button.setToolTip(INSTRUCTIONS_TOOLTIP)
         self.instructions_button.setFont(action_font)
         self.instructions_button.setMinimumSize(*ACTION_BUTTON_SIZE)
@@ -547,13 +558,102 @@ class EditorWindow(QMainWindow):
         else:
             self.list_view.setCurrentIndex(index)
 
-    def _on_selection_changed(self, selected: QItemSelection, _deselected: QItemSelection) -> None:
-        indexes = selected.indexes()
-        if not indexes:
-            return
-        item = indexes[0].data(ItemRole)
+    def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        """The current row (the one clicked last, also with Shift or Ctrl) is shown."""
+        item = current.data(ItemRole) if current.isValid() else None
         if isinstance(item, RecordingItem):
             self._load_recording(item)
+
+    def selected_items(self) -> list[RecordingItem]:
+        """The recordings selected in the list, in list order."""
+        rows = sorted(index.row() for index in self.list_view.selectionModel().selectedRows())
+        return [item for row in rows if (item := self.recordings.item(row)) is not None]
+
+    def _show_list_menu(self, pos: QPoint) -> None:
+        """Right click on the list: Open Folder Location and Delete Video(s)."""
+        index = self.list_view.indexAt(pos)
+        clicked = index.data(ItemRole) if index.isValid() else None
+        if not isinstance(clicked, RecordingItem):
+            return
+        selected = self.selected_items()
+        if clicked.session_id not in {item.session_id for item in selected}:
+            self.list_view.setCurrentIndex(index)  # right click outside the selection
+            selected = [clicked]
+        menu = QMenu(self)
+        open_action = menu.addAction("Open Folder Location")
+        open_action.triggered.connect(lambda: self.open_folder_location(clicked))
+        menu.addSeparator()
+        label = DELETE_ONE_LABEL if len(selected) == 1 else DELETE_MANY_LABEL
+        delete_action = menu.addAction(label)
+        delete_action.triggered.connect(lambda: self.delete_recordings(selected))
+        menu.exec(self.list_view.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def open_folder_location(self, item: RecordingItem) -> bool:
+        """Open the recording's folder in the system file manager."""
+        folder = item.paths.final_dir
+        if folder.is_dir() and QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            return True
+        self._show_status_message(f"Cannot open {folder}")
+        return False
+
+    def _confirm_delete(self, items: list[RecordingItem]) -> bool:
+        """Ask before recordings are deleted for good (tests override this)."""
+        if len(items) == 1:
+            text = (
+                "Permanently delete the folder of this recording?\n\n"
+                f"{items[0].paths.final_dir}\n\nThis cannot be undone."
+            )
+        else:
+            text = (
+                f"Permanently delete the folders of these {len(items)} recordings?"
+                "\n\nThis cannot be undone."
+            )
+        answer = QMessageBox.question(
+            self,
+            DELETE_ONE_LABEL if len(items) == 1 else DELETE_MANY_LABEL,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _report_delete_failures(self, failures: list[str]) -> None:
+        QMessageBox.warning(self, "Not deleted", "\n".join(failures))
+
+    def delete_recordings(self, items: list[RecordingItem]) -> list[str]:
+        """Delete the folders of ``items`` after a confirmation, then refresh the list.
+
+        Returns the deleted session ids. A recording still in use by a running Video
+        Story window (one an agent waits on) is kept and reported.
+        """
+        if not items or not self._confirm_delete(items):
+            return []
+        failures = [
+            f"{item.title} ({item.session_id}): {IN_USE_REASON}"
+            for item in items
+            if recording_in_use(item.paths)
+        ]
+        items = [item for item in items if not recording_in_use(item.paths)]
+        ids = {item.session_id for item in items}
+        if self.recording is not None and self.recording.session_id in ids:
+            self._load_generation += 1  # a load in flight is dropped
+            self._set_recording(None)  # releases the audio and the frames
+        if self.transcription.running in ids:
+            self.transcription.shutdown()
+        collect_garbage()  # file handles of the unloaded recording are closed here
+        deleted: list[str] = []
+        for item in items:
+            reason = delete_recording(item.paths)
+            if reason is None:
+                deleted.append(item.session_id)
+            else:
+                failures.append(f"{item.title} ({item.session_id}): {reason}")
+        self.refresh_recordings()
+        self._show_status_message(f"Deleted {len(deleted)} recording(s)")
+        if failures:
+            self._report_delete_failures(failures)
+        return deleted
 
     def _load_recording(self, item: RecordingItem) -> None:
         if self.recording is not None and self.recording.paths == item.paths:
@@ -975,7 +1075,6 @@ class EditorWindow(QMainWindow):
         apply_theme(dark)
         self.timeline.set_theme(dark)
         self.preview.set_dark(dark)  # after the palette: the icons take its text colour
-        self.instructions_button.setIcon(instructions_icon())
 
     def toggle_theme(self) -> None:
         self.set_theme(not self._dark)

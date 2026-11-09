@@ -38,11 +38,13 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
 
     from video_story.host.controller import SessionController
     from video_story.ui.control_window import ControlWindow
+    from video_story.ui.icons import install_app_icon
 
     config = load_config(config_file)
     status = platform.support_status()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Video Story")
+    install_app_icon(app, "VideoStory.Recorder")
     app.setQuitOnLastWindowClosed(False)
 
     config.recording_folder.mkdir(parents=True, exist_ok=True)

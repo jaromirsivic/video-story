@@ -65,7 +65,8 @@ timeline with -/+ (the playhead stays in the middle); click a screen track to ch
 what is previewed and exported. The bottom row holds **Auto process**, the green
 **Process** (Ctrl+Enter), **Instructions** (Ctrl+I: the master instructions for you,
 stored in `instructions.txt`, empty by default; a bullet on the button marks stored
-ones), a separator and the blue **Render** (Ctrl+R) for an MP4. Process hands the
+ones; the templates **Draft Intent**, **Create Plan** and **Implement** fill the box
+with a ready-made instruction), a separator and the blue **Render** (Ctrl+R) for an MP4. Process hands the
 cropped range and the instructions to you and closes the editor. A recording that came
 straight from the Stop dialog is transcribed in the background of the editor: a green
 arrow under the audio track marks how far whisper got with `transcribing (ETA: m:ss)`

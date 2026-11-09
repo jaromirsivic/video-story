@@ -42,6 +42,15 @@ def session_started_at(session_id: str) -> datetime | None:
         return None
 
 
+IN_USE_REASON = "it is still in use by a running Video Story window"
+
+
+def recording_in_use(paths: SessionPaths) -> bool:
+    """True when the session's window (recorder, or the editor holding it for an agent)
+    may still be running; such a recording is never deleted."""
+    return _is_active(paths)
+
+
 def _is_active(paths: SessionPaths) -> bool:
     """True when the session's control window may still be running."""
     if not paths.state_path.exists():
@@ -94,6 +103,23 @@ def _delete_session(paths: SessionPaths) -> bool:
     return removed
 
 
+def delete_recording(paths: SessionPaths) -> str | None:
+    """Delete one recording (its final and work directories) at the user's request.
+
+    Returns ``None`` when it is gone, else the reason it was kept: a session whose
+    window is still running (recording, or open in the editor for an agent) is never
+    deleted.
+    """
+    if _is_active(paths):
+        return IN_USE_REASON
+    if not paths.final_dir.exists() and not paths.work_dir.exists():
+        return None
+    if not _delete_session(paths) or paths.final_dir.exists():
+        return "its folder could not be deleted (a file may be open in another program)"
+    log.info("deleted recording %s on request", paths.session_id)
+    return None
+
+
 def purge_old_recordings(
     recording_folder: Path, retention_days: int, now: datetime | None = None
 ) -> list[str]:
@@ -126,9 +152,12 @@ def delete_all_recordings(
 
 
 __all__ = [
+    "IN_USE_REASON",
     "RecordingsSummary",
     "delete_all_recordings",
+    "delete_recording",
     "purge_old_recordings",
+    "recording_in_use",
     "session_started_at",
     "summarize_recordings",
 ]

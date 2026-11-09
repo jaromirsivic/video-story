@@ -2,8 +2,9 @@
 
 Each row shows, from the left, a thumbnail of one screen, then the start date and time,
 the length (minutes and seconds) and the words spoken, and in the top right corner one
-dot per screen (at most three; the filled dot is the screen in the thumbnail - click
-another dot to switch). Rows are separated by a thin grey line.
+dot per screen (at most four; the filled dot is the screen in the thumbnail - click
+another dot to switch; hovering a dot names its screen and size, e.g. ``screen2
+1920x1080``). Rows are separated by a thin grey line.
 
 Moving the mouse over the text part of a row scrubs through that recording, like the
 hover scrub of DaVinci Resolve's media pool: the horizontal position maps to a moment of
@@ -33,6 +34,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QHelpEvent,
     QImage,
     QMouseEvent,
     QPainter,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QToolTip,
     QWidget,
 )
 
@@ -60,7 +63,7 @@ THUMB_H = 70
 TEXT_GAP = 8  # between the thumbnail and the text
 DOT_D = 10  # screen dots
 DOT_GAP = 5
-MAX_DOTS = 3
+MAX_DOTS = 4
 TEXT_LINES = 2  # lines of spoken text under the date and the length
 SCRUB_COLOR = QColor("#ff4a4a")  # the red of the timeline's playhead
 SEPARATOR_DARK = QColor("#505050")
@@ -370,6 +373,10 @@ class RecordingsListView(QListView):
 
     def dot_at(self, pos: QPoint) -> tuple[RecordingItem, str] | None:
         """The screen dot under ``pos`` (viewport coordinates)."""
+        hit = self._dot_hit(pos)
+        return (hit[0], hit[1]) if hit is not None else None
+
+    def _dot_hit(self, pos: QPoint) -> tuple[RecordingItem, str, QRect] | None:
         index = self.indexAt(pos)
         item = index.data(ItemRole) if index.isValid() else None
         if not isinstance(item, RecordingItem):
@@ -378,8 +385,9 @@ class RecordingsListView(QListView):
         screens = self.screens_of(item)
         dots = self.delegate.dot_rects(self.visualRect(index), len(screens), line)
         for screen_id, rect in zip(screens, dots, strict=False):
-            if rect.adjusted(-3, -3, 3, 3).contains(pos):
-                return item, screen_id
+            area = rect.adjusted(-3, -3, 3, 3)
+            if area.contains(pos):
+                return item, screen_id, area
         return None
 
     def scrub_to(self, pos: QPoint) -> None:
@@ -428,7 +436,20 @@ class RecordingsListView(QListView):
             return  # a dot only switches the thumbnail; it does not open the recording
         super().mousePressEvent(event)
 
+    def dot_tooltip(self, pos: QPoint) -> str | None:
+        """Tooltip of the screen dot under ``pos``: ``screen1 2560x1600``."""
+        hit = self.dot_at(pos)
+        return hit[0].screen_label(hit[1]) if hit is not None else None
+
     def viewportEvent(self, event: QEvent) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            hit = self._dot_hit(event.pos())
+            if hit is not None:
+                item, screen_id, area = hit
+                # Bound to the dot: leaving it hides the tooltip, the next dot shows its own.
+                text = item.screen_label(screen_id)
+                QToolTip.showText(event.globalPos(), text, self.viewport(), area)
+                return True
         if event.type() == QEvent.Type.Leave:
             self.clear_hover()
             self.viewport().unsetCursor()

@@ -279,6 +279,64 @@ def instructions_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+# Application ----------------------------------------------------------------------
+
+APP_BLUE = QColor("#1f6fd0")  # the editor's Render blue
+APP_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def _draw_app_icon(p: QPainter, s: int) -> None:
+    """A white video camera with a red record light on a blue rounded square."""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(APP_BLUE)
+    p.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22)
+    p.setBrush(QColor("#FFFFFF"))
+    # Camera body.
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.28, s * 0.52, s * 0.44), s * 0.08, s * 0.08)
+    # Lens hood: a trapezoid opening to the right.
+    p.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(s * 0.68, s * 0.44),
+                QPointF(s * 0.88, s * 0.30),
+                QPointF(s * 0.88, s * 0.70),
+                QPointF(s * 0.68, s * 0.56),
+            ]
+        )
+    )
+    # Record light.
+    p.setBrush(RECORD_RED)
+    p.drawEllipse(QPointF(s * 0.38, s * 0.50), s * 0.10, s * 0.10)
+
+
+def app_icon() -> QIcon:
+    """The application icon (a video camera), in several sizes for title bars and the
+    taskbar. Drawn here, so no image file or third-party licence is involved."""
+    icon = QIcon()
+    for size in APP_ICON_SIZES:
+        icon.addPixmap(_pixmap(size, _draw_app_icon))
+    return icon
+
+
+def install_app_icon(app, app_id: str) -> None:
+    """Give every window and dialog of ``app`` the camera icon.
+
+    On Windows the taskbar would otherwise group the windows under ``python.exe`` and
+    show its icon; an explicit AppUserModelID makes it use the window icon. Call this
+    before the first window is shown.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except (AttributeError, OSError):  # pragma: no cover - very old Windows
+            pass
+    app.setWindowIcon(app_icon())
+
+
 # Transport ------------------------------------------------------------------------
 
 
@@ -432,6 +490,8 @@ def moon_icon(size: int = 24, color: QColor | None = None) -> QIcon:
 
 __all__ = [
     "KEYPOINT_GREEN",
+    "app_icon",
+    "install_app_icon",
     "arrow_icon",
     "discard_icon",
     "draw_icon",
