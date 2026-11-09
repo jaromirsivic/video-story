@@ -1,7 +1,12 @@
-"""List model of the processed recordings in the Recording Folder (newest first)."""
+"""List model of the processed recordings in the Recording Folder (newest first).
+
+Each item also carries what the list's rows need to preview a recording while the mouse
+moves over them (see :mod:`recordings_view`): the screen ids and the transcript segments.
+"""
 
 from __future__ import annotations
 
+import bisect
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,12 +17,23 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, QPersistent
 
 from video_story.core.manifest import read_manifest
 from video_story.core.session import SessionPaths, list_sessions
-from video_story.core.timeline import format_timestamp
 from video_story.core.transcript import read_transcript, transcript_status
 
 log = logging.getLogger(__name__)
 
 ItemRole = Qt.ItemDataRole.UserRole + 1
+
+SegmentText = tuple[int, int, str]  # start ms, end ms, text
+
+
+def format_length(duration_ms: int) -> str:
+    """Length of a recording in whole seconds: ``MM:SS``, ``H:MM:SS`` from one hour."""
+    total = max(0, int(duration_ms)) // 1000
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 @dataclass(frozen=True)
@@ -28,6 +44,8 @@ class RecordingItem:
     screen_count: int
     first_line: str
     transcript_complete: bool = True  # False: the editor still has to transcribe it
+    screen_ids: tuple[str, ...] = ()  # manifest order, screen1 (the primary) first
+    segments: tuple[SegmentText, ...] = ()  # non-empty transcript segments by start
 
     @property
     def session_id(self) -> str:
@@ -41,12 +59,17 @@ class RecordingItem:
 
     @property
     def details(self) -> str:
-        screens = "1 screen" if self.screen_count == 1 else f"{self.screen_count} screens"
-        length = format_timestamp(max(0, self.duration_ms))
-        if length.startswith("00:"):
-            length = length[3:]  # MM:SS.mmm unless the recording is an hour or longer
+        """The length without milliseconds; the screens are the dots of the row."""
         suffix = "" if self.transcript_complete else "  |  transcribing"
-        return f"{length}  |  {screens}{suffix}"
+        return f"{format_length(self.duration_ms)}{suffix}"
+
+    def text_at(self, time_ms: int) -> str:
+        """The transcript text spoken at ``time_ms``: the last segment starting at or
+        before it (so pauses keep the previous sentence), the first line before that."""
+        index = bisect.bisect_right([s[0] for s in self.segments], time_ms) - 1
+        if index < 0:
+            return self.first_line
+        return self.segments[index][2]
 
     @property
     def display_text(self) -> str:
@@ -69,14 +92,19 @@ def session_start(session_id: str) -> datetime | None:
         return None
 
 
-def _first_transcript_line(paths: SessionPaths, base: Path) -> str:
+def _transcript_lines(paths: SessionPaths, base: Path) -> tuple[str, tuple[SegmentText, ...]]:
+    """The first spoken line and every non-empty segment (sorted by start)."""
     json_path = paths.transcript_json_path(base)
     if json_path.exists():
         try:
-            for segment in read_transcript(json_path).segments:
-                if segment.text.strip():
-                    return segment.text.strip()
-            return ""
+            segments = tuple(
+                sorted(
+                    (s.start_ms, s.end_ms, " ".join(s.text.split()))
+                    for s in read_transcript(json_path).segments
+                    if s.text.strip()
+                )
+            )
+            return (segments[0][2] if segments else ""), segments
         except (OSError, ValueError, KeyError):
             pass
     txt_path = paths.transcript_txt_path(base)
@@ -84,10 +112,10 @@ def _first_transcript_line(paths: SessionPaths, base: Path) -> str:
         try:
             for line in txt_path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
-                    return line.split("] ", 1)[-1].strip()
+                    return line.split("] ", 1)[-1].strip(), ()
         except OSError:
             pass
-    return ""
+    return "", ()
 
 
 def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
@@ -103,14 +131,17 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
         except (OSError, ValueError, KeyError) as exc:
             log.warning("skipping %s: %s", manifest_path, exc)
             continue
+        first_line, segments = _transcript_lines(paths, base)
         items.append(
             RecordingItem(
                 paths=paths,
                 started=session_start(paths.session_id),
                 duration_ms=manifest.recorded_duration_ms,
                 screen_count=len(manifest.screens),
-                first_line=_first_transcript_line(paths, base),
+                first_line=first_line,
                 transcript_complete=transcript_status(paths.transcript_json_path(base)).complete,
+                screen_ids=tuple(screen.id for screen in manifest.screens),
+                segments=segments,
             )
         )
     return items
@@ -173,4 +204,12 @@ class RecordingsModel(QAbstractListModel):
         return None
 
 
-__all__ = ["ItemRole", "RecordingItem", "RecordingsModel", "scan_recordings", "session_start"]
+__all__ = [
+    "ItemRole",
+    "RecordingItem",
+    "RecordingsModel",
+    "SegmentText",
+    "format_length",
+    "scan_recordings",
+    "session_start",
+]

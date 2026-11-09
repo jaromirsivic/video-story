@@ -76,7 +76,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListView,
     QMainWindow,
     QPushButton,
     QSlider,
@@ -108,6 +107,7 @@ from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import ItemRole, RecordingItem, RecordingsModel
+from .recordings_view import MIN_LIST_WIDTH, RecordingsListView
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
 from .subtitle_dialog import SubtitleDialog
 from .theme import apply_theme, system_prefers_dark
@@ -356,16 +356,14 @@ class EditorWindow(QMainWindow):
         title_font.setBold(True)
         title.setFont(title_font)
         left_layout.addWidget(title)
-        self.list_view = QListView()
-        self.list_view.setUniformItemSizes(False)
-        self.list_view.setSpacing(2)
-        self.list_view.setWordWrap(True)
-        self.list_view.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
+        self.list_view = RecordingsListView()
         left_layout.addWidget(self.list_view, 1)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Rescan the recording folder (F5)")
         self.refresh_button.clicked.connect(self.refresh_recordings)
         left_layout.addWidget(self.refresh_button)
+        # Dragged narrower than the rows need, the list snaps away completely.
+        left.setMinimumWidth(MIN_LIST_WIDTH)
         self.main_splitter.addWidget(left)
 
         self.right_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -489,7 +487,7 @@ class EditorWindow(QMainWindow):
         self.main_splitter.addWidget(self.right_splitter)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([260, 1020])
+        self.main_splitter.setSizes([380, 900])
 
         self.status_label = QLabel("")
         status = QStatusBar()
@@ -1551,6 +1549,7 @@ class EditorWindow(QMainWindow):
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
         self.timeline.shutdown()
+        self.list_view.shutdown()
         self.preview.view.wait()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

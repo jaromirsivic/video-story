@@ -77,6 +77,8 @@ TRANSPORT_BUTTON_SIZE = QSize(36, 28)
 TRANSPORT_ICON_SIZE = QSize(20, 20)
 SUBTITLE_MIN_LINES = 2
 SUBTITLE_MAX_LINES = 5  # taller subtitles get a vertical scrollbar
+SUBTITLE_TEXT_DARK = "#e6e6e6"  # the text colours of theme.dark_palette / light_palette
+SUBTITLE_TEXT_LIGHT = "#1e1e1e"
 PREVIEW_BG_DARK = QColor("#101010")
 PREVIEW_BG_LIGHT = QColor("#d6d6d6")
 
@@ -489,11 +491,18 @@ class SubtitleBox(QTextEdit):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.viewport().setAutoFillBackground(False)
-        self.setStyleSheet("QTextEdit { background: transparent; }")
+        self.set_dark(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._text = ""
         self.document().setDocumentMargin(2)
         self._fit_height()
+
+    def set_dark(self, dark: bool) -> None:
+        """Text colour of the theme. A style sheet pins the palette the widget had when
+        it was polished, so a later palette change of the application would leave the
+        text white on the light background: the colour is part of the style sheet."""
+        color = SUBTITLE_TEXT_DARK if dark else SUBTITLE_TEXT_LIGHT
+        self.setStyleSheet(f"QTextEdit {{ background: transparent; color: {color}; }}")
 
     def text(self) -> str:
         return self._text
@@ -593,7 +602,6 @@ class PreviewPanel(QWidget):
         sub_font.setPointSizeF(sub_font.pointSizeF() + 2)
         self.subtitle_label.setFont(sub_font)
         self.edit_subtitle_button = QToolButton(self)
-        self.edit_subtitle_button.setIcon(pencil_icon(20))
         self.edit_subtitle_button.setText("Edit")
         self.edit_subtitle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.edit_subtitle_button.setToolTip(
@@ -602,6 +610,7 @@ class PreviewPanel(QWidget):
         self.edit_subtitle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.edit_subtitle_button.setEnabled(False)
         self.edit_subtitle_button.clicked.connect(self.edit_subtitle.emit)
+        self.edit_subtitle_button.setIcon(pencil_icon(20))
         subtitle_row = QHBoxLayout()
         subtitle_row.setSpacing(6)
         subtitle_row.addWidget(self.subtitle_label, 1)
@@ -634,6 +643,8 @@ class PreviewPanel(QWidget):
         self.stop_button.setIcon(stop_square_icon())
         self.forward_button.setIcon(step_forward_icon())
         self.out_button.setIcon(skip_end_icon())
+        if hasattr(self, "edit_subtitle_button"):  # built after the transport row
+            self.edit_subtitle_button.setIcon(pencil_icon(20))
         self.theme_button.setIcon(sun_icon() if self._dark else moon_icon())
         target = "light" if self._dark else "dark"
         self.theme_button.setToolTip(f"Switch to the {target} theme (Ctrl+T)")
@@ -646,6 +657,7 @@ class PreviewPanel(QWidget):
         """The theme in force: picks the sun/moon icon and redraws the icons."""
         self._dark = dark
         self.view.set_dark(dark)
+        self.subtitle_label.set_dark(dark)
         self._apply_icons()
 
     def set_playing(self, playing: bool) -> None:
@@ -672,6 +684,8 @@ class PreviewPanel(QWidget):
 __all__ = [
     "SUBTITLE_MAX_LINES",
     "SUBTITLE_MIN_LINES",
+    "SUBTITLE_TEXT_DARK",
+    "SUBTITLE_TEXT_LIGHT",
     "TRANSPORT_BUTTON_SIZE",
     "PreviewPanel",
     "PreviewWidget",

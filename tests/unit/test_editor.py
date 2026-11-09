@@ -277,7 +277,13 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     assert items[1].first_line == "older one"
     assert items[2].first_line == ""
     assert "02.01.2026 09:00:00" in items[0].display_text
-    assert "2 screens" in items[0].details and "00:02.500" in items[0].details
+    # The length in whole seconds; the screens are the row's dots, not text.
+    assert items[0].details == "00:02" and "screens" not in items[0].display_text
+    assert items[0].screen_ids == ("screen1", "screen2")
+    assert [s[2] for s in items[0].segments] == ["hello world", "second line"]
+    assert items[0].text_at(0) == "hello world"
+    assert items[0].text_at(1200) == "hello world"  # a pause keeps the previous sentence
+    assert items[0].text_at(2000) == "second line"
 
     model = RecordingsModel(tmp_path)
     assert model.rowCount() == 3
@@ -294,8 +300,8 @@ def test_recording_length_shows_hours_only_when_nonzero(tmp_path: Path):
     make_recording(tmp_path, NEWEST, duration_ms=65 * 60_000)
     make_recording(tmp_path, OLDER)
     items = {item.session_id: item for item in scan_recordings(tmp_path)}
-    assert items[NEWEST].details.startswith("01:05:00.000  |")
-    assert items[OLDER].details.startswith("00:02.500  |")
+    assert items[NEWEST].details == "1:05:00"
+    assert items[OLDER].details == "00:02"  # no milliseconds
 
 
 def test_recordings_model_empty_folder(tmp_path: Path):

@@ -6,9 +6,10 @@ far the transcription got (the audio beyond it is shaded) with "transcribing" an
 estimated time to the end written under the arrow; the lane stays empty once the
 transcript is complete.
 
-Keypoints (Insert keypoint while recording) are bold green lines across the tracks:
-they cannot be moved, show "Keypoint N" on hover and act as a magnet for the crop
-handles and the playhead. A white arrow on the ruler marks where Play was last pressed
+Keypoints (Insert keypoint while recording) are thin green lines across the tracks
+with a green arrow at the top of the ruler, drawn like the red playhead: they cannot be
+moved, show "Keypoint N" on hover and act as a magnet for the crop handles and the
+playhead. A white arrow on the ruler marks where Play was last pressed
 (Stop returns there). The +/- zoom keeps the playhead in the middle of the view.
 """
 
@@ -47,7 +48,9 @@ GAP = 3
 HANDLE_HIT_PX = 7
 PLAYHEAD_HIT_PX = 2  # the playhead wins over a crop handle this close to its line
 SNAP_PX = 8
-KEYPOINT_W = 3  # the bold green keypoint line
+KEYPOINT_W = 1  # the green keypoint line: as thin as the red playhead
+KEYPOINT_ARROW_HALF_W = 6  # the green arrow on the ruler: the size of the playhead's
+KEYPOINT_ARROW_H = 9
 KEYPOINT_HIT_PX = 5  # hover distance that shows the keypoint tooltip
 THUMB_SPACING_PX = 160
 MIN_TICK_PX = 70
@@ -337,8 +340,8 @@ class TimelineView(QWidget):
 
     def keypoint_at(self, pos: QPoint) -> int | None:
         """The keypoint whose line is under ``pos`` (within ``KEYPOINT_HIT_PX``)."""
-        inside_tracks = self._tracks_top() <= pos.y() <= self.audio_rect().bottom()
-        if pos.x() < HEADER_W or not inside_tracks:
+        inside = 0 <= pos.y() <= self.audio_rect().bottom()  # its arrow on the ruler too
+        if pos.x() < HEADER_W or not inside:
             return None
         best: int | None = None
         best_d = float(KEYPOINT_HIT_PX) + 0.5
@@ -620,20 +623,32 @@ class TimelineView(QWidget):
         return min(x, float(self.width() - 1))
 
     def _paint_keypoints(self, painter: QPainter) -> None:
-        """Bold green lines across the screen and audio tracks (no handle, not movable)."""
+        """Thin green lines from the ruler down through the screen and audio tracks, each
+        with a green arrow at the top of the ruler, the size and place of the playhead's
+        red one (no handle, not movable). The hovered keypoint is drawn a little bolder."""
         if not self.model.keypoints:
             return
-        top = self._tracks_top()
         bottom = self.audio_rect().bottom() + 1
-        painter.setClipRect(QRect(HEADER_W, top, self._body_width(), bottom - top))
+        painter.setClipRect(QRect(HEADER_W, 0, self._body_width(), bottom))
         pen = QPen(COLOR_KEYPOINT, KEYPOINT_W)
+        painter.setBrush(QBrush(COLOR_KEYPOINT))
         for keypoint in self.model.keypoints:
             x = self.keypoint_x(keypoint)
             if x is None:
                 continue
-            pen.setWidth(KEYPOINT_W + 2 if keypoint == self._hover_keypoint else KEYPOINT_W)
+            pen.setWidth(KEYPOINT_W + 1 if keypoint == self._hover_keypoint else KEYPOINT_W)
             painter.setPen(pen)
-            painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+            painter.drawLine(QPointF(x, 0), QPointF(x, bottom))
+            painter.setPen(QPen(COLOR_KEYPOINT, 1))
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(x - KEYPOINT_ARROW_HALF_W, 0),
+                        QPointF(x + KEYPOINT_ARROW_HALF_W, 0),
+                        QPointF(x, KEYPOINT_ARROW_H),
+                    ]
+                )
+            )
         painter.setClipping(False)
 
     def play_marker_x(self) -> float | None:
@@ -736,6 +751,8 @@ __all__ = [
     "COLOR_TRANSCRIBING",
     "DARK_COLORS",
     "HEADER_W",
+    "KEYPOINT_ARROW_H",
+    "KEYPOINT_ARROW_HALF_W",
     "KEYPOINT_HIT_PX",
     "KEYPOINT_W",
     "LIGHT_COLORS",
