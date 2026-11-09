@@ -89,6 +89,7 @@ from .render_dialog import ExportFn, ask_output_path, default_output_path, run_r
 from .subtitle_dialog import SubtitleDialog
 from .timeline.model import TimelineModel
 from .timeline.view import TimelineView
+from .workers import automatic_gc_paused, collect_garbage
 
 log = logging.getLogger(__name__)
 
@@ -123,13 +124,14 @@ class _LoadJob(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        try:
-            recording = LoadedRecording.load(self._paths)
-        except Exception as exc:  # noqa: BLE001 - reported in the window
-            log.exception("loading %s failed", self._paths.session_id)
-            self._signals.done.emit(self._generation, None, str(exc))
-            return
-        self._signals.done.emit(self._generation, recording, "")
+        with automatic_gc_paused():
+            try:
+                recording = LoadedRecording.load(self._paths)
+            except Exception as exc:  # noqa: BLE001 - reported in the window
+                log.exception("loading %s failed", self._paths.session_id)
+                self._signals.done.emit(self._generation, None, str(exc))
+                return
+            self._signals.done.emit(self._generation, recording, "")
 
 
 class TimeEdit(QLineEdit):
@@ -460,6 +462,7 @@ class EditorWindow(QMainWindow):
         self._set_recording(None)
         self.preview.view.set_message(f"Loading {item.session_id}...")
         self.statusBar().showMessage(f"Loading {item.session_id}...")
+        collect_garbage()  # closed windows/dialogs die here, on the GUI thread (see workers.py)
         self._load_pool.start(_LoadJob(self._load_generation, item.paths, self._load_signals))
 
     def _on_loaded(self, generation: int, recording: object, error: str) -> None:

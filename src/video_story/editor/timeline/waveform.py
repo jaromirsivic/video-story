@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
+from ..workers import automatic_gc_paused
+
 log = logging.getLogger(__name__)
 
 BLOCK_MS = 20
@@ -85,12 +87,13 @@ class _PeaksJob(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        try:
-            peaks = compute_peaks(self._path, self._block_ms)
-        except Exception as exc:  # noqa: BLE001 - reported to the UI
-            self._signals.failed.emit(str(self._path), str(exc))
-            return
-        self._signals.ready.emit(str(self._path), peaks)
+        with automatic_gc_paused():
+            try:
+                peaks = compute_peaks(self._path, self._block_ms)
+            except Exception as exc:  # noqa: BLE001 - reported to the UI
+                self._signals.failed.emit(str(self._path), str(exc))
+                return
+            self._signals.ready.emit(str(self._path), peaks)
 
 
 class WaveformLoader(QObject):

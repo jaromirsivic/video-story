@@ -46,6 +46,8 @@ from video_story.core.timeline import format_timestamp
 from video_story.host.runner import FrameRef
 from video_story.ui.icons import pencil_icon
 
+from .workers import automatic_gc_paused
+
 log = logging.getLogger(__name__)
 
 IMAGE_CACHE_SIZE = 6
@@ -67,12 +69,13 @@ class _DecodeJob(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        try:
-            image = QImage(str(self._path))
-        except Exception:  # noqa: BLE001
-            log.exception("decoding %s failed", self._path)
-            image = QImage()
-        self._signals.decoded.emit(str(self._path), image)
+        with automatic_gc_paused():
+            try:
+                image = QImage(str(self._path))
+            except Exception:  # noqa: BLE001
+                log.exception("decoding %s failed", self._path)
+                image = QImage()
+            self._signals.decoded.emit(str(self._path), image)
 
 
 class PreviewWidget(QWidget):
