@@ -1,4 +1,10 @@
-"""Preview of the selected screen at the playhead, transport buttons and subtitle."""
+"""Preview of the selected screen at the playhead, transport buttons and subtitle.
+
+The transport row holds icon buttons (go to In, step back, play/pause, stop, step
+forward, go to Out) centred under the picture and, in its right corner above the
+subtitle's **Edit** button, the light/dark theme toggle. The subtitle under the time
+grows up to :data:`SUBTITLE_MAX_LINES` lines and scrolls vertically beyond that.
+"""
 
 from __future__ import annotations
 
@@ -28,13 +34,15 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QResizeEvent,
+    QTextOption,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSizePolicy,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -43,7 +51,18 @@ from PySide6.QtWidgets import (
 from video_story.core.cursor import CursorPosition
 from video_story.core.timeline import format_timestamp
 from video_story.host.runner import FrameRef
-from video_story.ui.icons import pencil_icon
+from video_story.ui.icons import (
+    moon_icon,
+    pause_icon,
+    pencil_icon,
+    play_icon,
+    skip_end_icon,
+    skip_start_icon,
+    step_back_icon,
+    step_forward_icon,
+    stop_square_icon,
+    sun_icon,
+)
 
 from .workers import automatic_gc_paused
 
@@ -54,6 +73,12 @@ CURSOR_ARROW = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
 MAX_ZOOM = 8.0  # 800 % of the original image pixels (logical widget pixels per image pixel)
 ZOOM_STEP = 1.25  # factor per wheel notch
 SMOOTH_BELOW = 2.0  # smooth scaling under 200 %, crisp pixels above
+TRANSPORT_BUTTON_SIZE = QSize(36, 28)
+TRANSPORT_ICON_SIZE = QSize(20, 20)
+SUBTITLE_MIN_LINES = 2
+SUBTITLE_MAX_LINES = 5  # taller subtitles get a vertical scrollbar
+PREVIEW_BG_DARK = QColor("#101010")
+PREVIEW_BG_LIGHT = QColor("#d6d6d6")
 
 
 class _Signals(QObject):
@@ -109,6 +134,7 @@ class PreviewWidget(QWidget):
         self._zoom: float | None = None  # None = fit (whole image visible, centred)
         self._offset = QPointF()  # widget position of the image's top-left when zoomed
         self._drag: tuple[QPointF, QPointF] | None = None  # press position, offset then
+        self._background = PREVIEW_BG_DARK
         self.setMinimumSize(160, 100)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -116,6 +142,11 @@ class PreviewWidget(QWidget):
 
     def set_draw_cursor(self, enabled: bool) -> None:
         self._draw_cursor = enabled
+        self.update()
+
+    def set_dark(self, dark: bool) -> None:
+        """Background around the picture: near black in the dark theme, grey in the light."""
+        self._background = PREVIEW_BG_DARK if dark else PREVIEW_BG_LIGHT
         self.update()
 
     def set_message(self, text: str | None) -> None:
@@ -387,11 +418,12 @@ class PreviewWidget(QWidget):
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#101010"))
+        painter.fillRect(self.rect(), self._background)
         image = self._images.get(self._shown) if self._shown else None
         if image is None:
             if self._message:
-                painter.setPen(QPen(QColor("#9a9a9a")))
+                painter.setPen(QPen(QColor("#9a9a9a" if self._background.lightness() < 128
+                                           else "#505050")))  # fmt: skip
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
             painter.end()
             return
@@ -442,6 +474,68 @@ class PreviewWidget(QWidget):
         painter.drawPolygon(polygon)
 
 
+class SubtitleBox(QTextEdit):
+    """The subtitle under the preview: centred text, read only, at most
+    :data:`SUBTITLE_MAX_LINES` lines tall (then a vertical scrollbar appears)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WordWrap)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.viewport().setAutoFillBackground(False)
+        self.setStyleSheet("QTextEdit { background: transparent; }")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._text = ""
+        self.document().setDocumentMargin(2)
+        self._fit_height()
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:  # noqa: N802 - QLabel-like API
+        self._text = text
+        self.setPlainText(text)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.verticalScrollBar().setValue(0)
+        self._fit_height()
+
+    def setFont(self, font) -> None:  # noqa: N802
+        super().setFont(font)
+        self.document().setDefaultFont(font)
+        self._fit_height()
+
+    def line_height(self) -> int:
+        return self.fontMetrics().lineSpacing()
+
+    def max_height(self) -> int:
+        return self.line_height() * SUBTITLE_MAX_LINES + 8
+
+    def visible_lines(self) -> int:
+        """How many text lines fit into the current height."""
+        return max(1, (self.height() - 8) // max(1, self.line_height()))
+
+    def _fit_height(self) -> None:
+        """Grow with the text from two lines up to the maximum, then scroll."""
+        doc = self.document()
+        width = max(50, self.viewport().width())
+        doc.setTextWidth(width)
+        needed = int(doc.size().height()) + 6
+        lower = self.line_height() * SUBTITLE_MIN_LINES + 8
+        self.setFixedHeight(max(lower, min(needed, self.max_height())))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        doc = self.document()
+        if doc.textWidth() != self.viewport().width():
+            self._fit_height()
+
+
 class PreviewPanel(QWidget):
     """Preview widget, transport row and the subtitle label (with its Edit button) below."""
 
@@ -451,32 +545,40 @@ class PreviewPanel(QWidget):
     go_in = Signal()
     go_out = Signal()
     step = Signal(int)  # +1 / -1 output frames
+    theme_toggled = Signal()  # the light/dark button in the corner was clicked
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._dark = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         self.view = PreviewWidget(self)
         layout.addWidget(self.view, 1)
 
-        # Transport buttons centred under the picture, the time centred below them.
+        # Icon transport buttons centred under the picture, the time centred below
+        # them; the theme toggle sits in the right corner of the row (above Edit), with
+        # an equal blank on the left so that the transport stays centred.
         row = QHBoxLayout()
         row.setSpacing(4)
+        row.addSpacing(TRANSPORT_BUTTON_SIZE.width())
         row.addStretch(1)
         self.in_button = self._button("|<", "Go to In (Home)", self.go_in.emit, row)
         self.back_button = self._button(
             "<", "Step back 1/24 s (Left)", lambda: self.step.emit(-1), row
         )
         self.play_button = self._button("Play", "Play / Pause (Space)", self.play_pause.emit, row)
-        self.play_button.setMinimumWidth(70)
-        self.stop_button = self._button("Stop", "Stop and go to In (Esc)", self.stop.emit, row)
+        self.stop_button = self._button(
+            "Stop", "Stop and return to where Play was pressed (Esc)", self.stop.emit, row
+        )
         self.forward_button = self._button(
             ">", "Step forward 1/24 s (Right)", lambda: self.step.emit(1), row
         )
         self.out_button = self._button(">|", "Go to Out (End)", self.go_out.emit, row)
         row.addStretch(1)
+        self.theme_button = self._button("Theme", "", self.theme_toggled.emit, row)
         layout.addLayout(row)
+        self._apply_icons()
 
         self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -486,13 +588,10 @@ class PreviewPanel(QWidget):
         self.time_label.setFont(font)
         layout.addWidget(self.time_label)
 
-        self.subtitle_label = QLabel("")
-        self.subtitle_label.setWordWrap(True)
-        self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.subtitle_label = SubtitleBox(self)
         sub_font = self.subtitle_label.font()
         sub_font.setPointSizeF(sub_font.pointSizeF() + 2)
         self.subtitle_label.setFont(sub_font)
-        self.subtitle_label.setMinimumHeight(self.subtitle_label.fontMetrics().height() * 2 + 8)
         self.edit_subtitle_button = QToolButton(self)
         self.edit_subtitle_button.setIcon(pencil_icon(20))
         self.edit_subtitle_button.setText("Edit")
@@ -511,16 +610,48 @@ class PreviewPanel(QWidget):
         self._subtitle_text = ""
 
     @staticmethod
-    def _button(text: str, tooltip: str, slot, row: QHBoxLayout) -> QPushButton:
-        button = QPushButton(text)
+    def _button(text: str, tooltip: str, slot, row: QHBoxLayout) -> QToolButton:
+        """An icon-only button; ``text`` names it (tests, accessibility) without showing."""
+        button = QToolButton()
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setFixedSize(TRANSPORT_BUTTON_SIZE)
+        button.setIconSize(TRANSPORT_ICON_SIZE)
         button.setToolTip(tooltip)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setAutoRaise(False)
         button.clicked.connect(slot)
         row.addWidget(button)
         return button
 
+    def _apply_icons(self) -> None:
+        """(Re)draw the vector icons in the current button text colour."""
+        self.in_button.setIcon(skip_start_icon())
+        self.back_button.setIcon(step_back_icon())
+        self.play_button.setIcon(
+            pause_icon() if self.play_button.text() == "Pause" else play_icon()
+        )
+        self.stop_button.setIcon(stop_square_icon())
+        self.forward_button.setIcon(step_forward_icon())
+        self.out_button.setIcon(skip_end_icon())
+        self.theme_button.setIcon(sun_icon() if self._dark else moon_icon())
+        target = "light" if self._dark else "dark"
+        self.theme_button.setToolTip(f"Switch to the {target} theme (Ctrl+T)")
+
+    @property
+    def dark(self) -> bool:
+        return self._dark
+
+    def set_dark(self, dark: bool) -> None:
+        """The theme in force: picks the sun/moon icon and redraws the icons."""
+        self._dark = dark
+        self.view.set_dark(dark)
+        self._apply_icons()
+
     def set_playing(self, playing: bool) -> None:
         self.play_button.setText("Pause" if playing else "Play")
+        self.play_button.setIcon(pause_icon() if playing else play_icon())
+        self.play_button.setToolTip("Pause (Space)" if playing else "Play (Space)")
 
     def set_time(self, position_ms: int, total_ms: int) -> None:
         self.time_label.setText(
@@ -538,4 +669,11 @@ class PreviewPanel(QWidget):
         return self.view.rect()
 
 
-__all__ = ["PreviewPanel", "PreviewWidget"]
+__all__ = [
+    "SUBTITLE_MAX_LINES",
+    "SUBTITLE_MIN_LINES",
+    "TRANSPORT_BUTTON_SIZE",
+    "PreviewPanel",
+    "PreviewWidget",
+    "SubtitleBox",
+]

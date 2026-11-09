@@ -1,4 +1,12 @@
-"""The small always-on-top control window: Record/Stop, Settings, Draw on Screen."""
+"""The small always-on-top control window: Record/Stop, Settings, Draw on Screen.
+
+While recording, **Settings** gives its place to **Insert keypoint**: a click marks the
+current moment in the recording (``manifest.json`` ``keypoints``; the editor shows them
+as green lines that the crop handles snap to) and the button counts down 3, 2, 1 before
+the next keypoint can be inserted. The text clipboard is tracked meanwhile
+(:mod:`video_story.ui.clipboard`): every new text copied during the recording lands in
+the frame sidecars of the next tick.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +30,8 @@ from video_story.core.timeline import format_timestamp
 from video_story.host.controller import SessionController
 from video_story.host.editor_launcher import launch_editor
 
-from .icons import draw_icon, record_icon, settings_icon, stop_icon
+from .clipboard import ClipboardTracker
+from .icons import draw_icon, keypoint_icon, record_icon, settings_icon, stop_icon
 from .progress_dialog import ProgressDialog
 from .settings_dialog import SettingsDialog
 from .stop_dialog import StopChoice, StopDialog, confirm_discard
@@ -30,6 +39,8 @@ from .stop_dialog import StopChoice, StopDialog, confirm_discard
 log = logging.getLogger(__name__)
 
 UI_TICK_MS = 200
+KEYPOINT_LABEL = "Insert keypoint"
+KEYPOINT_COOLDOWN_S = 3  # the button counts 3, 2, 1 before the next keypoint
 
 
 class ProcessingWorker(QObject):
@@ -104,6 +115,21 @@ class ControlWindow(QWidget):
         self.settings_button.clicked.connect(self._open_settings)
         row.addWidget(self.settings_button)
 
+        # Takes the place of Settings while recording (see the module docstring).
+        self.keypoint_button = QPushButton(keypoint_icon(), KEYPOINT_LABEL)
+        self.keypoint_button.setToolTip(
+            "Mark this moment of the recording as a keypoint (shown as a green line in the "
+            f"editor); the next one can follow after {KEYPOINT_COOLDOWN_S} s"
+        )
+        self.keypoint_button.clicked.connect(self.insert_keypoint)
+        self.keypoint_button.hide()
+        row.addWidget(self.keypoint_button)
+        self._keypoint_countdown: int | None = None
+        self._keypoint_timer = QTimer(self)
+        self._keypoint_timer.setInterval(1000)
+        self._keypoint_timer.timeout.connect(self._on_keypoint_tick)
+        self._clipboard = ClipboardTracker(parent=self)
+
         self.draw_button = QPushButton(draw_icon(), "Draw on Screen")
         self.draw_button.setToolTip("Draw annotations on the screen (available while recording)")
         self.draw_button.setCheckable(True)
@@ -155,10 +181,81 @@ class ControlWindow(QWidget):
         self.record_button.setIcon(stop_icon())
         self.record_button.setText("Stop")
         self.record_button.setToolTip("Stop and decide what to do with the recording")
-        self.settings_button.setEnabled(False)
+        self._show_recording_controls(True)
         self.draw_button.setEnabled(True)
+        self._start_clipboard_tracking()
         self._timer.start()
         self._tick()
+
+    def _show_recording_controls(self, recording: bool) -> None:
+        """Settings while idle, Insert keypoint while recording (same slot of the row)."""
+        self.settings_button.setEnabled(not recording)
+        self.settings_button.setVisible(not recording)
+        self._reset_keypoint_button()
+        self.keypoint_button.setVisible(recording)
+        self.adjustSize()
+
+    # Keypoints --------------------------------------------------------------
+
+    @property
+    def keypoint_countdown(self) -> int | None:
+        """Seconds until the next keypoint may be inserted, ``None`` when ready."""
+        return self._keypoint_countdown
+
+    def insert_keypoint(self) -> int | None:
+        """Mark the current moment; returns its time (ms) or ``None`` when refused."""
+        recorder = self.controller.recorder
+        add = getattr(recorder, "add_keypoint", None)
+        if not self.controller.recording or add is None or self._keypoint_countdown is not None:
+            return None
+        time_ms = add()
+        if time_ms is None:
+            return None
+        self._keypoint_countdown = KEYPOINT_COOLDOWN_S
+        self.keypoint_button.setEnabled(False)
+        self._show_keypoint_countdown()
+        self._keypoint_timer.start()
+        self._tick()
+        return int(time_ms)
+
+    def _show_keypoint_countdown(self) -> None:
+        if self._keypoint_countdown is not None:
+            self.keypoint_button.setText(f"{KEYPOINT_LABEL} ({self._keypoint_countdown})")
+
+    def _on_keypoint_tick(self) -> None:
+        if self._keypoint_countdown is None:
+            self._keypoint_timer.stop()
+            return
+        self._keypoint_countdown -= 1
+        if self._keypoint_countdown > 0:
+            self._show_keypoint_countdown()
+            return
+        self._reset_keypoint_button()
+
+    def _reset_keypoint_button(self) -> None:
+        self._keypoint_timer.stop()
+        self._keypoint_countdown = None
+        self.keypoint_button.setText(KEYPOINT_LABEL)
+        self.keypoint_button.setEnabled(True)
+
+    # Clipboard --------------------------------------------------------------
+
+    def _start_clipboard_tracking(self) -> None:
+        recorder = self.controller.recorder
+        if recorder is None:
+            return
+        try:
+            self._clipboard.start()
+        except Exception:  # noqa: BLE001 - the clipboard must never stop a recording
+            log.exception("clipboard tracking unavailable")
+            return
+        recorder.clipboard_provider = self._clipboard.take
+
+    def _stop_clipboard_tracking(self) -> None:
+        self._clipboard.stop()
+        recorder = self.controller.recorder
+        if recorder is not None:
+            recorder.clipboard_provider = None
 
     def _on_stop(self) -> None:
         while True:
@@ -184,6 +281,7 @@ class ControlWindow(QWidget):
 
     def _discard(self) -> None:
         self._close_overlay()
+        self._stop_clipboard_tracking()
         try:
             self.controller.discard()
         except Exception as exc:
@@ -193,7 +291,7 @@ class ControlWindow(QWidget):
         self.record_button.setIcon(record_icon())
         self.record_button.setText("Record")
         self.record_button.setToolTip("Start recording audio, screens and cursor")
-        self.settings_button.setEnabled(True)
+        self._show_recording_controls(False)
         self.draw_button.setEnabled(False)
         self.status_label.setText("Recording discarded. Press Record to start again.")
 
@@ -206,8 +304,11 @@ class ControlWindow(QWidget):
         self._open_editor = open_editor
         self._timer.stop()
         self._close_overlay()
+        self._stop_clipboard_tracking()
         self.record_button.setEnabled(False)
         self.draw_button.setEnabled(False)
+        self._reset_keypoint_button()
+        self.keypoint_button.setEnabled(False)
         self._thread = QThread(self)
         self._worker = ProcessingWorker(self.controller, hand_to_editor=open_editor)
         self._worker.moveToThread(self._thread)
@@ -380,11 +481,14 @@ class ControlWindow(QWidget):
             )
             self._begin_processing()
             return
+        self._clipboard.poll()
         elapsed = format_timestamp(recorder.elapsed_ms)
         remaining = max(0, self.controller.config.auto_stop_ms - recorder.elapsed_ms)
+        keypoints = len(getattr(recorder, "keypoints", None) or ())
+        suffix = f"  |  {keypoints} keypoint{'s' if keypoints != 1 else ''}" if keypoints else ""
         self.status_label.setText(
             f"Recording {elapsed[:-4]}  |  auto stop in {format_timestamp(remaining)[:-4]}  |  "
-            f"{len(recorder.screens)} screen(s), {recorder.frame_count} frames"
+            f"{len(recorder.screens)} screen(s), {recorder.frame_count} frames" + suffix
         )
 
     # Close ------------------------------------------------------------------
@@ -409,4 +513,4 @@ class ControlWindow(QWidget):
         self._on_finished("cancelled")
 
 
-__all__ = ["ControlWindow", "ProcessingWorker"]
+__all__ = ["KEYPOINT_COOLDOWN_S", "KEYPOINT_LABEL", "ControlWindow", "ProcessingWorker"]

@@ -726,10 +726,14 @@ def test_player_fallback_clock_when_sounddevice_missing(editor, qtbot, no_sd):
 
     editor.model.set_playhead(1950)
     editor.toggle_play()
+    assert editor.model.play_marker_ms == 1950  # the white arrow: where Play was pressed
     qtbot.waitUntil(lambda: not editor.player.playing, timeout=5000)  # stops at Out
     assert editor.model.playhead_ms == 2000
     editor.stop_playback()
-    assert editor.model.playhead_ms == 1000
+    assert editor.model.playhead_ms == 1950  # Stop returns to where Play was pressed
+    editor.model.set_play_marker(None)
+    editor.stop_playback()
+    assert editor.model.playhead_ms == 1000  # without a marker Stop goes to In
 
 
 def test_player_uses_audio_stream_when_available(editor, qtbot, fake_sd):
@@ -755,6 +759,7 @@ def test_pause_aborts_the_stream_instead_of_draining_it(editor, qtbot, fake_sd):
     paused_at = editor.model.playhead_ms
     editor.toggle_play()  # resumes exactly where it paused
     assert editor.model.playhead_ms == paused_at and len(FakeStream.instances) == 2
+    assert editor.model.play_marker_ms == 0  # a resume keeps the marker of the first Play
     editor.stop_playback()
     assert editor.model.playhead_ms == 0
 

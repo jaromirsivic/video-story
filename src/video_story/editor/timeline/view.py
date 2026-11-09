@@ -2,8 +2,14 @@
 
 Below the audio track there is a narrow lane for the background transcription: while
 the recording is still being transcribed, a green arrow under the waveform marks how
-far the transcription got (the audio beyond it is shaded) with "transcribing" written
-under the arrow; the lane stays empty once the transcript is complete.
+far the transcription got (the audio beyond it is shaded) with "transcribing" and the
+estimated time to the end written under the arrow; the lane stays empty once the
+transcript is complete.
+
+Keypoints (Insert keypoint while recording) are bold green lines across the tracks:
+they cannot be moved, show "Keypoint N" on hover and act as a magnet for the crop
+handles and the playhead. A white arrow on the ruler marks where Play was last pressed
+(Stop returns there). The +/- zoom keeps the playhead in the middle of the view.
 """
 
 from __future__ import annotations
@@ -21,8 +27,9 @@ from PySide6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QScrollBar, QWidget
+from PySide6.QtWidgets import QScrollBar, QToolTip, QWidget
 
+from video_story.core.timeline import format_timestamp
 from video_story.editor.recording import LoadedRecording
 
 from .model import TimelineModel
@@ -40,6 +47,8 @@ GAP = 3
 HANDLE_HIT_PX = 7
 PLAYHEAD_HIT_PX = 2  # the playhead wins over a crop handle this close to its line
 SNAP_PX = 8
+KEYPOINT_W = 3  # the bold green keypoint line
+KEYPOINT_HIT_PX = 5  # hover distance that shows the keypoint tooltip
 THUMB_SPACING_PX = 160
 MIN_TICK_PX = 70
 TICK_STEPS_MS = (
@@ -59,8 +68,36 @@ COLOR_WAVE = QColor("#5fb3a1")
 COLOR_SHADE = QColor(0, 0, 0, 130)
 COLOR_HANDLE = QColor("#f0c040")
 COLOR_PLAYHEAD = QColor("#ff4a4a")
+COLOR_PLAY_MARKER = QColor("#ffffff")
+COLOR_KEYPOINT = QColor("#2fd36f")
 COLOR_TRANSCRIBING = QColor("#3ddc84")
 COLOR_UNTRANSCRIBED = QColor(0, 0, 0, 90)  # audio whisper has not reached yet
+
+# Theme dependent colours (the dark set equals the module constants above).
+DARK_COLORS = {
+    "bg": COLOR_BG,
+    "ruler": COLOR_RULER,
+    "header": COLOR_HEADER,
+    "track": COLOR_TRACK,
+    "text": COLOR_TEXT,
+    "text_dim": COLOR_TEXT_DIM,
+    "tick": COLOR_TICK,
+    "shade": COLOR_SHADE,
+    "untranscribed": COLOR_UNTRANSCRIBED,
+    "play_marker": COLOR_PLAY_MARKER,
+}
+LIGHT_COLORS = {
+    "bg": QColor("#e4e4e4"),
+    "ruler": QColor("#d4d4d4"),
+    "header": QColor("#c8c8c8"),
+    "track": QColor("#f2f2f2"),
+    "text": QColor("#202020"),
+    "text_dim": QColor("#666666"),
+    "tick": QColor("#8a8a8a"),
+    "shade": QColor(0, 0, 0, 70),
+    "untranscribed": QColor(0, 0, 0, 50),
+    "play_marker": QColor("#505050"),  # a white arrow would vanish on the light ruler
+}
 
 TRANSCRIBING_LABEL = "transcribing"
 TRANSCRIPTION_LABELS = {
@@ -68,6 +105,24 @@ TRANSCRIPTION_LABELS = {
     "pending": "transcription pending",
     "failed": "transcription failed",
 }
+
+
+def format_eta(seconds: float | None) -> str:
+    """``m:ss`` (``h:mm:ss`` from one hour) for an estimate; ``""`` when unknown."""
+    if seconds is None or seconds < 0:
+        return ""
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def transcribing_label(eta_s: float | None) -> str:
+    """The lane label: ``transcribing`` plus ``(ETA: m:ss)`` once an estimate exists."""
+    eta = format_eta(eta_s)
+    return f"{TRANSCRIBING_LABEL} (ETA: {eta})" if eta else TRANSCRIBING_LABEL
 
 
 def tick_step_ms(zoom_px_per_s: float, min_px: int = MIN_TICK_PX) -> int:
@@ -114,6 +169,9 @@ class TimelineView(QWidget):
         self._drag: str | None = None
         self._drag_offset = 0.0  # px between the grabbed handle and the press position
         self._transcription: tuple[str, int] | None = None  # (state, transcribed_ms)
+        self._eta_s: float | None = None  # estimated seconds until the transcription ends
+        self._hover_keypoint: int | None = None  # keypoint under the mouse (tooltip shown)
+        self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumHeight(RULER_H + TRACK_H + AUDIO_H + PROGRESS_H + 4 * GAP + 20)
@@ -124,9 +182,12 @@ class TimelineView(QWidget):
     def set_recording(self, recording: LoadedRecording | None) -> None:
         self.recording = recording
         self._transcription = None
+        self._eta_s = None
+        self._hover_keypoint = None
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
+        self.model.set_keypoints(recording.keypoints if recording else [])
         self.model.fit(self._body_width())
         audio = recording.audio if recording else None
         self.waveform.load(audio.path if audio else None)
@@ -135,18 +196,32 @@ class TimelineView(QWidget):
         self.updateGeometry()
         self._after_view_change()
 
-    def set_transcription(self, state: str | None, transcribed_ms: int = 0) -> None:
+    def set_transcription(
+        self, state: str | None, transcribed_ms: int = 0, eta_s: float | None = None
+    ) -> None:
         """What the lane under the audio track shows: ``None`` (complete: nothing),
-        ``"transcribing"`` (green arrow at ``transcribed_ms``), ``"pending"`` (another
-        recording is being transcribed first) or ``"failed"``."""
+        ``"transcribing"`` (green arrow at ``transcribed_ms``, ``eta_s`` seconds to go
+        when known), ``"pending"`` (another recording is being transcribed first) or
+        ``"failed"``."""
         value = None if state is None else (state, max(0, int(transcribed_ms)))
-        if value != self._transcription:
+        eta = None if value is None else eta_s
+        if value != self._transcription or eta != self._eta_s:
             self._transcription = value
+            self._eta_s = eta
             self.update()
 
     @property
     def transcription(self) -> tuple[str, int] | None:
         return self._transcription
+
+    @property
+    def eta_s(self) -> float | None:
+        return self._eta_s
+
+    def set_theme(self, dark: bool) -> None:
+        """Dark (the default) or light colours for the ruler, headers and tracks."""
+        self.colors = dict(DARK_COLORS if dark else LIGHT_COLORS)
+        self.update()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         tracks = max(1, len(self.model.screens))
@@ -154,17 +229,18 @@ class TimelineView(QWidget):
         return QSize(900, height + self.scrollbar.sizeHint().height())
 
     def zoom_in(self) -> None:
-        self._zoom_around_playhead(1.5)
+        self._zoom_toward_playhead(1.5)
 
     def zoom_out(self) -> None:
-        self._zoom_around_playhead(1 / 1.5)
+        self._zoom_toward_playhead(1 / 1.5)
 
     def fit(self) -> None:
         self.model.fit(self._body_width())
         self._after_view_change()
 
     def set_zoom_fraction(self, fraction: float) -> None:
-        self.model.set_zoom_fraction(fraction)
+        """The zoom slider: like the buttons it keeps the playhead centred."""
+        self.model.set_zoom_fraction(fraction, center_ms=self.model.playhead_ms)
         self._after_view_change()
 
     def ensure_playhead_visible(self) -> None:
@@ -250,12 +326,31 @@ class TimelineView(QWidget):
         self.view_changed.emit()
         self.update()
 
-    def _zoom_around_playhead(self, factor: float) -> None:
-        x = self.model.time_to_x(self.model.playhead_ms)
-        if not 0 <= x < self.model.viewport_width:
-            x = self.model.viewport_width / 2
-        self.model.zoom_around(x, factor)
+    def _zoom_toward_playhead(self, factor: float) -> None:
+        """The +/- buttons and Ctrl+/-: zoom with the red playhead line in the middle of
+        the view (as far as the ends of the recording allow)."""
+        self.model.zoom_centered(factor, self.model.playhead_ms)
         self._after_view_change()
+
+    def _snap_tolerance_ms(self) -> float:
+        return SNAP_PX * 1000.0 / self.model.zoom
+
+    def keypoint_at(self, pos: QPoint) -> int | None:
+        """The keypoint whose line is under ``pos`` (within ``KEYPOINT_HIT_PX``)."""
+        inside_tracks = self._tracks_top() <= pos.y() <= self.audio_rect().bottom()
+        if pos.x() < HEADER_W or not inside_tracks:
+            return None
+        best: int | None = None
+        best_d = float(KEYPOINT_HIT_PX) + 0.5
+        for keypoint in self.model.keypoints:
+            d = abs(pos.x() - self._x(keypoint))
+            if d < best_d:
+                best, best_d = keypoint, d
+        return best
+
+    @staticmethod
+    def keypoint_tooltip(index: int, time_ms: int) -> str:
+        return f"Keypoint {index}  ({format_timestamp(time_ms)})"
 
     # Events -----------------------------------------------------------------
 
@@ -325,6 +420,24 @@ class TimelineView(QWidget):
             self.setCursor(
                 Qt.CursorShape.SizeHorCursor if near_handle else Qt.CursorShape.ArrowCursor
             )
+            self._update_keypoint_tooltip(pos, event.globalPosition().toPoint())
+
+    def _update_keypoint_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
+        keypoint = self.keypoint_at(pos)
+        if keypoint == self._hover_keypoint:
+            return
+        self._hover_keypoint = keypoint
+        if keypoint is None:
+            QToolTip.hideText()
+            return
+        index = self.model.keypoints.index(keypoint) + 1
+        QToolTip.showText(global_pos, self.keypoint_tooltip(index, keypoint), self)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover_keypoint is not None:
+            self._hover_keypoint = None
+            QToolTip.hideText()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -333,7 +446,8 @@ class TimelineView(QWidget):
                 self.playhead_drag_finished.emit()
 
     def _move_playhead_to(self, x: float) -> None:
-        if self.model.set_playhead(self._time(x)):
+        time_ms = self.model.snap_to_keypoint(self._time(x), self._snap_tolerance_ms())
+        if self.model.set_playhead(time_ms):
             self.playhead_moved.emit(self.model.playhead_ms)
         self.update()
 
@@ -342,6 +456,8 @@ class TimelineView(QWidget):
         time_ms = self._time(x)
         if abs(x - self._x(self.model.playhead_ms)) <= SNAP_PX:
             time_ms = self.model.playhead_ms
+        else:
+            time_ms = self.model.snap_to_keypoint(time_ms, self._snap_tolerance_ms())  # magnet
         changed = self.model.set_in(time_ms) if self._drag == "in" else self.model.set_out(time_ms)
         if changed:
             self.crop_changed.emit()
@@ -353,20 +469,22 @@ class TimelineView(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         canvas = QRect(0, 0, self.width(), self._canvas_height())
-        painter.fillRect(canvas, COLOR_BG)
+        painter.fillRect(canvas, self.colors["bg"])
         self._paint_ruler(painter)
         self.thumbnails.begin_paint()  # only the thumbnails requested below get decoded
         for screen_id, rect in self.track_rects():
             self._paint_video_track(painter, screen_id, rect)
         self._paint_audio_track(painter, self.audio_rect())
         self._paint_crop(painter, canvas)
+        self._paint_keypoints(painter)
         self._paint_transcription(painter)
+        self._paint_play_marker(painter)
         self._paint_playhead(painter, canvas)
         painter.end()
 
     def _paint_ruler(self, painter: QPainter) -> None:
         rect = QRect(0, 0, self.width(), RULER_H)
-        painter.fillRect(rect, COLOR_RULER)
+        painter.fillRect(rect, self.colors["ruler"])
         painter.setClipRect(QRect(HEADER_W, 0, self._body_width(), RULER_H))
         step = tick_step_ms(self.model.zoom)
         minor = step / 5.0
@@ -378,29 +496,29 @@ class TimelineView(QWidget):
         t = first
         while t <= end and t <= self.model.duration_ms:
             x = int(self._x(t))
-            painter.setPen(QPen(COLOR_TICK))
+            painter.setPen(QPen(self.colors["tick"]))
             painter.drawLine(x, RULER_H - 10, x, RULER_H)
             for k in range(1, 5):
                 mx = int(self._x(t + k * minor))
                 painter.drawLine(mx, RULER_H - 4, mx, RULER_H)
-            painter.setPen(QPen(COLOR_TEXT))
+            painter.setPen(QPen(self.colors["text"]))
             painter.drawText(x + 3, RULER_H - 12, tick_label(int(t), step))
             t += step
         painter.setClipping(False)
-        painter.setPen(QPen(COLOR_TICK))
+        painter.setPen(QPen(self.colors["tick"]))
         painter.drawLine(0, RULER_H - 1, self.width(), RULER_H - 1)
 
     def _paint_header(self, painter: QPainter, rect: QRect, title: str, subtitle: str) -> None:
         header = QRect(rect.x(), rect.y(), HEADER_W, rect.height())
-        painter.fillRect(header, COLOR_HEADER)
-        painter.setPen(QPen(COLOR_TEXT))
+        painter.fillRect(header, self.colors["header"])
+        painter.setPen(QPen(self.colors["text"]))
         painter.drawText(
             header.adjusted(6, 4, -4, 0),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             title,
         )
         if subtitle:
-            painter.setPen(QPen(COLOR_TEXT_DIM))
+            painter.setPen(QPen(self.colors["text_dim"]))
             painter.drawText(
                 header.adjusted(6, 0, -4, -4),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
@@ -409,7 +527,7 @@ class TimelineView(QWidget):
 
     def _paint_video_track(self, painter: QPainter, screen_id: str, rect: QRect) -> None:
         body = QRect(HEADER_W, rect.y(), self._body_width(), rect.height())
-        painter.fillRect(body, COLOR_TRACK)
+        painter.fillRect(body, self.colors["track"])
         size = self.recording.screen_size(screen_id) if self.recording else (0, 0)
         subtitle = f"{size[0]}x{size[1]}" if size[0] else ""
         self._paint_header(painter, rect, screen_id, subtitle)
@@ -439,14 +557,14 @@ class TimelineView(QWidget):
             x = int(self._x(t))
             image = self.thumbnails.get(ref.image, height)
             if image is None:
-                painter.setPen(QPen(COLOR_TICK))
+                painter.setPen(QPen(self.colors["tick"]))
                 painter.drawRect(x, body.y() + 2, int(height * 1.6), height)
                 continue
             painter.drawImage(QPoint(x, body.y() + 2), image)
 
     def _paint_audio_track(self, painter: QPainter, rect: QRect) -> None:
         body = QRect(HEADER_W, rect.y(), self._body_width(), rect.height())
-        painter.fillRect(body, COLOR_TRACK)
+        painter.fillRect(body, self.colors["track"])
         peaks = self.waveform.peaks
         subtitle = "" if peaks is not None else ("loading" if self.waveform.busy else "")
         self._paint_header(painter, rect, "audio", subtitle)
@@ -464,7 +582,7 @@ class TimelineView(QWidget):
                 continue
             x = body.x() + col
             painter.drawLine(QPointF(x, mid - hi * half), QPointF(x, mid - lo * half))
-        painter.setPen(QPen(COLOR_TICK))
+        painter.setPen(QPen(self.colors["tick"]))
         painter.drawLine(body.x(), int(mid), body.right(), int(mid))
 
     def _paint_crop(self, painter: QPainter, canvas: QRect) -> None:
@@ -472,13 +590,12 @@ class TimelineView(QWidget):
         bottom = self.audio_rect().bottom() + 1
         x_in = self._x(self.model.in_ms)
         x_out = self._x(self.model.out_ms)
+        shade = self.colors["shade"]
         painter.setClipRect(QRect(HEADER_W, top, self._body_width(), bottom - top))
         if x_in > HEADER_W:
-            painter.fillRect(QRectF(HEADER_W, top, x_in - HEADER_W, bottom - top), COLOR_SHADE)
+            painter.fillRect(QRectF(HEADER_W, top, x_in - HEADER_W, bottom - top), shade)
         if x_out < canvas.right():
-            painter.fillRect(
-                QRectF(x_out, top, canvas.right() - x_out + 1, bottom - top), COLOR_SHADE
-            )
+            painter.fillRect(QRectF(x_out, top, canvas.right() - x_out + 1, bottom - top), shade)
         painter.setPen(QPen(COLOR_HANDLE, 2))
         painter.setBrush(QBrush(COLOR_HANDLE))
         last_column = self.width() - 1  # _x(duration) is width at Fit: draw it there
@@ -494,6 +611,55 @@ class TimelineView(QWidget):
                 )
                 painter.drawPolygon(tri)
         painter.setClipping(False)
+
+    def keypoint_x(self, time_ms: int) -> float | None:
+        """Where the keypoint line is drawn; ``None`` when it is scrolled out of view."""
+        x = self._x(time_ms)
+        if x < HEADER_W or x > self.width() - 1:
+            return None
+        return min(x, float(self.width() - 1))
+
+    def _paint_keypoints(self, painter: QPainter) -> None:
+        """Bold green lines across the screen and audio tracks (no handle, not movable)."""
+        if not self.model.keypoints:
+            return
+        top = self._tracks_top()
+        bottom = self.audio_rect().bottom() + 1
+        painter.setClipRect(QRect(HEADER_W, top, self._body_width(), bottom - top))
+        pen = QPen(COLOR_KEYPOINT, KEYPOINT_W)
+        for keypoint in self.model.keypoints:
+            x = self.keypoint_x(keypoint)
+            if x is None:
+                continue
+            pen.setWidth(KEYPOINT_W + 2 if keypoint == self._hover_keypoint else KEYPOINT_W)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+        painter.setClipping(False)
+
+    def play_marker_x(self) -> float | None:
+        """Where the white Play arrow sits on the ruler (``None`` without a marker)."""
+        marker = self.model.play_marker_ms
+        if marker is None:
+            return None
+        x = self._x(marker)
+        if x < HEADER_W or x > self.width():
+            return None
+        return min(x, float(self.width() - 1))
+
+    def _paint_play_marker(self, painter: QPainter) -> None:
+        """A white arrow in the ruler where Play was last pressed: Stop returns there."""
+        x = self.play_marker_x()
+        if x is None:
+            return
+        color = self.colors["play_marker"]
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(color, 1))
+        painter.setBrush(QBrush(color))
+        top = RULER_H - 11
+        painter.drawPolygon(
+            QPolygonF([QPointF(x - 5, top), QPointF(x + 5, top), QPointF(x, RULER_H - 2)])
+        )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_transcription(self, painter: QPainter) -> None:
         """Green arrow under the audio track at the transcription front, its label
@@ -516,7 +682,7 @@ class TimelineView(QWidget):
                 painter.fillRect(
                     QRectF(max(x_reached, float(body_left)), audio.y(), body_right - x_reached + 1,
                            audio.height()),
-                    COLOR_UNTRANSCRIBED,
+                    self.colors["untranscribed"],
                 )  # fmt: skip
                 painter.setClipping(False)
             x = self.transcription_arrow_x()
@@ -534,7 +700,7 @@ class TimelineView(QWidget):
                 )
             )
             painter.drawLine(QPointF(x, top + ARROW_H), QPointF(x, top + ARROW_H + 4))
-            label = TRANSCRIBING_LABEL
+            label = transcribing_label(self._eta_s)
             metrics = painter.fontMetrics()
             width = metrics.horizontalAdvance(label) + 8
             left = min(max(x - width / 2, float(body_left)), float(body_right - width))
@@ -544,7 +710,7 @@ class TimelineView(QWidget):
                 text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label
             )
         else:
-            painter.setPen(QPen(COLOR_TEXT_DIM))
+            painter.setPen(QPen(self.colors["text_dim"]))
             painter.drawText(
                 QRect(body_left + 6, lane.y(), self._body_width() - 12, lane.height()),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -565,14 +731,22 @@ class TimelineView(QWidget):
 
 __all__ = [
     "AUDIO_H",
+    "COLOR_KEYPOINT",
+    "COLOR_PLAY_MARKER",
     "COLOR_TRANSCRIBING",
+    "DARK_COLORS",
     "HEADER_W",
+    "KEYPOINT_HIT_PX",
+    "KEYPOINT_W",
+    "LIGHT_COLORS",
     "PLAYHEAD_HIT_PX",
     "PROGRESS_H",
     "RULER_H",
     "TRACK_H",
     "TRANSCRIBING_LABEL",
     "TimelineView",
+    "format_eta",
     "tick_label",
     "tick_step_ms",
+    "transcribing_label",
 ]

@@ -30,6 +30,7 @@ from typing import Any
 from video_story.core.config import Config
 from video_story.core.crop import Crop, read_crop
 from video_story.core.fileio import atomic_write_text, read_json_with_retry
+from video_story.core.instructions import normalize_instructions, read_instructions
 from video_story.core.session import (
     WORK_DIR_NAME,
     SessionPaths,
@@ -66,8 +67,13 @@ def write_editor_event(
     session_id: str | None = None,
     crop: Crop | None = None,
     pid: int | None = None,
+    instructions: str | None = None,
 ) -> None:
-    """Record ``open``, ``process`` or ``closed`` (atomic rewrite of the whole file)."""
+    """Record ``open``, ``process`` or ``closed`` (atomic rewrite of the whole file).
+
+    ``instructions`` are the user's master instructions for the whole recording
+    (``""`` when none); they travel with the ``process`` event.
+    """
     data: dict[str, Any] = {}
     if path.exists():
         try:
@@ -82,6 +88,8 @@ def write_editor_event(
         data["crop"] = crop.to_dict()
     if pid is not None:
         data["pid"] = pid
+    if instructions is not None:
+        data["instructions"] = normalize_instructions(instructions)
     _write(path, data)
 
 
@@ -103,15 +111,18 @@ def read_editor_event(path: Path) -> dict[str, Any]:
 def wait_for_editor(path: Path, timeout_s: float) -> dict[str, Any]:
     """Block until the editor reports ``process`` or ``closed``, or the timeout elapses.
 
-    Result: ``{"event": "process", "session_id", "crop"}``, ``{"event": "closed"}`` or
-    ``{"event": "open", "timed_out": true}``.
+    Result: ``{"event": "process", "session_id", "crop", "instructions"}``,
+    ``{"event": "closed"}`` or ``{"event": "open", "timed_out": true}``.
     """
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         data = read_editor_event(path)
         event = data.get("event", "open")
         if event in ("process", "closed"):
-            result = {k: data[k] for k in ("event", "session_id", "crop", "message") if k in data}
+            keys = ("event", "session_id", "crop", "instructions", "message")
+            result = {k: data[k] for k in keys if k in data}
+            if event == "process":
+                result.setdefault("instructions", "")
             result["editor_session"] = str(path)
             result["timed_out"] = False
             return result
@@ -229,13 +240,18 @@ def update_recording_session_progress(paths: SessionPaths, fraction: float, mess
 
 
 def finish_recording_session(
-    paths: SessionPaths, crop: Crop, shown_session_id: str | None = None
+    paths: SessionPaths,
+    crop: Crop,
+    shown_session_id: str | None = None,
+    instructions: str | None = None,
 ) -> None:
-    """The user pressed Process: the recording session becomes ``processed`` with the crop.
+    """The user pressed Process: the recording session becomes ``processed`` with the crop
+    and the master ``instructions`` (``""`` when the user typed none).
 
     ``shown_session_id`` is the recording displayed when Process was pressed. When it is
-    another recording, ``crop`` belongs to that one; the recording session then takes
-    the crop stored in its own ``crop.json`` (the whole recording when none).
+    another recording, ``crop`` and ``instructions`` belong to that one; the recording
+    session then takes the crop stored in its own ``crop.json`` (the whole recording when
+    none) and its own ``instructions.txt``. ``instructions`` ``None`` also reads the file.
     """
     state = read_state(paths.state_path)
     if state.status is not Status.EDITING:
@@ -249,11 +265,18 @@ def finish_recording_session(
     note = ""
     if shown_session_id is not None and shown_session_id != paths.session_id:
         crop = read_crop(paths.crop_path(final), state.recorded_duration_ms or 0)
+        instructions = None
         note = f" Process was pressed while {shown_session_id} was shown."
+    if instructions is None:
+        instructions = read_instructions(paths.instructions_path(final))
+    instructions = normalize_instructions(instructions)
+    if instructions:
+        note += " Read `instructions` first: they apply to the whole recording."
     state.status = Status.PROCESSED
     state.error_code = None
     state.progress = 1.0
     state.crop = crop.to_dict()
+    state.instructions = instructions
     state.processed_via = "editor"
     state.recording_dir = str(final)
     state.manifest = str(paths.manifest_path(final))

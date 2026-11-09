@@ -138,6 +138,11 @@ class LoadedRecording:
             return (0, 0)
         return (screen.image_width, screen.image_height)
 
+    @property
+    def keypoints(self) -> list[int]:
+        """Moments marked with Insert keypoint while recording (ms, inside the recording)."""
+        return [k for k in self.manifest.keypoints if 0 <= k <= self.duration_ms]
+
     # Frames -----------------------------------------------------------------
 
     def frame_times(self, screen_id: str) -> list[int]:

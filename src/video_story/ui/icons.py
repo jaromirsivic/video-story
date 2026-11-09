@@ -234,14 +234,222 @@ def discard_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+KEYPOINT_GREEN = QColor("#3ddc84")
+
+
+def keypoint_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A green flag on a pole: mark the current moment as a keypoint."""
+    ink = QColor(color) if color is not None else KEYPOINT_GREEN
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = QPen(ink, max(1.5, s * 0.10))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(QPointF(s * 0.26, s * 0.12), QPointF(s * 0.26, s * 0.90))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(s * 0.30, s * 0.14),
+                    QPointF(s * 0.82, s * 0.32),
+                    QPointF(s * 0.30, s * 0.50),
+                ]
+            )
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
+def instructions_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A sheet with text lines: the master instructions for the agent."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = QPen(ink, max(1.2, s * 0.08))
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(s * 0.22, s * 0.10, s * 0.56, s * 0.80), s * 0.06, s * 0.06)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        for y in (0.34, 0.50, 0.66):
+            p.drawLine(QPointF(s * 0.34, s * y), QPointF(s * 0.66, s * y))
+
+    return QIcon(_pixmap(size, draw))
+
+
+# Transport ------------------------------------------------------------------------
+
+
+def _transport_pen(ink: QColor, s: int) -> QPen:
+    pen = QPen(ink, max(1.5, s * 0.10))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return pen
+
+
+def _triangle(p: QPainter, s: int, left: float, right: float, tip_right: bool) -> None:
+    top, bottom, mid = s * 0.22, s * 0.78, s * 0.50
+    if tip_right:
+        points = [QPointF(left, top), QPointF(right, mid), QPointF(left, bottom)]
+    else:
+        points = [QPointF(right, top), QPointF(left, mid), QPointF(right, bottom)]
+    p.drawPolygon(QPolygonF(points))
+
+
+def play_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A right-pointing triangle."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        _triangle(p, s, s * 0.28, s * 0.80, tip_right=True)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def pause_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """Two vertical bars."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawRoundedRect(QRectF(s * 0.26, s * 0.22, s * 0.16, s * 0.56), s * 0.03, s * 0.03)
+        p.drawRoundedRect(QRectF(s * 0.58, s * 0.22, s * 0.16, s * 0.56), s * 0.03, s * 0.03)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def stop_square_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A square in the button text colour (the editor's Stop; the recorder's is red)."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawRoundedRect(QRectF(s * 0.26, s * 0.26, s * 0.48, s * 0.48), s * 0.04, s * 0.04)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def skip_start_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A bar and a left-pointing triangle: go to In."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.22, s * 0.12, s * 0.56), s * 0.03, s * 0.03)
+        _triangle(p, s, s * 0.36, s * 0.84, tip_right=False)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def skip_end_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A right-pointing triangle and a bar: go to Out."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        _triangle(p, s, s * 0.16, s * 0.64, tip_right=True)
+        p.drawRoundedRect(QRectF(s * 0.70, s * 0.22, s * 0.12, s * 0.56), s * 0.03, s * 0.03)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def step_back_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A chevron pointing left: one frame back."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(_transport_pen(ink, s))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(
+            QPolygonF([QPointF(s * 0.62, s * 0.22), QPointF(s * 0.36, s * 0.50),
+                       QPointF(s * 0.62, s * 0.78)])
+        )  # fmt: skip
+
+    return QIcon(_pixmap(size, draw))
+
+
+def step_forward_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A chevron pointing right: one frame forward."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(_transport_pen(ink, s))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(
+            QPolygonF([QPointF(s * 0.38, s * 0.22), QPointF(s * 0.64, s * 0.50),
+                       QPointF(s * 0.38, s * 0.78)])
+        )  # fmt: skip
+
+    return QIcon(_pixmap(size, draw))
+
+
+def sun_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A sun (disc with rays): switch to the light theme."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        import math
+
+        center = QPointF(s / 2, s / 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawEllipse(center, s * 0.18, s * 0.18)
+        p.setPen(_transport_pen(ink, s))
+        for i in range(8):
+            angle = math.pi * i / 4
+            inner, outer = s * 0.30, s * 0.42
+            p.drawLine(
+                QPointF(center.x() + inner * math.cos(angle), center.y() + inner * math.sin(angle)),
+                QPointF(center.x() + outer * math.cos(angle), center.y() + outer * math.sin(angle)),
+            )
+
+    return QIcon(_pixmap(size, draw))
+
+
+def moon_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A crescent moon: switch to the dark theme."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        disc = QPainterPath()
+        disc.addEllipse(QPointF(s * 0.50, s * 0.50), s * 0.34, s * 0.34)
+        bite = QPainterPath()
+        bite.addEllipse(QPointF(s * 0.64, s * 0.40), s * 0.30, s * 0.30)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPath(disc.subtracted(bite))
+
+    return QIcon(_pixmap(size, draw))
+
+
 __all__ = [
+    "KEYPOINT_GREEN",
     "arrow_icon",
     "discard_icon",
     "draw_icon",
+    "instructions_icon",
+    "keypoint_icon",
+    "moon_icon",
+    "pause_icon",
     "pencil_icon",
+    "play_icon",
     "process_icon",
     "record_icon",
     "rectangle_icon",
     "settings_icon",
+    "skip_end_icon",
+    "skip_start_icon",
+    "step_back_icon",
+    "step_forward_icon",
     "stop_icon",
+    "stop_square_icon",
+    "sun_icon",
 ]

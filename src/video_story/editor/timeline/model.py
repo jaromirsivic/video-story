@@ -30,6 +30,8 @@ class TimelineModel:
         self.out_ms = 0
         self.duration_ms = 0
         self.zoom = 1.0
+        self.keypoints: list[int] = []  # Insert keypoint moments (ms, ascending)
+        self.play_marker_ms: int | None = None  # where Play was last pressed (Stop returns)
         self.set_duration(duration_ms)
 
     # Duration and screens ---------------------------------------------------
@@ -40,7 +42,38 @@ class TimelineModel:
         self.playhead_ms = 0
         self.in_ms = 0
         self.out_ms = self.duration_ms
+        self.keypoints = []
+        self.play_marker_ms = None
         self.fit()
+
+    # Keypoints and play marker ---------------------------------------------
+
+    def set_keypoints(self, keypoints: list[int]) -> None:
+        """Keypoints inside the recording, sorted and unique."""
+        self.keypoints = sorted({int(k) for k in keypoints if 0 <= int(k) <= self.duration_ms})
+
+    def nearest_keypoint(self, time_ms: float) -> int | None:
+        if not self.keypoints:
+            return None
+        return min(self.keypoints, key=lambda k: abs(k - time_ms))
+
+    def snap_to_keypoint(self, time_ms: int, tolerance_ms: float) -> int:
+        """``time_ms`` pulled onto the nearest keypoint when one is within ``tolerance_ms``
+        (the magnet of the crop handles and the playhead)."""
+        nearest = self.nearest_keypoint(time_ms)
+        if nearest is not None and abs(nearest - time_ms) <= tolerance_ms:
+            return nearest
+        return time_ms
+
+    def set_play_marker(self, time_ms: int | None) -> None:
+        self.play_marker_ms = None if time_ms is None else self.clamp_time(time_ms)
+
+    def stop_position(self) -> int:
+        """Where Stop lands: the play marker when it lies inside the crop, else In."""
+        marker = self.play_marker_ms
+        if marker is not None and self.in_ms <= marker < self.out_ms:
+            return marker
+        return self.in_ms
 
     def set_screens(self, screens: list[str]) -> None:
         self.screens = list(screens)
@@ -102,6 +135,16 @@ class TimelineModel:
         self.zoom = _clamp(self.zoom * factor, self.min_zoom(), MAX_ZOOM_PX_PER_S)
         self.set_scroll(anchor_ms - pixel * 1000.0 / self.zoom)
 
+    def center_on(self, time_ms: float) -> None:
+        """Scroll so that ``time_ms`` sits in the middle of the viewport (as far as the
+        ends of the recording allow)."""
+        self.set_scroll(time_ms - self.visible_ms() / 2.0)
+
+    def zoom_centered(self, factor: float, center_ms: float) -> None:
+        """Multiply the zoom by ``factor`` and keep ``center_ms`` (the playhead) centred."""
+        self.zoom = _clamp(self.zoom * factor, self.min_zoom(), MAX_ZOOM_PX_PER_S)
+        self.center_on(center_ms)
+
     def zoom_fraction(self) -> float:
         """Zoom position on a logarithmic 0..1 scale (for the slider)."""
         lo, hi = self.min_zoom(), MAX_ZOOM_PX_PER_S
@@ -111,12 +154,15 @@ class TimelineModel:
 
         return _clamp(math.log(self.zoom / lo) / math.log(hi / lo), 0.0, 1.0)
 
-    def set_zoom_fraction(self, fraction: float) -> None:
+    def set_zoom_fraction(self, fraction: float, center_ms: float | None = None) -> None:
+        """Zoom from the slider; with ``center_ms`` that time is kept in the middle."""
         lo, hi = self.min_zoom(), MAX_ZOOM_PX_PER_S
         if hi <= lo:
             self.set_zoom(hi)
-            return
-        self.set_zoom(lo * (hi / lo) ** _clamp(fraction, 0.0, 1.0))
+        else:
+            self.set_zoom(lo * (hi / lo) ** _clamp(fraction, 0.0, 1.0))
+        if center_ms is not None:
+            self.center_on(center_ms)
 
     def set_scroll(self, scroll_ms: float) -> None:
         self.scroll_ms = int(round(_clamp(scroll_ms, 0, self.max_scroll_ms())))

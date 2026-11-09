@@ -58,6 +58,7 @@ class RecordingSummary:
     audio: AudioResult | None
     auto_stopped: bool
     error: str | None = None
+    keypoints: list[int] = field(default_factory=list)
 
     def to_manifest(
         self, config: Config, platform_name: str, notes: list[str] | None = None
@@ -86,10 +87,13 @@ class RecordingSummary:
             platform=platform_name,
             plugin_version=__version__,
             notes=list(notes or []),
+            keypoints=list(self.keypoints),
         )
 
 
 DrawingsProvider = Callable[[], list[dict[str, Any]]]
+ClipboardProvider = Callable[[], str | None]
+KEYPOINT_MIN_GAP_MS = 3000  # a keypoint can follow the previous one after three seconds
 
 
 @dataclass
@@ -99,6 +103,7 @@ class _Tick:
     frames: list[RawFrame] = field(default_factory=list)
     drawings: list[dict[str, Any]] = field(default_factory=list)
     zoom: list[dict[str, Any]] = field(default_factory=list)
+    clipboard: str | None = None
 
 
 class Recorder:
@@ -139,8 +144,32 @@ class Recorder:
         # Same for the zoom of the drawing canvas (ui.overlay.DrawingOverlay.zoom):
         # which screens show a magnified region, stored in the sidecars as ``zoom``.
         self.zoom_provider: DrawingsProvider | None = None
+        # The text clipboard (ui.clipboard.ClipboardTracker.take): a text the user copied
+        # since the previous tick (at most 65535 characters, "..." when cut), stored as
+        # ``clipboard`` in the sidecars of this tick only; None (null) in every other tick.
+        self.clipboard_provider: ClipboardProvider | None = None
+        self._keypoints: list[int] = []
 
     # Properties -------------------------------------------------------------
+
+    @property
+    def keypoints(self) -> list[int]:
+        """Moments marked with Insert keypoint (ms of the recording timeline, ascending)."""
+        with self._lock:
+            return list(self._keypoints)
+
+    def add_keypoint(self) -> int | None:
+        """Mark the current moment; ``None`` when the previous keypoint is less than
+        :data:`KEYPOINT_MIN_GAP_MS` ago (or the recording is not running)."""
+        if not self.running:
+            return None
+        now = self.clock.elapsed_ms()
+        with self._lock:
+            if self._keypoints and now - self._keypoints[-1] < KEYPOINT_MIN_GAP_MS:
+                return None
+            self._keypoints.append(now)
+        log.info("keypoint %d at %d ms", len(self._keypoints), now)
+        return now
 
     @property
     def elapsed_ms(self) -> int:
@@ -226,6 +255,7 @@ class Recorder:
             audio=self._audio_result,
             auto_stopped=self._auto_stopped,
             error=self._error,
+            keypoints=self.keypoints,
         )
         self._on_event(RecorderEvent.STOPPED, "")
         log.info(
@@ -308,6 +338,12 @@ class Recorder:
                 tick.zoom = list(zoom_provider())
             except Exception:  # pragma: no cover - never let zoom data stop capture
                 log.exception("zoom provider failed")
+        clipboard_provider = self.clipboard_provider
+        if clipboard_provider is not None:
+            try:
+                tick.clipboard = clipboard_provider()
+            except Exception:  # pragma: no cover - never let clipboard data stop capture
+                log.exception("clipboard provider failed")
         for screen in self.screens:
             tick.frames.append(grabber.grab(screen))
         return tick
@@ -327,6 +363,7 @@ class Recorder:
                 "cursor": tick.cursor.to_json() if tick.cursor else None,
                 "drawings": tick.drawings,
                 "zoom": tick.zoom,
+                "clipboard": tick.clipboard,
                 "captured_at": now_iso(),
             }
             (frames_dir / sidecar_filename(tick.time_ms, frame.screen_id)).write_text(
@@ -352,4 +389,12 @@ def write_sidecar_index(frames_dir: Path) -> int:
     return sum(1 for p in frames_dir.iterdir() if p.suffix.lower() in {".png", ".jpg"})
 
 
-__all__ = ["ENCODE_WORKERS", "DrawingsProvider", "Recorder", "RecorderEvent", "RecordingSummary"]
+__all__ = [
+    "ENCODE_WORKERS",
+    "KEYPOINT_MIN_GAP_MS",
+    "ClipboardProvider",
+    "DrawingsProvider",
+    "Recorder",
+    "RecorderEvent",
+    "RecordingSummary",
+]

@@ -44,6 +44,7 @@ MANIFEST_FILE_NAME = "manifest.json"
 TRANSCRIPT_TXT_NAME = "transcript.txt"
 TRANSCRIPT_JSON_NAME = "transcript.json"
 CROP_FILE_NAME = "crop.json"
+INSTRUCTIONS_FILE_NAME = "instructions.txt"
 
 # Files that stay in the work directory when a recording is finalised or discarded.
 WORK_ONLY_FILES = frozenset({STATE_FILE_NAME, LOCK_FILE_NAME, UI_LOG_FILE_NAME})
@@ -141,6 +142,10 @@ class SessionPaths:
     def crop_path(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / CROP_FILE_NAME
 
+    def instructions_path(self, base: Path | None = None) -> Path:
+        """The user's master instructions for the agent (``instructions.txt``)."""
+        return (base or self.current_dir) / INSTRUCTIONS_FILE_NAME
+
     @property
     def state_path(self) -> Path:
         """``state.json`` always lives in the work directory (it survives finalisation)."""
@@ -225,6 +230,7 @@ class SessionState:
     error_code: str | None = None
     crop: dict[str, int] | None = None  # {"start_ms", "end_ms"} the agent should act on
     processed_via: str | None = None  # "stop_dialog" | "editor"
+    instructions: str | None = None  # master instructions typed in the editor ("" = none)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -279,6 +285,7 @@ __all__ = [
     "CROP_FILE_NAME",
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",
+    "INSTRUCTIONS_FILE_NAME",
     "LOG_FILE_NAME",
     "UI_LOG_FILE_NAME",
     "WORK_ONLY_FILES",

@@ -71,6 +71,11 @@ status is "processed", call video_story_describe or video_story_get_transcript t
 timed transcript, video_story_list_frames to find the screenshots taken at a moment of the
 transcript and video_story_get_frame to look at one of them. "discarded", "cancelled" and
 "failed" are final too: there is nothing to read then, tell the user what happened.
+A processed session also carries "instructions": the user's master instructions typed in
+the editor, which frame the whole recording (what to produce, in which language, ...).
+Read them first and apply them to everything the user said; they are empty when the user
+typed none. "keypoints" (in describe / the manifest) are moments the user marked as
+important while recording.
 video_story_export renders a processed recording (one screen, optional time range) to an
 MP4 video with subtitles when the user asks for a video of what they recorded.
 All times are milliseconds since the recording started. Cursor coordinates are pixels of
@@ -515,8 +520,10 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         """Wait until the session is final (processed, discarded, cancelled or failed) or
         timeout_s (1..240) elapses; when "timed_out" is true call it again. Status
         "editing" means the user is cropping the recording in the editor: keep waiting.
-        A processed session carries the paths of manifest, transcript and frames and
-        "crop" {start_ms, end_ms}: act only on that part of the recording."""
+        A processed session carries the paths of manifest, transcript and frames,
+        "crop" {start_ms, end_ms}: act only on that part of the recording, and
+        "instructions": the user's master instructions for the whole recording (read
+        them first; "" when none)."""
         timeout = clamp_timeout(timeout_s)
 
         async def progress(elapsed: float, message: str) -> None:
@@ -542,9 +549,10 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         return tool_status(session_id, config_file)
 
     def video_story_describe(session_id: str) -> dict[str, Any]:
-        """Paths, manifest content (screens, duration, capture interval), the full
-        transcript text, the stored crop {start_ms, end_ms} and transcript_in_range
-        (only the segments inside the crop) of a processed recording."""
+        """Paths, manifest content (screens, duration, capture interval, keypoints), the
+        full transcript text, the stored crop {start_ms, end_ms}, transcript_in_range
+        (only the segments inside the crop) and "instructions" (the user's master
+        instructions for the whole recording, "" when none) of a processed recording."""
         return tool_describe(session_id, config_file)
 
     def video_story_get_transcript(session_id: str, format: str = "text") -> dict[str, Any]:
@@ -632,8 +640,9 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         handles, a Render button (MP4 + SRT) and a green Process button. session_id
         preselects a recording (default: the newest). Returns at once with
         editor_session: then call video_story_wait_editor with it until the user
-        presses Process (event "process" with session_id and crop {start_ms, end_ms}:
-        act only on that range of the recording) or closes the window (event "closed":
+        presses Process (event "process" with session_id, crop {start_ms, end_ms}: act
+        only on that range of the recording, and "instructions": the user's master
+        instructions for the whole recording) or closes the window (event "closed":
         do nothing). An already open editor is reused (attached). NO_RECORDINGS:
         nothing to edit yet."""
         return tool_edit(session_id, config_file)
@@ -643,7 +652,8 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     ) -> dict[str, Any]:
         """Wait until the editor opened by video_story_edit reports event "process"
         (the user pressed Process: session_id and crop {start_ms, end_ms} tell which
-        recording and which part to act on) or "closed" (nothing to do), or until
+        recording and which part to act on, "instructions" how) or "closed" (nothing to
+        do), or until
         timeout_s (1..240) elapses ("timed_out": call again)."""
         return await anyio.to_thread.run_sync(lambda: tool_wait_editor(editor_session, timeout_s))
 

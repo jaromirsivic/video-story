@@ -26,10 +26,18 @@ reads the corrected words.
 
 A recording that arrives from the Stop dialog is not transcribed yet: the window
 starts :class:`TranscriptionManager` for the shown recording, the timeline shows a
-green arrow at the transcription front, subtitles appear as whisper produces them,
-and **Render** and **Process** stay disabled until the transcript is complete. With
-**Auto process** ticked, a complete transcript starts a five second countdown on the
-Process button that presses it by itself unless the user clicks or types.
+green arrow at the transcription front with the estimated time to the end, subtitles
+appear as whisper produces them, and **Render** and **Process** stay disabled until the
+transcript is complete. With **Auto process** ticked, a complete transcript starts a
+five second countdown on the Process button that presses it by itself unless the user
+clicks or types.
+
+The bottom row reads **Auto process**, the green **Process**, **Instructions**, a
+separator and the blue **Render**. Instructions opens a text box for the master
+instructions for the AI about the whole recording (``instructions.txt`` next to the
+recording, empty by default); they travel to the agent with the crop. **Stop** returns
+to where **Play** was last pressed (a white arrow on the ruler). The theme button above
+**Edit** switches between the light and the dark theme (remembered in the settings).
 """
 
 from __future__ import annotations
@@ -64,6 +72,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -79,6 +88,7 @@ from PySide6.QtWidgets import (
 
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.crop import Crop, read_crop, write_crop
+from video_story.core.instructions import read_instructions, write_instructions
 from video_story.core.session import SessionPaths
 from video_story.core.timeline import format_timestamp, parse_timestamp
 from video_story.export import ExportRequest, ExportResult
@@ -91,15 +101,18 @@ from video_story.host.editor_session import (
     update_recording_session_progress,
     write_editor_event,
 )
+from video_story.ui.icons import instructions_icon
 
+from .instructions_dialog import InstructionsDialog
 from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import ItemRole, RecordingItem, RecordingsModel
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
 from .subtitle_dialog import SubtitleDialog
+from .theme import apply_theme, system_prefers_dark
 from .timeline.model import TimelineModel
-from .timeline.view import TimelineView
+from .timeline.view import TimelineView, format_eta
 from .transcription import TranscriptionManager
 from .workers import automatic_gc_paused, collect_garbage
 
@@ -116,6 +129,15 @@ PROCESS_FEEDBACK_MS = 2000
 AUTO_PROCESS_SECONDS = 5  # Auto process: countdown before Process is pressed by itself
 AUTO_PROCESS_TICK_MS = 1000
 SESSION_PROGRESS_INTERVAL_S = 5.0  # how often state.json learns the transcription progress
+ETA_MIN_ELAPSED_S = 3.0  # no estimate before the transcription ran this long
+ETA_MIN_PROGRESS = 0.01  # ... and advanced this much
+ACTION_BUTTON_SIZE = (128, 32)  # Process, Instructions and Render (smaller than before)
+INSTRUCTIONS_LABEL = "Instructions"
+INSTRUCTIONS_SET_LABEL = "Instructions •"  # a bullet marks stored instructions
+INSTRUCTIONS_TOOLTIP = (
+    "Master instructions for the AI about the whole recording, e.g. “create an "
+    "implementation plan” (Ctrl+I). Empty by default."
+)
 PROCESS_BUTTON_STYLE = """
 QPushButton {
     background-color: #1e9e3e; color: white; border: 1px solid #167a30; border-radius: 4px;
@@ -261,6 +283,8 @@ class EditorWindow(QMainWindow):
         self._load_signals.done.connect(self._on_loaded)
         self._syncing_zoom = False
         self._resume_after_scrub = False  # playback was paused for a playhead drag
+        self._paused_at: int | None = None  # playhead when Pause was pressed (resume keeps
+        # the play marker; Play from another position sets a new one)
         self._crop_dirty_for: LoadedRecording | None = None  # pending debounced write
         self.transcription = transcription or TranscriptionManager(config, config_file, self)
         self.transcription.started.connect(self._on_transcription_started)
@@ -270,9 +294,16 @@ class EditorWindow(QMainWindow):
         self.transcription.failed.connect(self._on_transcription_failed)
         self._transcription_failed: dict[str, str] = {}  # session id -> message
         self._transcription_fraction: dict[str, float] = {}
+        # session id -> (monotonic time, fraction) of the first progress event: the ETA
+        # is extrapolated from the progress made since then.
+        self._transcription_origin: dict[str, tuple[float, float]] = {}
+        self._transcription_eta: dict[str, float] = {}  # session id -> seconds to go
         self._session_progress_at = 0.0  # monotonic time of the last state.json update
         self._countdown: int | None = None  # Auto process: seconds left, None when idle
         self._auto_cancelled = False  # the user acted during the countdown
+        self._instructions = ""  # master instructions of the shown recording
+        self._dark = system_prefers_dark()
+        self._theme_chosen = False  # the user (or the settings) picked a theme
 
         self.setWindowTitle(WINDOW_TITLE)
         self._build_ui()
@@ -346,6 +377,8 @@ class EditorWindow(QMainWindow):
         self.preview.go_out.connect(self.go_to_out)
         self.preview.step.connect(self.step_frames)
         self.preview.edit_subtitle.connect(self.edit_subtitle)
+        self.preview.theme_toggled.connect(self.toggle_theme)
+        self.preview.set_dark(self._dark)
         self.right_splitter.addWidget(self.preview)
 
         bottom = QWidget()
@@ -401,6 +434,7 @@ class EditorWindow(QMainWindow):
         self.timeline.view_changed.connect(self._sync_zoom_slider)
         bottom_layout.addWidget(self.timeline, 1)
 
+        # Bottom row: Auto process | Process | Instructions || Render.
         render_row = QHBoxLayout()
         render_row.setSpacing(12)
         render_row.addStretch(1)
@@ -412,28 +446,41 @@ class EditorWindow(QMainWindow):
         self.auto_process_checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.auto_process_checkbox.toggled.connect(self._on_auto_process_toggled)
         render_row.addWidget(self.auto_process_checkbox)
-        self.render_button = QPushButton("Render")
-        self.render_tooltip = "Export the selected screen and crop to MP4 + SRT (Ctrl+R)"
-        self.render_button.setToolTip(self.render_tooltip)
-        render_font = QFont(self.render_button.font())
-        render_font.setBold(True)
-        render_font.setPointSizeF(render_font.pointSizeF() + 2)
-        self.render_button.setFont(render_font)
-        self.render_button.setMinimumSize(180, 44)
-        self.render_button.setStyleSheet(RENDER_BUTTON_STYLE)
-        self.render_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.render_button.clicked.connect(self.render)
-        render_row.addWidget(self.render_button)
+        action_font = QFont(self.font())
+        action_font.setBold(True)
+        action_font.setPointSizeF(action_font.pointSizeF() + 1)
         self.process_button = QPushButton("Process")
         self.process_tooltip = "Send the cropped range to the agent for processing (Ctrl+Enter)"
         self.process_button.setToolTip(self.process_tooltip)
-        self.process_button.setFont(render_font)
-        self.process_button.setMinimumSize(180, 44)
+        self.process_button.setFont(action_font)
+        self.process_button.setMinimumSize(*ACTION_BUTTON_SIZE)
         self.process_button.setStyleSheet(PROCESS_BUTTON_STYLE)
         self.process_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.process_button.setEnabled(False)
         self.process_button.clicked.connect(self.process)
         render_row.addWidget(self.process_button)
+        self.instructions_button = QPushButton(instructions_icon(), INSTRUCTIONS_LABEL)
+        self.instructions_button.setToolTip(INSTRUCTIONS_TOOLTIP)
+        self.instructions_button.setFont(action_font)
+        self.instructions_button.setMinimumSize(*ACTION_BUTTON_SIZE)
+        self.instructions_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.instructions_button.setEnabled(False)
+        self.instructions_button.clicked.connect(self.edit_instructions)
+        render_row.addWidget(self.instructions_button)
+        self.render_separator = QFrame()
+        self.render_separator.setFrameShape(QFrame.Shape.VLine)
+        self.render_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        self.render_separator.setFixedHeight(ACTION_BUTTON_SIZE[1] - 4)
+        render_row.addWidget(self.render_separator)
+        self.render_button = QPushButton("Render")
+        self.render_tooltip = "Export the selected screen and crop to MP4 + SRT (Ctrl+R)"
+        self.render_button.setToolTip(self.render_tooltip)
+        self.render_button.setFont(action_font)
+        self.render_button.setMinimumSize(*ACTION_BUTTON_SIZE)
+        self.render_button.setStyleSheet(RENDER_BUTTON_STYLE)
+        self.render_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.render_button.clicked.connect(self.render)
+        render_row.addWidget(self.render_button)
         bottom_layout.addLayout(render_row)
         self.right_splitter.addWidget(bottom)
         self.right_splitter.setStretchFactor(0, 3)
@@ -476,6 +523,8 @@ class EditorWindow(QMainWindow):
         self.fit_action = action("Fit", "Ctrl+0", self.zoom_fit)
         self.render_action = action("Render", "Ctrl+R", self.render)
         self.process_action = action("Process", ["Ctrl+Return", "Ctrl+Enter"], self.process)
+        self.instructions_action = action("Instructions", "Ctrl+I", self.edit_instructions)
+        self.theme_action = action("Toggle theme", "Ctrl+T", self.toggle_theme)
         self.refresh_action = action("Refresh", "F5", self.refresh_recordings)
 
     # Recordings list --------------------------------------------------------
@@ -541,6 +590,7 @@ class EditorWindow(QMainWindow):
         self.timeline.set_recording(recording)
         if recording is not None:
             self._restore_crop(recording)
+        self._load_instructions(recording)
         self.player.set_audio(recording.audio if recording else None)
         self.player.set_range(self.model.in_ms, self.model.out_ms)
         self._crop_updated()
@@ -643,16 +693,26 @@ class EditorWindow(QMainWindow):
         self._resume_after_scrub = False
         if self.player.playing:
             self._pause_playback()
+            self._paused_at = self.model.playhead_ms
             self._sync_playhead()
-        else:
-            self._start_playback()
+            return
+        # Play pressed where the user put the playhead (not a plain resume of a pause):
+        # that is where the white arrow goes and where Stop returns.
+        fresh_start = self._paused_at is None or self._paused_at != self.model.playhead_ms
+        self._start_playback()
+        self._paused_at = None
+        if self.player.playing and fresh_start:
+            self.model.set_play_marker(self.model.playhead_ms)
+            self.timeline.update()
 
     def stop_playback(self) -> None:
+        """Stop and return to where Play was last pressed (In when there is no marker)."""
         self._resume_after_scrub = False
+        self._paused_at = None
         self.player.stop()
         self._timer.stop()
         self.preview.set_playing(False)
-        self.model.set_playhead(self.model.in_ms)
+        self.model.set_playhead(self.model.stop_position())
         self._sync_playhead()
         self.timeline.ensure_playhead_visible()
 
@@ -836,6 +896,92 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Rendered {result.output}")
         return result
 
+    # Instructions -----------------------------------------------------------
+
+    @property
+    def instructions(self) -> str:
+        """Master instructions of the shown recording (``""`` when none)."""
+        return self._instructions
+
+    def _load_instructions(self, recording: LoadedRecording | None) -> None:
+        if recording is None:
+            self._instructions = ""
+        else:
+            path = recording.paths.instructions_path(recording.paths.final_dir)
+            self._instructions = read_instructions(path)
+        self._update_instructions_button()
+
+    def _update_instructions_button(self) -> None:
+        has = bool(self._instructions)
+        self.instructions_button.setText(INSTRUCTIONS_SET_LABEL if has else INSTRUCTIONS_LABEL)
+        tooltip = INSTRUCTIONS_TOOLTIP
+        if has:
+            preview = self._instructions if len(self._instructions) <= 400 else (
+                self._instructions[:400] + "..."
+            )  # fmt: skip
+            tooltip += "\n\nCurrent instructions:\n" + preview
+        self.instructions_button.setToolTip(tooltip)
+        self.instructions_button.setEnabled(self.recording is not None)
+        self.instructions_action.setEnabled(self.recording is not None)
+
+    def _instructions_dialog(self, text: str) -> InstructionsDialog:
+        return InstructionsDialog(text, self)
+
+    def edit_instructions(self) -> bool:
+        """Open the Instructions dialog for the shown recording; True when saved."""
+        recording = self.recording
+        if recording is None:
+            self._show_status_message("Select a recording first.")
+            return False
+        if self.player.playing:
+            self.toggle_play()
+        dialog = self._instructions_dialog(self._instructions)
+        try:
+            if dialog.exec() != InstructionsDialog.DialogCode.Accepted:
+                return False
+            text = dialog.instructions()
+        finally:
+            dialog.deleteLater()
+        if self.recording is not recording:
+            return False  # another recording was loaded meanwhile
+        return self.set_instructions(text)
+
+    def set_instructions(self, text: str) -> bool:
+        """Store ``text`` as the instructions of the shown recording (``instructions.txt``)."""
+        recording = self.recording
+        if recording is None:
+            return False
+        path = recording.paths.instructions_path(recording.paths.final_dir)
+        try:
+            self._instructions = write_instructions(path, text)
+        except OSError as exc:
+            log.warning("cannot save instructions of %s: %s", recording.session_id, exc)
+            self._show_status_message(f"Cannot save the instructions: {exc}")
+            return False
+        self._update_instructions_button()
+        self._show_status_message(
+            "Instructions saved" if self._instructions else "Instructions cleared"
+        )
+        return True
+
+    # Theme ------------------------------------------------------------------
+
+    @property
+    def dark(self) -> bool:
+        return self._dark
+
+    def set_theme(self, dark: bool) -> None:
+        """Apply the dark or the light theme to the application and the editor's canvases."""
+        self._dark = dark
+        self._theme_chosen = True
+        apply_theme(dark)
+        self.timeline.set_theme(dark)
+        self.preview.set_dark(dark)  # after the palette: the icons take its text colour
+        self.instructions_button.setIcon(instructions_icon())
+
+    def toggle_theme(self) -> None:
+        self.set_theme(not self._dark)
+
     # Subtitles --------------------------------------------------------------
 
     def _subtitle_dialog(self, segment, duration_ms: int) -> SubtitleDialog:
@@ -903,11 +1049,18 @@ class EditorWindow(QMainWindow):
             self.toggle_play()
         crop = self.crop
         session_id = self.recording.session_id
+        instructions = self._instructions
         self._save_crop()
         problems: list[str] = []
         if self.editor_session is not None:
             try:
-                write_editor_event(self.editor_session, "process", session_id=session_id, crop=crop)
+                write_editor_event(
+                    self.editor_session,
+                    "process",
+                    session_id=session_id,
+                    crop=crop,
+                    instructions=instructions,
+                )
                 self.editor_event_sent = True
             except OSError as exc:
                 log.warning("cannot write editor event %s: %s", self.editor_session, exc)
@@ -920,13 +1073,17 @@ class EditorWindow(QMainWindow):
                 )
             paths = SessionPaths(self.config.recording_folder, recording_session)
             try:
-                finish_recording_session(paths, crop, shown_session_id=session_id)
+                finish_recording_session(
+                    paths, crop, shown_session_id=session_id, instructions=instructions
+                )
             except (OSError, RuntimeError) as exc:
                 log.warning("cannot finish recording session %s: %s", recording_session, exc)
                 problems.append(f"recording session: {exc}")
             else:
                 self.recording_session = None  # final now; closing must not cancel it
         detail = f"{session_id} {format_timestamp(crop.start_ms)}-{format_timestamp(crop.end_ms)}"
+        if instructions:
+            detail += " with instructions"
         self._update_status()
         if problems:
             # The button stays "Process": the user can retry; a session that could not be
@@ -970,6 +1127,8 @@ class EditorWindow(QMainWindow):
         if not self._process_feedback_timer.isActive():
             self.process_button.setEnabled(allowed)
             self.process_action.setEnabled(allowed)
+        self.instructions_button.setEnabled(self.recording is not None)
+        self.instructions_action.setEnabled(self.recording is not None)
 
     def _update_transcription_ui(self) -> None:
         """Start the background transcription of the shown recording when it needs one
@@ -986,7 +1145,9 @@ class EditorWindow(QMainWindow):
             state = (
                 "transcribing" if self.transcription.is_running(recording.session_id) else "pending"
             )
-            self.timeline.set_transcription(state, recording.transcribed_ms)
+            self.timeline.set_transcription(
+                state, recording.transcribed_ms, self._transcription_eta.get(recording.session_id)
+            )
         self._update_buttons()
         self._update_status()
         self._maybe_start_countdown()
@@ -996,6 +1157,8 @@ class EditorWindow(QMainWindow):
         return recording if recording is not None and recording.session_id == session_id else None
 
     def _on_transcription_started(self, session_id: str) -> None:
+        self._transcription_origin.pop(session_id, None)
+        self._transcription_eta.pop(session_id, None)
         recording = self._shown(session_id)
         if recording is not None:
             self.timeline.set_transcription("transcribing", recording.transcribed_ms)
@@ -1005,32 +1168,62 @@ class EditorWindow(QMainWindow):
         recording = self._shown(session_id)
         if recording is None:
             return
-        self.timeline.set_transcription("transcribing", recording.transcribed_ms)
+        self.timeline.set_transcription(
+            "transcribing", recording.transcribed_ms, self._transcription_eta.get(session_id)
+        )
         self.preview.set_subtitle(recording.subtitle_at(self.model.playhead_ms))
         self.transcription_changed.emit(session_id)
 
+    def transcription_eta(self, session_id: str) -> float | None:
+        """Estimated seconds until the transcription of ``session_id`` ends (``None``
+        while there is too little progress to extrapolate from)."""
+        return self._transcription_eta.get(session_id)
+
+    def _estimate_eta(self, session_id: str, fraction: float, now: float) -> float | None:
+        """Extrapolate from the progress made since the first progress event: the
+        remaining fraction at the pace observed so far."""
+        origin = self._transcription_origin.get(session_id)
+        if origin is None:
+            self._transcription_origin[session_id] = (now, fraction)
+            return None
+        elapsed = now - origin[0]
+        progressed = fraction - origin[1]
+        if elapsed < ETA_MIN_ELAPSED_S or progressed < ETA_MIN_PROGRESS:
+            return None
+        return max(0.0, elapsed * (1.0 - fraction) / progressed)
+
     def _on_transcription_progress(self, session_id: str, fraction: float, reached: int) -> None:
         self._transcription_fraction[session_id] = fraction
+        now = time.monotonic()
+        eta = self._estimate_eta(session_id, fraction, now)
+        if eta is None:
+            self._transcription_eta.pop(session_id, None)
+        else:
+            self._transcription_eta[session_id] = eta
         recording = self._shown(session_id)
         if recording is not None:
-            self.timeline.set_transcription("transcribing", max(reached, recording.transcribed_ms))
+            self.timeline.set_transcription(
+                "transcribing", max(reached, recording.transcribed_ms), eta
+            )
             self._update_status()
         if self.recording_session == session_id:
-            now = time.monotonic()
             if now - self._session_progress_at >= SESSION_PROGRESS_INTERVAL_S:
                 self._session_progress_at = now
+                eta_text = f" (ETA: {format_eta(eta)})" if eta is not None else ""
                 try:
                     update_recording_session_progress(
                         SessionPaths(self.config.recording_folder, session_id),
                         fraction,
-                        f"Video Story Editor open; transcribing {int(fraction * 100)} % "
-                        "(waiting for Process).",
+                        f"Video Story Editor open; transcribing {int(fraction * 100)} %"
+                        f"{eta_text} (waiting for Process).",
                     )
                 except OSError as exc:
                     log.debug("progress not written to state.json: %s", exc)
 
     def _on_transcription_finished(self, session_id: str, done: object) -> None:
         self._transcription_fraction.pop(session_id, None)
+        self._transcription_origin.pop(session_id, None)
+        self._transcription_eta.pop(session_id, None)
         recording = self._shown(session_id)
         if recording is None:
             return
@@ -1051,6 +1244,8 @@ class EditorWindow(QMainWindow):
     def _on_transcription_failed(self, session_id: str, message: str) -> None:
         self._transcription_failed[session_id] = message
         self._transcription_fraction.pop(session_id, None)
+        self._transcription_origin.pop(session_id, None)
+        self._transcription_eta.pop(session_id, None)
         if self._shown(session_id) is not None:
             self._show_status_message(f"Transcription failed: {message}")
             self._update_transcription_ui()
@@ -1284,12 +1479,16 @@ class EditorWindow(QMainWindow):
             return ""
         if recording.session_id in self._transcription_failed:
             return "transcription failed"
-        if self.transcription.is_running(recording.session_id):
+        if (
+            self.transcription.is_running(recording.session_id)
+            or recording.session_id in self._transcription_fraction
+        ):
             fraction = self._transcription_fraction.get(recording.session_id)
             if fraction is None and recording.duration_ms > 0:
                 fraction = recording.transcribed_ms / recording.duration_ms
             percent = f" {int((fraction or 0.0) * 100)} %"
-            return f"transcribing{percent}"
+            eta = format_eta(self._transcription_eta.get(recording.session_id))
+            return f"transcribing{percent}" + (f" (ETA: {eta})" if eta else "")
         return "transcription pending"
 
     def _update_status(self) -> None:
@@ -1324,6 +1523,8 @@ class EditorWindow(QMainWindow):
             self.right_splitter.restoreState(right_state)
         auto = settings.value("process/auto", False, type=bool)
         self.auto_process_checkbox.setChecked(bool(auto))
+        if settings.contains("view/dark"):
+            self.set_theme(settings.value("view/dark", self._dark, type=bool))
 
     def save_settings(self) -> None:
         settings = self._settings
@@ -1333,6 +1534,8 @@ class EditorWindow(QMainWindow):
         settings.setValue("splitter/main", self.main_splitter.saveState())
         settings.setValue("splitter/right", self.right_splitter.saveState())
         settings.setValue("process/auto", self.auto_process_checkbox.isChecked())
+        if self._theme_chosen:
+            settings.setValue("view/dark", self._dark)
         settings.sync()
 
     def shutdown(self) -> None:
@@ -1365,7 +1568,10 @@ class EditorWindow(QMainWindow):
 
 
 __all__ = [
+    "ACTION_BUTTON_SIZE",
     "AUTO_PROCESS_SECONDS",
+    "INSTRUCTIONS_LABEL",
+    "INSTRUCTIONS_SET_LABEL",
     "EditorWindow",
     "PROCESS_BUTTON_STYLE",
     "RENDER_BUTTON_STYLE",

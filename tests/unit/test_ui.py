@@ -53,11 +53,22 @@ class FakeRecorder:
         self.running = False
         self.frame_count = 0
         self.stopped = False
+        self.keypoints: list[int] = []
+        self.clipboard_provider = None
         FakeRecorder.instances.append(self)
 
     @property
     def elapsed_ms(self) -> int:
         return self.clock.elapsed_ms()
+
+    def add_keypoint(self):
+        if not self.running:
+            return None
+        now = self.clock.elapsed_ms()
+        if self.keypoints and now - self.keypoints[-1] < 3000:
+            return None
+        self.keypoints.append(now)
+        return now
 
     def start(self) -> None:
         self.paths.create_work_dirs()

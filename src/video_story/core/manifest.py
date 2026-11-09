@@ -87,6 +87,12 @@ class Manifest:
     platform: str = ""
     plugin_version: str = ""
     notes: list[str] = field(default_factory=list)
+    # Moments the user marked with **Insert keypoint** while recording (ms, ascending).
+    keypoints: list[int] = field(default_factory=list)
+
+    def keypoints_to_dict(self) -> list[dict[str, int]]:
+        times = sorted({int(t) for t in self.keypoints if int(t) >= 0})
+        return [{"index": i + 1, "time_ms": t} for i, t in enumerate(times)]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +114,9 @@ class Manifest:
             "audio": self.audio.to_dict(),
             "frames": self.frames.to_dict(),
             "transcript": self.transcript.to_dict() if self.transcript else None,
+            "keypoints": self.keypoints_to_dict(),
+            "keypoints_note": "moments the user marked as important while recording "
+            "(Insert keypoint); the editor shows them as green lines and snaps the crop to them",
             "platform": self.platform,
             "plugin_version": self.plugin_version,
             "notes": self.notes,
@@ -155,7 +164,24 @@ class Manifest:
             platform=data.get("platform", ""),
             plugin_version=data.get("plugin_version", ""),
             notes=list(data.get("notes", [])),
+            keypoints=_keypoints_from(data.get("keypoints")),
         )
+
+
+def _keypoints_from(raw: Any) -> list[int]:
+    """``[{"index", "time_ms"}, ...]`` or plain ``[ms, ...]``; sorted, unique, >= 0."""
+    if not isinstance(raw, list):
+        return []
+    times: set[int] = set()
+    for item in raw:
+        value = item.get("time_ms") if isinstance(item, dict) else item
+        try:
+            ms = int(value)
+        except (TypeError, ValueError):
+            continue
+        if ms >= 0:
+            times.add(ms)
+    return sorted(times)
 
 
 def write_manifest(path: Path, manifest: Manifest) -> None:

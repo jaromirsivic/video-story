@@ -37,28 +37,40 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
    <launcher> wait --editor <editor_session> --timeout 240
    ```
 
-   `timed_out` true: call it again. Event `process`: the result carries `session_id` and
-   `crop` `{start_ms, end_ms}`; run `describe --session <session_id>` and act on
-   `transcript_in_range` (only the speech inside the crop) and on frames inside the
-   range (`frames --at <ms>` with times between `start_ms` and `end_ms`), following the
-   same rules as the video-story skill. The crop applies to every screen. Event
-   `closed`: the user closed the editor without Process; say so in one line and do
-   nothing else.
+   `timed_out` true: call it again. Event `process`: the result carries `session_id`,
+   `crop` `{start_ms, end_ms}` and **`instructions`** (the user's master instructions
+   for the whole recording, `""` when none - read them first, they frame everything
+   said in the recording and win over single sentences of the transcript); run
+   `describe --session <session_id>` and act on `transcript_in_range` (only the speech
+   inside the crop) and on frames inside the range (`frames --at <ms>` with times
+   between `start_ms` and `end_ms`), following the same rules as the video-story skill
+   (keypoints, clipboard in the sidecars, drawings). The crop applies to every screen.
+   Event `closed`: the user closed the editor without Process; say so in one line and
+   do nothing else.
 4. `NO_RECORDINGS` means there is nothing to edit yet; suggest recording with Video Story.
 
 What the user can do in the window: select a recording on the left; press Space to
-play (subtitles always shown under the preview; the mouse wheel zooms
-the preview up to 800 %); correct the words of a subtitle with the **Edit** button next
-to it (the From/To times are read-only; Save rewrites `transcript.json` and
-`transcript.txt`, so the transcript you read is the user's corrected version of what was
-said); drag the In/Out handles on the timeline or press `I`/`O` at the playhead to crop
-(one crop for all screens, remembered per recording in `crop.json`); click a screen
-track to choose what is previewed and exported; press the blue **Render** (Ctrl+R) for an
-MP4, or the green **Process** (Ctrl+Enter) to hand the cropped range to you. Process
-closes the editor. A recording that came straight from the Stop dialog is transcribed in
-the background of the editor: a green arrow under the audio track marks how far whisper
-got, subtitles appear as they are produced, and Render and Process stay disabled until
-the transcript is complete (closing the editor early keeps the partial transcript;
+play (icon transport buttons under the preview: go to In, step back, play/pause, stop,
+step forward, go to Out; **Stop** returns to where Play was last pressed, marked by a
+white arrow on the ruler; subtitles always shown under the preview, up to five lines and
+then scrolling; the mouse wheel zooms the preview up to 800 %); switch between the light
+and the dark theme with the button in the right corner above **Edit** (Ctrl+T); correct
+the words of a subtitle with the **Edit** button next to it (the From/To times are
+read-only; Save rewrites `transcript.json` and `transcript.txt`, so the transcript you
+read is the user's corrected version of what was said); drag the In/Out handles on the
+timeline or press `I`/`O` at the playhead to crop (one crop for all screens, remembered
+per recording in `crop.json`; the handles and the playhead snap to the green keypoint
+lines the user inserted while recording, which show "Keypoint N" on hover); zoom the
+timeline with -/+ (the playhead stays in the middle); click a screen track to choose
+what is previewed and exported. The bottom row holds **Auto process**, the green
+**Process** (Ctrl+Enter), **Instructions** (Ctrl+I: the master instructions for you,
+stored in `instructions.txt`, empty by default; a bullet on the button marks stored
+ones), a separator and the blue **Render** (Ctrl+R) for an MP4. Process hands the
+cropped range and the instructions to you and closes the editor. A recording that came
+straight from the Stop dialog is transcribed in the background of the editor: a green
+arrow under the audio track marks how far whisper got with `transcribing (ETA: m:ss)`
+under it, subtitles appear as they are produced, and Render and Process stay disabled
+until the transcript is complete (closing the editor early keeps the partial transcript;
 selecting the recording again resumes it). **Auto process** presses Process by itself
 five seconds after the transcript completes unless the user clicks or types.
 

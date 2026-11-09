@@ -345,8 +345,9 @@ def test_render_button_is_blue_next_to_the_green_process_button(qtbot, tmp_path:
     image = process.grab().toImage()
     colour = image.pixelColor(image.width() // 2, image.height() // 4)
     assert colour.green() > colour.red() + 60 and colour.green() > colour.blue() + 60
-    assert window.auto_process_checkbox.geometry().right() < render.geometry().left()
-    assert render.geometry().right() < process.geometry().left()
+    assert window.auto_process_checkbox.geometry().right() < process.geometry().left()
+    assert process.geometry().right() < window.instructions_button.geometry().left()
+    assert window.instructions_button.geometry().right() < render.geometry().left()
     assert window.auto_process_checkbox.text() == "Auto process"
     assert not window.auto_process_checkbox.isChecked()
 

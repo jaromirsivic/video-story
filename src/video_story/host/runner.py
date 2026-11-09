@@ -19,6 +19,7 @@ from typing import Any
 from video_story.core.config import Config, config_path
 from video_story.core.crop import read_crop
 from video_story.core.cursor import cursor_from_json
+from video_story.core.instructions import read_instructions
 from video_story.core.manifest import Manifest, read_manifest
 from video_story.core.naming import FrameName, parse_frame_filename
 from video_story.core.session import (
@@ -163,6 +164,7 @@ def session_status(paths: SessionPaths) -> dict[str, Any]:
                 duration = state.recorded_duration_ms or 0
                 state.status = Status.PROCESSED
                 state.crop = {"start_ms": 0, "end_ms": duration}
+                state.instructions = read_instructions(paths.instructions_path(paths.final_dir))
                 state.processed_via = "stop_dialog"
                 state.message = (
                     "The editor process ended without Process; act on the whole recording."
@@ -227,6 +229,7 @@ class FrameRef:
         cursor = None
         drawings: list[Any] = []
         zoom: list[Any] = []
+        clipboard: str | None = None  # text copied during the recording (see ui.clipboard)
         try:
             data = json.loads(self.sidecar.read_text(encoding="utf-8"))
             position = cursor_from_json(data.get("cursor"))
@@ -237,6 +240,9 @@ class FrameRef:
             raw_zoom = data.get("zoom")
             if isinstance(raw_zoom, list):
                 zoom = raw_zoom
+            raw_clipboard = data.get("clipboard")
+            if isinstance(raw_clipboard, str):
+                clipboard = raw_clipboard
         except (OSError, ValueError, KeyError, AttributeError):
             pass
         return {
@@ -247,6 +253,7 @@ class FrameRef:
             "cursor": cursor,
             "drawings": drawings,
             "zoom": zoom,
+            "clipboard": clipboard,
         }
 
 
@@ -371,11 +378,18 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
         "frames_dir": str(paths.frames_dir(base)),
     }
     duration_ms = 0
+    keypoints: list[Any] = []
     if manifest_path.exists():
         data["manifest_content"] = json.loads(manifest_path.read_text(encoding="utf-8"))
         duration_ms = int(data["manifest_content"].get("recorded_duration_ms") or 0)
+        raw_keypoints = data["manifest_content"].get("keypoints")
+        if isinstance(raw_keypoints, list):
+            keypoints = raw_keypoints
     crop = read_crop(paths.crop_path(base), duration_ms)
     data["crop"] = crop.to_dict()
+    # Master instructions typed in the editor: they frame the whole recording.
+    data["instructions"] = read_instructions(paths.instructions_path(base))
+    data["keypoints"] = keypoints
     status = transcript_status(paths.transcript_json_path(base))
     data["transcript_complete"] = status.complete
     if not status.complete:

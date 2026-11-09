@@ -86,11 +86,22 @@ def test_process_button_is_green_enabled_and_next_to_render(qtbot, folder: Path)
     assert centre.green() > centre.red() + 60 and centre.green() > centre.blue() + 60
     assert QKeySequence("Ctrl+Return") in window.process_action.shortcuts()
     assert window.render_button.parentWidget() is button.parentWidget()
-    assert window.render_button.geometry().right() < button.geometry().left()
+    # Order: Auto process | Process | Instructions || Render (Process before Render).
+    assert window.auto_process_checkbox.geometry().right() < button.geometry().left()
+    assert button.geometry().right() < window.instructions_button.geometry().left()
+    assert (
+        window.instructions_button.geometry().right()
+        < window.render_separator.geometry().left()
+        < window.render_button.geometry().left()
+    )
+    # Smaller than the old 180x44 buttons, all three the same size.
+    assert button.minimumSize().height() < 44 and button.minimumSize().width() < 180
+    assert window.instructions_button.minimumSize() == button.minimumSize()
 
     window.list_view.clearSelection()
     window._set_recording(None)
     assert not button.isEnabled()
+    assert not window.instructions_button.isEnabled()
 
 
 def test_process_without_sessions_stores_crop_shows_feedback_and_closes(qtbot, folder: Path):
@@ -185,7 +196,7 @@ def test_process_failure_keeps_the_recording_session_and_the_button(
     sent: list[str] = []
     window.processed.connect(lambda sid, _crop: sent.append(sid))
 
-    def failing_finish(paths, crop, shown_session_id=None):
+    def failing_finish(paths, crop, shown_session_id=None, instructions=None):
         raise RuntimeError("state.json is locked")
 
     monkeypatch.setattr(window_mod, "finish_recording_session", failing_finish)
