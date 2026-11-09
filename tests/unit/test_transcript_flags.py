@@ -144,7 +144,7 @@ def _recording(tmp_path: Path, session_id: str = "20261109-173745") -> SessionPa
     return paths
 
 
-def test_dead_editor_with_an_incomplete_transcript_tells_the_agent(tmp_path: Path):
+def test_dead_editor_with_an_incomplete_transcript_is_not_handed_over(tmp_path: Path):
     paths = _recording(tmp_path)
     write_transcript(
         paths.transcript_txt_path(paths.final_dir),
@@ -163,8 +163,8 @@ def test_dead_editor_with_an_incomplete_transcript_tells_the_agent(tmp_path: Pat
         ),
     )
     data = session_status(paths)
-    assert data["status"] == "processed" and data["crop"] == {"start_ms": 0, "end_ms": 6000}
-    assert "incomplete" in data["message"] and "video-story transcribe" in data["message"]
+    assert data["status"] == "cancelled" and data["crop"] is None
+    assert "nothing should be done" in data["message"]
 
     described = describe_recording(paths)
     assert described["transcript_complete"] is False

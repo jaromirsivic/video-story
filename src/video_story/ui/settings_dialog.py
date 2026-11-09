@@ -4,6 +4,9 @@ retention setting and the recording folder actions (Open Folder, Delete All)."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -45,7 +48,10 @@ class SettingsDialog(QDialog):
     """Edit ``config.json``. ``result_config`` holds the saved configuration on accept.
 
     ``current_session_id`` is the session of the open control window; its work folder
-    is never touched by **Delete All Recordings**.
+    is never touched by **Delete All Recordings**. ``config_file`` is the file to save
+    to (default: the plugin's ``config.json``). ``save_guard(config)`` returns a context
+    manager entered around the save: the control window uses it to move its session to
+    a newly chosen Recording Folder; an exception from it keeps the dialog open.
     """
 
     def __init__(
@@ -53,6 +59,8 @@ class SettingsDialog(QDialog):
         config: Config,
         parent: QWidget | None = None,
         current_session_id: str | None = None,
+        config_file: Path | None = None,
+        save_guard: Callable[[Config], AbstractContextManager[None]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Video Story Settings")
@@ -60,6 +68,8 @@ class SettingsDialog(QDialog):
         self.setModal(True)
         self._config = config
         self._current_session_id = current_session_id
+        self._config_file = config_file
+        self._save_guard = save_guard
         self.result_config: Config | None = None
 
         form = QFormLayout(self)
@@ -243,11 +253,13 @@ class SettingsDialog(QDialog):
         try:
             config = config_from_dict(self.values())
             config.recording_folder.mkdir(parents=True, exist_ok=True)
-            path = save_config(config)
+            guard = self._save_guard(config) if self._save_guard else nullcontext()
+            with guard:
+                path = save_config(config, self._config_file)
         except ConfigError as exc:
             QMessageBox.warning(self, "Invalid setting", str(exc))
             return
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:  # RuntimeError: the save guard refused
             QMessageBox.warning(self, "Cannot save settings", f"{exc}")
             return
         log.info("settings saved to %s", path)

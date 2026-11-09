@@ -1,6 +1,8 @@
 # Video Story – implementační plán
 
-Stav: **implementováno; ověřeno na Windows a Linuxu (X11) lokálně a na macOS přes GitHub Actions** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15. Zadání je v [video-story-spec.md](video-story-spec.md).
+> **Historický záznam návrhu.** Platné chování aplikace popisuje [video-story-spec.md](video-story-spec.md); tento plán zachycuje, jak návrh vznikal (stav k 7. 11. 2026), a tam, kde se liší, neplatí. Liší se zejména: výchozí hodnoty (dnes 500 ms, JPEG 70 %, auto stop 120 min, model large-v3-turbo), konec nahrávání (vždy uložit a otevřít editor; v nahrávacím okně se nepřepisuje), stavový automat (bez Process Recording), manifest (vzniká už při Record) a soubory `scheduler.py`, `handoff.py`, `discard_dialog.py`, `progress_dialog.py`, `.mcp.json` a `config.example.json`, které neexistují.
+
+Stav: **implementováno; ověřeno na Windows a Linuxu (X11) lokálně a na macOS přes GitHub Actions** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15.
 
 Tento plán je česky (vznikl před rozhodnutím). Vše ostatní v repozitáři – README, instalace, skill, UI, hlášky, logy, CLI nápověda, kód a komentáře – je anglicky.
 

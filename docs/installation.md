@@ -6,17 +6,19 @@ transcription (whisper.cpp through `pywhispercpp`, CPU only).
 
 ## Requirements
 
-| Component | Windows | Linux |
-| --- | --- | --- |
-| uv | `winget install astral-sh.uv` or the installer from docs.astral.sh | distribution package or the installer from docs.astral.sh |
-| Python 3.12 | downloaded by uv automatically (`uv python install 3.12` if downloads are set to manual) | same |
-| FFmpeg | optional on PATH; otherwise `video-story doctor --fix` downloads a static build into `bin/ffmpeg/` | same; distribution package recommended |
-| Audio | any input device | PortAudio (`portaudio` package) and an input device (PipeWire/PulseAudio/ALSA) |
-| Display | Windows 10/11, any number of screens, per-monitor DPI supported | X11 session (Wayland is not supported yet) with `python-xlib` (installed by uv) |
+| Component | Windows | Linux | macOS 13+ |
+| --- | --- | --- | --- |
+| uv | `winget install astral-sh.uv` or the installer from docs.astral.sh | distribution package or the installer from docs.astral.sh | installer from docs.astral.sh or Homebrew |
+| Python 3.12 | downloaded by uv automatically (`uv python install 3.12` if downloads are set to manual) | same | same |
+| FFmpeg | optional on PATH; otherwise `video-story doctor --fix` downloads a static build into `bin/ffmpeg/` | same; distribution package recommended | install it yourself (`brew install ffmpeg`); the automatic download is not available on macOS yet |
+| Audio | any input device | PortAudio (`portaudio` package) and an input device (PipeWire/PulseAudio/ALSA) | any input device; macOS asks for **Microphone** permission for the terminal or host application |
+| Display | Windows 10/11, any number of screens, per-monitor DPI supported | X11 session (Wayland is not supported yet) with `python-xlib` (installed by uv) | screens and cursor through CoreGraphics (no extra packages); macOS asks for **Screen Recording** permission |
+| Disk | at least 1 GB free on the disk of the recording folder (Record refuses below that and a running recording stops there); expect about 3 GB per hour with two screens at the defaults | same | same |
 
-| macOS 13+ | | screens and cursor through CoreGraphics (no extra packages); on first use macOS asks for **Screen Recording** and **Microphone** permission for the terminal or host application; FFmpeg from Homebrew (`brew install ffmpeg`) or `video-story doctor --fix` is not available on macOS yet, so install it manually |
-
-macOS is verified on the GitHub Actions macOS runner (CI), not yet on a physical Mac.
+What has been verified: recording on Windows 11 and on Fedora (X11); macOS on the GitHub
+Actions runner only (not on a physical Mac, Retina untested); the editor window on
+Windows only. Hosts: Claude Code on Windows end to end; Codex, Claude Desktop and ChatGPT
+are documented below but not yet exercised.
 
 ## 1. Get the code and the model
 
@@ -43,8 +45,12 @@ without downloading anything.
 ## 2. Configuration
 
 `config.json` lives in the repository root (it is ignored by Git). It is created with
-defaults on first save. The Settings button of the control window edits it; the CLI can
-too:
+defaults on first save. The Settings button of the control window edits the first seven
+keys of the table below (Recording Folder, Capture Interval, Image Format, JPEG Quality,
+Audio Input, Auto Stop Recording, Keep Recordings) and offers **Open Folder** (the
+recording folder in the file manager) and **Delete All Recordings**, which asks for
+confirmation and then removes every recording except the open session. A new Recording
+Folder applies at once, also to the window that is open. The CLI edits every key:
 
 ```bash
 uv run video-story config get
@@ -61,7 +67,7 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `image_format` | `jpeg` | `jpeg` or `png` |
 | `jpeg_quality` | 70 | 20 to 100, used for JPEG only |
 | `audio_input` | `null` | device name; `null` means the system default input |
-| `auto_stop_minutes` | 120 | recording stops and is processed automatically after this time |
+| `auto_stop_minutes` | 120 | recording stops by itself after this time; it is saved and opened in the editor like after Stop |
 | `retention_days` | 30 | recordings older than this (by their start time) are deleted when the control window starts, 1 to 3650 |
 | `export_preset` | `medium` | libx264 preset for MP4 export (`ultrafast` ... `slow`) |
 | `export_crf` | 18 | libx264 quality (lower is better, 0 to 51) |
@@ -137,7 +143,7 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
 Tools: `video_story_start`, `video_story_wait`, `video_story_status`,
 `video_story_describe`, `video_story_get_transcript`, `video_story_timeline`, `video_story_list_frames`,
 `video_story_get_frame`, `video_story_config`, `video_story_doctor`, `video_story_edit`,
-`video_story_export`.
+`video_story_wait_editor`, `video_story_export`.
 
 ### ChatGPT
 
@@ -151,12 +157,9 @@ uv run video-story mcp --transport streamable-http --port 8765
 ```
 
 The window still opens on the machine running the server; the transcript and frames are
-returned through the MCP tools.
-
-The Settings button edits the first six keys (Recording Folder, Capture Interval, Image
-Format, JPEG Quality, Audio Input, Auto Stop Recording, Keep Recordings) and offers
-**Open Folder** (the recording folder in the file manager) and **Delete All Recordings**,
-which asks for confirmation and then removes every recording except the open session.
+returned through the MCP tools, so they travel to ChatGPT. The HTTP server has no
+authentication: whoever can reach the URL can read every stored recording and change the
+configuration, so expose it only through a tunnel you control and close it afterwards.
 
 ## 4. Verify
 
@@ -190,10 +193,18 @@ VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_recording.py test
 - `ALREADY_RUNNING`: a control window is open; finish or close it, or run
   `video-story sessions` to see it.
 - `WINDOW_EXITED`: the window process ended; read `ui.log` (window output, stays in
-  `<recording_folder>/.work/<session>/`) and `recording.log` (next to the frames).
-- `PROCESSING_FAILED`: transcription or finalisation failed; the recorded files stay in
-  `<recording_folder>/.work/<session>/` and `video-story transcribe <that folder>` can
-  retry the transcription.
+  `<recording_folder>/.work/<session>/`) and `recording.log` (next to the frames). What
+  was recorded is not lost: the next start of Video Story or of the editor finishes the
+  recording (manifest from the frames and the audio) and lists it in the editor. It is
+  never handed to the agent by itself.
+- `PROCESSING_FAILED`: the recording could not be saved (a file was locked, the folder
+  went away); the files stay in `<recording_folder>/.work/<session>/` and the next start
+  finishes the save in the same way.
+- "At least 1 GB of free space is needed": Record does not start, and a running
+  recording stops, when less than 1 GB is left on the disk of the recording folder. Free
+  some space or choose another Recording Folder in Settings.
+- Transcription failed in the editor: press **Retry transcription** (it continues from
+  the last subtitle); `video-story setup` downloads a missing model or FFmpeg.
 - No audio device: the Record button reports the error; choose another input in
   Settings or check the operating system's input devices.
 - Linux: `XDG_SESSION_TYPE=wayland` is refused; log in to an X11 session. Transparent

@@ -1,6 +1,8 @@
 # Video Story – zadání rozšíření v2 (editor s tlačítkem Process, zoom náhledu, nové výchozí hodnoty)
 
-Stav: **návrh zadání k potvrzení** (7. 11. 2026). Sepsáno podle slovního zadání autora; nic z toho zatím není implementováno. Navazuje na `video-story-spec.md` (nahrávání), `implementation-plan.md` a `implementation-plan-editor.md` (editor, export). Body označené **K potvrzení** jsou místa, kde zadání připouští více výkladů; u každého je uveden navrhovaný výklad, který bude použit, pokud nebude řečeno jinak.
+> **Historický dokument.** Platné chování aplikace popisuje [video-story-spec.md](video-story-spec.md). Toto zadání bylo implementováno 7. 11. 2026 a od té doby se v několika bodech změnilo: dialog Stop má tři volby (bez Process Recording), editor se otevírá hned a přepisuje na pozadí, Process editor zavírá, Auto process je při otevření editoru vždy odškrtnutý a po zavření ani po pádu editoru se agentovi nic nepředává. Kde se tento text s platnou specifikací liší, neplatí.
+
+Původní stav: návrh zadání k potvrzení (7. 11. 2026). Sepsáno podle slovního zadání autora. Navazuje na `video-story-spec.md` (nahrávání), `implementation-plan.md` a `implementation-plan-editor.md` (editor, export). Body označené **K potvrzení** jsou místa, kde zadání připouští více výkladů; u každého je uveden navrhovaný výklad, který bude použit, pokud nebude řečeno jinak.
 
 ## 1. Účel
 

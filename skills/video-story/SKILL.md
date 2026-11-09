@@ -7,7 +7,10 @@ description: Record the user's narrated screen session (microphone, every screen
 
 The user talks while working; you receive a timed transcript plus screenshots of every
 screen with the cursor position, all on one timeline (milliseconds since the recording
-started). Everything runs locally; nothing is uploaded.
+started). Recording and speech-to-text run on the user's machine; what you read of the
+result (transcript, copied texts, the screenshots you open) reaches you like any other
+file content. You act on a recording only after the user pressed **Process** in the
+editor (status `processed`); every other ending means: do nothing with it.
 
 ## 1. Locate and run the tool
 
@@ -41,11 +44,15 @@ Loop until `final` is `true`:
 Each call returns after at most 240 s with the current `status` and `timed_out`. Call it
 again when `timed_out` is true. Do not start other work while waiting; the user is
 recording. Statuses: `ready` (window open), `recording`, `processing` (saving the
-recording), `editing` (the user chose **Video Editor** after Stop: the editor is open,
-transcribes the audio in the background - `progress` and `message` say how far - and
-the user crops the recording; keep waiting), `processed` (done), `cancelled` (window
-closed without a recording, or the editor was closed without Process: do nothing),
-`failed` (see `message` and `recording.log` in the work folder).
+recording), `editing` (the recording ended and is open in the editor, which transcribes
+the audio in the background - `progress` and `message` say how far - while the user
+crops it; keep waiting), `processed` (the user pressed Process: act on it), `cancelled`
+(nothing to do: the window was closed without a recording, the editor was closed or
+ended without Process, or the editor could not be opened; a recording that exists is
+kept, `recording_dir` names it), `failed` (the window ended unexpectedly or the
+recording could not be saved; see `message`. The next start of Video Story recovers
+such a recording into the editor's list, but it is not yours to act on). For
+`cancelled` and `failed` tell the user in one line what happened and stop.
 
 While recording, the control window offers **Insert keypoint**: it marks the current
 moment as important (the button counts down 3, 2, 1 before the next one). The user can
@@ -54,13 +61,15 @@ transcribes while the user crops - the green arrow under the audio track says
 `transcribing (ETA: m:ss)` -, optionally corrects subtitles with **Edit**, types master
 **Instructions** for you, and presses its green **Process** button, which closes the
 editor; Render and Process are available only once the transcript is complete, and
-**Auto process** presses Process by itself five seconds after that unless the user
-clicks or types), **Continue Recording** or **Discard Recording**; a stopped recording
-always goes through the editor (discarding returns the window to the Record state; the
-same session continues). Recording also stops automatically after the configured
-auto-stop time (default 2 hours) and is then transcribed in the control window and
-processed without the editor. Hallucinated subtitle credits ("Titulky vytvořil ...",
-"Subtitles by ...") are dropped from the transcript.
+**Auto process** - unticked whenever the editor opens or another recording is selected -
+presses Process by itself five seconds after that unless the user clicks or types),
+**Continue Recording** or **Discard Recording**; a stopped recording always goes
+through the editor (discarding returns the window to the Record state; the same session
+continues). Recording also stops by itself after the configured auto-stop time (default
+2 hours), when less than 1 GB is left on the disk of the recording folder, or when it
+can no longer be written; the recording is then saved and opened in the editor like
+after Stop, and you keep waiting for Process. Hallucinated subtitle credits ("Titulky
+vytvořil ...", "Subtitles by ...") are dropped from the transcript.
 
 ## 4. Read the material (status `processed`)
 
@@ -188,9 +197,9 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
 - `transcribe <recording_dir>` - redo (or complete) the transcription of an existing
-  recording. `describe` reports `transcript_complete` false with a `transcript_note`
-  when the editor's background transcription did not finish (the editor died); run
-  `transcribe` first in that case.
+  recording, when the user asks you to work with a recording whose transcript is not
+  complete (`describe` and `timeline` report `transcript_complete` false with a
+  `transcript_note`).
 - `sessions` - recent sessions; `status --session <id>` - one session.
 - `mcp` - run the MCP server (stdio by default) for hosts without shell access.
 

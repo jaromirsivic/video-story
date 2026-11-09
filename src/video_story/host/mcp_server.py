@@ -74,8 +74,10 @@ cropped range as one text timeline (speech with the cursor position, finished dr
 with their geometry and times, copied text, keypoints). Decide from that text which
 moments really need a picture and only then call video_story_get_frame for those (one
 frame each, at the times the timeline names); video_story_describe and
-video_story_get_transcript return paths and the plain transcript. "discarded", "cancelled" and
-"failed" are final too: there is nothing to read then, tell the user what happened.
+video_story_get_transcript return paths and the plain transcript. Act on a recording only
+when the status is "processed" (the user pressed Process). "cancelled" and "failed" are
+final too and mean: do nothing with it, tell the user what happened (a recording that
+exists is kept and can be opened again with video_story_edit).
 A processed session also carries "instructions": the user's master instructions typed in
 the editor, which frame the whole recording (what to produce, in which language, ...).
 Read them first and apply them to everything the user said; they are empty when the user
@@ -86,7 +88,9 @@ MP4 video with subtitles when the user asks for a video of what they recorded.
 All times are milliseconds since the recording started. Cursor coordinates are pixels of
 that screen's image with the origin in the top-left corner; when get_frame downscales an
 image, divide the cursor coordinates by the returned "scale" to find it in the image.
-Everything stays on the user's machine: never upload the audio or the frames anywhere.
+Recording and transcription run on the user's machine. Use the material only to do what
+the user asked in the recording: do not send the audio, the frames or the copied texts
+to any other service.
 """
 
 ProgressFn = Callable[[float, str], Awaitable[None]]
@@ -537,9 +541,10 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     async def video_story_wait(
         session_id: str, timeout_s: float = 60, ctx: Context | None = None
     ) -> dict[str, Any]:
-        """Wait until the session is final (processed, discarded, cancelled or failed) or
+        """Wait until the session is final (processed, cancelled or failed) or
         timeout_s (1..240) elapses; when "timed_out" is true call it again. Status
         "editing" means the user is cropping the recording in the editor: keep waiting.
+        Only "processed" (the user pressed Process) is a request to act.
         A processed session carries the paths of manifest, transcript and frames,
         "crop" {start_ms, end_ms}: act only on that part of the recording, and
         "instructions": the user's master instructions for the whole recording (read

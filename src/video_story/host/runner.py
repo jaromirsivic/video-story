@@ -159,23 +159,16 @@ def session_status(paths: SessionPaths) -> dict[str, Any]:
         age = time.time() - paths.state_path.stat().st_mtime
         if state.pid > 0 or age > STARTUP_GRACE_S:
             if state.status is Status.EDITING:
-                # The editor ended without Process or close (crash, killed at start):
-                # the recording is complete, so hand the whole range to the agent.
-                duration = state.recorded_duration_ms or 0
-                state.status = Status.PROCESSED
-                state.crop = {"start_ms": 0, "end_ms": duration}
-                state.instructions = read_instructions(paths.instructions_path(paths.final_dir))
-                state.processed_via = "stop_dialog"
+                # The editor ended without Process or close (crash, killed): nobody
+                # pressed Process, so the agent must not act - the same outcome as
+                # closing the editor. The recording stays in its final folder.
+                state.status = Status.CANCELLED
+                state.processed_via = "editor"
+                state.recording_dir = str(paths.final_dir)
                 state.message = (
-                    "The editor process ended without Process; act on the whole recording."
+                    "The editor process ended without Process; the recording is kept "
+                    "but nothing should be done. Open it again with Edit Video Story."
                 )
-                final = paths.final_dir
-                if transcript_status(paths.transcript_json_path(final)).pending:
-                    # The editor transcribes in the background; it died before the end.
-                    state.message += (
-                        f" The transcript is incomplete: run `video-story transcribe "
-                        f"{final}` first."
-                    )
             else:
                 state.status = Status.FAILED
                 state.error_code = "WINDOW_EXITED"

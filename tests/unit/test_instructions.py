@@ -89,13 +89,18 @@ def test_finish_without_instructions_reads_the_file_and_defaults_to_empty(tmp_pa
     assert read_state(paths.state_path).instructions == ""
 
 
-def test_a_dead_editor_session_still_reports_the_instructions(tmp_path: Path):
+def test_a_dead_editor_session_hands_no_instructions_over(tmp_path: Path):
+    """Without Process nothing reaches the agent, typed instructions included (they
+    stay in ``instructions.txt`` for the next time the recording is opened)."""
     paths = SessionPaths(tmp_path, "20261107-122147")
     paths.frames_dir(paths.final_dir).mkdir(parents=True)
     write_instructions(paths.instructions_path(paths.final_dir), "Keep it short")
     _editing_state(paths, pid=999_999_999)
     data = session_status(paths)
-    assert data["status"] == "processed" and data["instructions"] == "Keep it short"
+    assert data["status"] == "cancelled" and data["instructions"] is None
+    assert paths.instructions_path(paths.final_dir).read_text(encoding="utf-8").strip() == (
+        "Keep it short"
+    )
 
 
 def _manifest(session_id: str, keypoints: list[int]) -> Manifest:

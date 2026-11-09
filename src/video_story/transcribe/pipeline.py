@@ -34,7 +34,7 @@ from video_story.core.transcript import (
     write_transcript,
 )
 
-from .ffmpeg import convert_to_16k_mono, ensure_ffmpeg
+from .ffmpeg import convert_to_16k_mono, ensure_ffmpeg, find_ffmpeg
 from .whisper_backend import (
     WHISPER_SAMPLE_RATE,
     TranscriptionBackend,
@@ -53,6 +53,25 @@ SEGMENT_PREVIEW_CHARS = 120  # the UI elides further to its width
 ProgressCallback = Callable[[float, str], None]
 SegmentCallback = Callable[[Segment], None]
 EventCallback = Callable[[dict[str, Any]], None]
+
+
+def missing_requirements(config: Config) -> list[str]:
+    """What transcribing a recording would lack right now (empty: everything is there).
+
+    Asked before Record, so that the user learns about a missing model or FFmpeg at
+    once and not after the recording. Nothing is downloaded or started here.
+    """
+    missing: list[str] = []
+    model = config.resolved_model_path()
+    if not model.is_file():
+        missing.append(f"the Whisper model ({model})")
+    if find_ffmpeg(config) is None:
+        missing.append("FFmpeg")
+    if config.whisper_backend == "whisper-cli" and (
+        config.whisper_cli_path is None or not Path(config.whisper_cli_path).is_file()
+    ):
+        missing.append("the whisper-cli program (whisper_cli_path)")
+    return missing
 
 
 def transcribing_message(last: Segment | None) -> str:
@@ -331,6 +350,7 @@ __all__ = [
     "ProgressCallback",
     "SegmentCallback",
     "TranscriptionResult",
+    "missing_requirements",
     "stream_transcription",
     "transcribe_audio",
     "transcribe_recording",

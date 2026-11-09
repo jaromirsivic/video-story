@@ -392,11 +392,16 @@ def test_auto_process_needs_an_agent_and_stops_on_any_click_or_key(qtbot, tmp_pa
     window.auto_process_checkbox.setChecked(True)
     assert window.countdown is None and window.process_button.text() == "Process"
 
-    # An agent attaches: the countdown starts; a key press cancels it for good.
+    # An agent attaches: for it this is a freshly opened editor, so Auto process is
+    # unticked and nothing counts down by itself.
     session = es.new_editor_session(cfg)
     es.write_attach_request(cfg, session, None)
     window.check_attach_requests()
-    assert window.editor_session == session and window.countdown == AUTO_PROCESS_SECONDS
+    assert window.editor_session == session
+    assert not window.auto_process_checkbox.isChecked() and window.countdown is None
+    # Ticked with an agent waiting: the countdown starts; a key press cancels it for good.
+    window.auto_process_checkbox.setChecked(True)
+    assert window.countdown == AUTO_PROCESS_SECONDS
     window._auto_timer.stop()
     _user_key(window.timeline, Qt.Key.Key_Right)
     assert window.countdown is None and window.process_button.text() == "Process"
@@ -461,10 +466,14 @@ def test_auto_process_countdown_holds_while_a_dialog_is_open(qtbot, tmp_path: Pa
     assert window.countdown == AUTO_PROCESS_SECONDS - 1
 
 
-def test_auto_process_setting_is_remembered(qtbot, tmp_path: Path):
+def test_auto_process_is_never_ticked_when_the_editor_opens(qtbot, tmp_path: Path):
+    """Auto process is not remembered: not from this version, not from an older one
+    that stored it."""
     make_recording(tmp_path, NEWEST)
     cfg = Config(recording_folder=tmp_path)
     settings = QSettings(str(tmp_path / "editor.ini"), QSettings.Format.IniFormat)
+    settings.setValue("process/auto", True)  # left by an earlier version
+    settings.sync()
     window = EditorWindow(cfg, settings=settings)
     qtbot.addWidget(window)
     window.restore_settings()
@@ -472,12 +481,36 @@ def test_auto_process_setting_is_remembered(qtbot, tmp_path: Path):
     assert not window.auto_process_checkbox.isChecked()
     window.auto_process_checkbox.setChecked(True)
     window.save_settings()
-    again = EditorWindow(
-        cfg, settings=QSettings(str(tmp_path / "editor.ini"), QSettings.Format.IniFormat)
-    )
+    stored = QSettings(str(tmp_path / "editor.ini"), QSettings.Format.IniFormat)
+    assert not stored.contains("process/auto")
+    again = EditorWindow(cfg, settings=stored)
     qtbot.addWidget(again)
     again.restore_settings()
-    assert again.auto_process_checkbox.isChecked()
+    assert not again.auto_process_checkbox.isChecked()
+
+
+def test_selecting_another_recording_unticks_auto_process(qtbot, tmp_path: Path):
+    """Auto process belongs to the recording it was ticked for: selecting another one
+    unticks it, so Process is never pressed by itself over a recording the user only
+    looked at."""
+    make_recording(tmp_path, NEWEST)
+    make_recording(tmp_path, OLDER)
+    cfg = Config(recording_folder=tmp_path)
+    session = es.new_editor_session(cfg)
+    window = EditorWindow(cfg, editor_session=session)
+    qtbot.addWidget(window)
+    window.show()
+    _wait_loaded(qtbot, window, NEWEST)
+    window.auto_process_checkbox.setChecked(True)
+    assert window.countdown == AUTO_PROCESS_SECONDS
+    window._auto_timer.stop()
+    row = window.recordings.default_row(OLDER)
+    window.list_view.setCurrentIndex(window.recordings.index(row))
+    _wait_loaded(qtbot, window, OLDER)
+    assert not window.auto_process_checkbox.isChecked() and window.countdown is None
+    window._on_auto_tick()  # a late tick does nothing
+    assert es.read_editor_event(session)["event"] == "open"
+    assert window.process_button.text() == "Process"
 
 
 # Subtitle dialog ------------------------------------------------------------------

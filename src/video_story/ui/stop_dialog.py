@@ -13,10 +13,9 @@ BUTTON_ICON_SIZE = QSize(20, 20)
 
 
 class StopChoice(Enum):
-    # PROCESS is not offered in the dialog (after Stop the user always goes through the
-    # editor); it remains for auto stop and for tests that process directly.
-    PROCESS = "process"
-    EDITOR = "editor"  # process, then open the recording in the Video Story Editor
+    # A stopped recording always goes through the editor: only its Process button hands
+    # the recording to the agent.
+    EDITOR = "editor"  # save the recording and open it in the Video Story Editor
     CONTINUE = "continue"
     DISCARD = "discard"
 

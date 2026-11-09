@@ -3,14 +3,24 @@
 The :class:`Recorder` owns a capture thread that ticks every ``capture_interval_ms``,
 reads the cursor once, grabs every screen and hands the raw frames to a bounded
 thread pool for encoding and writing. Audio is recorded by :class:`AudioRecorder`.
-The recording never pauses; it ends on :meth:`stop`, :meth:`discard` or when the
-auto-stop limit is reached.
+The recording never pauses; it ends on :meth:`stop`, :meth:`discard`, when the
+auto-stop limit is reached or when less than :data:`MIN_FREE_BYTES` are left on the disk
+of the recording folder (``stop_reason`` says which).
+
+A screen that cannot be grabbed (the secure desktop of a UAC prompt or the lock screen,
+a monitor that went away) does not end the recording: that screen simply has no frame
+for the tick (``failed_grabs`` counts them) and the next tick tries again.
+
+``manifest.json`` exists in the work directory from the first moment (screens, settings,
+start time, the keypoints so far; ``finished_at`` null), so a recording whose process
+died can still be finished (see :mod:`video_story.host.recovery`).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -23,7 +33,7 @@ from typing import Any
 from video_story import __version__
 from video_story.core.config import Config
 from video_story.core.cursor import CursorPosition, locate_cursor
-from video_story.core.manifest import AudioInfo, FramesInfo, Manifest
+from video_story.core.manifest import AudioInfo, FramesInfo, Manifest, write_manifest
 from video_story.core.naming import frame_filename, sidecar_filename
 from video_story.core.screens import Screen, assign_screen_ids
 from video_story.core.session import SessionPaths, now_iso
@@ -37,13 +47,48 @@ log = logging.getLogger(__name__)
 
 ENCODE_WORKERS = 4
 MAX_PENDING_TICKS = 8  # bounded backlog; beyond this, ticks are dropped and counted
+MIN_FREE_BYTES = 1024**3  # recording needs at least 1 GB of free disk space
+DISK_CHECK_INTERVAL_NS = 2_000_000_000  # how often the free space is looked at
+GRAB_REOPEN_AFTER = 10  # ticks without any frame before the screen grabber is reopened
+GRAB_LOG_EVERY = 100  # failed grabs between two log lines
 
 
 class RecorderEvent(StrEnum):
     STARTED = "started"
     AUTO_STOPPED = "auto_stopped"
+    LOW_DISK = "low_disk"
     STOPPED = "stopped"
     ERROR = "error"
+
+
+class StopReason(StrEnum):
+    """Why a recording ended by itself (``None``: the user stopped it)."""
+
+    AUTO_STOP = "auto_stop"
+    LOW_DISK = "low_disk"
+    CAPTURE_FAILED = "capture_failed"
+
+
+class LowDiskSpaceError(RuntimeError):
+    """Less than :data:`MIN_FREE_BYTES` free on the disk of the recording folder."""
+
+
+def free_disk_bytes(path: Path) -> int | None:
+    """Free bytes on the volume holding ``path``; ``None`` when that cannot be told."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        return shutil.disk_usage(probe).free
+    except OSError:
+        return None
+
+
+def low_disk_message(folder: Path) -> str:
+    return (
+        f"At least 1 GB of free space is needed on the disk of the recording folder "
+        f"({folder}); recording cannot continue without it."
+    )
 
 
 @dataclass
@@ -59,6 +104,8 @@ class RecordingSummary:
     auto_stopped: bool
     error: str | None = None
     keypoints: list[int] = field(default_factory=list)
+    failed_grabs: int = 0  # screen grabs that failed (that screen has no frame then)
+    stop_reason: str | None = None  # a StopReason value, None when the user stopped
 
     def to_manifest(
         self, config: Config, platform_name: str, notes: list[str] | None = None
@@ -81,8 +128,13 @@ class RecordingSummary:
             jpeg_quality=config.jpeg_quality if config.image_format == "jpeg" else None,
             screens=self.screens,
             audio=audio,
-            frames=FramesInfo(count=self.frame_count, dropped_ticks=self.dropped_ticks),
+            frames=FramesInfo(
+                count=self.frame_count,
+                dropped_ticks=self.dropped_ticks,
+                failed_grabs=self.failed_grabs,
+            ),
             auto_stopped=self.auto_stopped,
+            stop_reason=self.stop_reason,
             auto_stop_minutes=config.auto_stop_minutes,
             platform=platform_name,
             plugin_version=__version__,
@@ -135,7 +187,10 @@ class Recorder:
         self._audio_result: AudioResult | None = None
         self._frame_count = 0
         self._dropped_ticks = 0
+        self._failed_grabs = 0
+        self._grab_failing = False
         self._auto_stopped = False
+        self._stop_reason: StopReason | None = None
         self._error: str | None = None
         self._lock = threading.Lock()
         self._summary: RecordingSummary | None = None
@@ -175,6 +230,7 @@ class Recorder:
                 return None
             self._keypoints.append(now)
         log.info("keypoint %d at %d ms", len(self._keypoints), now)
+        self._write_provisional_manifest()  # a keypoint survives a crash of the process
         return now
 
     @property
@@ -199,6 +255,65 @@ class Recorder:
     def auto_stopped(self) -> bool:
         return self._auto_stopped
 
+    @property
+    def failed_grabs(self) -> int:
+        with self._lock:
+            return self._failed_grabs
+
+    @property
+    def stop_reason(self) -> StopReason | None:
+        """Why the recording ended by itself; ``None`` while it runs or after a manual stop."""
+        return self._stop_reason
+
+    @property
+    def low_disk(self) -> bool:
+        return self._stop_reason is StopReason.LOW_DISK
+
+    @property
+    def error(self) -> str | None:
+        """The first write or capture error (frames or audio), ``None`` while all is fine."""
+        if self._error:
+            return self._error
+        return self._audio.error if self._audio is not None else None
+
+    # Manifest ---------------------------------------------------------------
+
+    def _write_provisional_manifest(self) -> None:
+        """``manifest.json`` of a recording in progress (``finished_at`` null).
+
+        Holds what only this process knows - screens, capture settings, start time,
+        keypoints - so that the recording can be finished even when the process dies.
+        """
+        if self.started_at is None:
+            return
+        audio = None
+        if self._audio is not None:
+            audio = AudioResult(
+                device=self._audio.device.name,
+                sample_rate=self._audio.sample_rate,
+                channels=self._audio.channels,
+                frames_written=0,
+                dropped_blocks=0,
+            )
+        summary = RecordingSummary(
+            session_id=self.paths.session_id,
+            started_at=self.started_at,
+            finished_at="",
+            recorded_duration_ms=0,
+            screens=list(self.screens),
+            frame_count=0,
+            dropped_ticks=0,
+            audio=audio,
+            auto_stopped=False,
+            keypoints=self.keypoints,
+        )
+        manifest = summary.to_manifest(self.config, self.platform.name)
+        manifest.finished_at = None
+        try:
+            write_manifest(self.paths.manifest_path(self.paths.work_dir), manifest)
+        except OSError as exc:  # never let bookkeeping stop a recording
+            log.warning("provisional manifest not written: %s", exc)
+
     # Lifecycle --------------------------------------------------------------
 
     def start(self) -> None:
@@ -207,6 +322,9 @@ class Recorder:
         status = self.platform.support_status()
         if not status.supported:
             raise PlatformError(status.reason)
+        free = free_disk_bytes(self.paths.work_dir)
+        if free is not None and free < MIN_FREE_BYTES:
+            raise LowDiskSpaceError(low_disk_message(self.paths.recording_folder))
         self.platform.prepare_process()
         self.screens = assign_screen_ids(self.platform.list_screens())
         self.paths.create_work_dirs()
@@ -227,6 +345,7 @@ class Recorder:
         # The timeline starts once the audio stream is live, so audio and frames align.
         self.started_at = now_iso()
         self.clock.start()
+        self._write_provisional_manifest()
         self._capture_thread = threading.Thread(
             target=self._capture_loop, name="capture", daemon=True
         )
@@ -247,6 +366,8 @@ class Recorder:
             except Exception as exc:  # pragma: no cover
                 log.exception("audio stop failed")
                 self._error = self._error or f"audio stop failed: {exc}"
+        if self._audio_result is not None and self._audio_result.error:
+            self._error = self._error or self._audio_result.error
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -262,6 +383,8 @@ class Recorder:
             auto_stopped=self._auto_stopped,
             error=self._error,
             keypoints=self.keypoints,
+            failed_grabs=self.failed_grabs,
+            stop_reason=str(self._stop_reason) if self._stop_reason else None,
         )
         self._on_event(RecorderEvent.STOPPED, "")
         log.info(
@@ -286,22 +409,36 @@ class Recorder:
         auto_stop_ns = self.config.auto_stop_ms * 1_000_000
         tick_index = 0
         last_time_ms = -1
+        next_disk_check_ns = 0
+        empty_ticks = 0
+        frames_dir = self.paths.frames_dir(self.paths.work_dir)
         try:
             with ScreenGrabber() as grabber:
                 while not self._stop_event.is_set():
                     target_ns = tick_index * interval_ns
                     now_ns = self.clock.elapsed_ns()
-                    if now_ns < target_ns:
-                        time.sleep(min((target_ns - now_ns) / 1e9, 0.5))
-                        continue
                     if now_ns >= auto_stop_ns:
                         self._auto_stopped = True
+                        self._stop_reason = StopReason.AUTO_STOP
                         self._stop_event.set()
                         self._on_event(
                             RecorderEvent.AUTO_STOPPED,
                             f"auto stop after {self.config.auto_stop_minutes} min",
                         )
                         break
+                    if now_ns >= next_disk_check_ns:
+                        next_disk_check_ns = now_ns + DISK_CHECK_INTERVAL_NS
+                        free = free_disk_bytes(frames_dir)
+                        if free is not None and free < MIN_FREE_BYTES:
+                            message = low_disk_message(self.paths.recording_folder)
+                            log.warning("recording stopped: %s", message)
+                            self._stop_reason = StopReason.LOW_DISK
+                            self._stop_event.set()
+                            self._on_event(RecorderEvent.LOW_DISK, message)
+                            break
+                    if now_ns < target_ns:
+                        time.sleep(min((target_ns - now_ns) / 1e9, 0.5))
+                        continue
                     # Skip ticks we are too late for (keeps the schedule aligned).
                     missed = (now_ns - target_ns) // interval_ns
                     if missed > 0:
@@ -314,19 +451,55 @@ class Recorder:
                     if time_ms <= last_time_ms:
                         continue  # 1 ms interval edge case: never reuse a frame name
                     last_time_ms = time_ms
-                    tick = self._grab_tick(grabber, time_ms)
+                    # The backlog is checked first: a tick that is dropped must not have
+                    # consumed anything (the copied text waits for the next tick).
                     if not self._pending.acquire(blocking=False):
                         with self._lock:
                             self._dropped_ticks += 1
                         continue
+                    tick = self._grab_tick(grabber, time_ms)
+                    if not tick.frames:
+                        # No screen could be grabbed (lock screen, UAC prompt): nothing
+                        # to store for this tick; a fresh grabber often helps afterwards.
+                        self._pending.release()
+                        empty_ticks += 1
+                        if empty_ticks >= GRAB_REOPEN_AFTER:
+                            empty_ticks = 0
+                            try:
+                                grabber.close()  # the next grab() opens a new one
+                            except Exception:  # pragma: no cover - best effort
+                                log.debug("screen grabber close failed", exc_info=True)
+                        continue
+                    empty_ticks = 0
                     assert self._pool is not None
                     future = self._pool.submit(self._write_tick, tick)
                     future.add_done_callback(self._tick_done)
         except Exception as exc:
             log.exception("capture loop failed")
             self._error = f"capture failed: {exc}"
+            self._stop_reason = StopReason.CAPTURE_FAILED
             self._stop_event.set()
             self._on_event(RecorderEvent.ERROR, self._error)
+
+    def _grab_screens(self, grabber: ScreenGrabber) -> list[RawFrame]:
+        """Every screen that can be grabbed right now; a failing one is skipped."""
+        frames: list[RawFrame] = []
+        for screen in self.screens:
+            try:
+                frames.append(grabber.grab(screen))
+            except Exception as exc:
+                with self._lock:
+                    self._failed_grabs += 1
+                    count = self._failed_grabs
+                if not self._grab_failing or count % GRAB_LOG_EVERY == 0:
+                    log.warning(
+                        "cannot grab %s (%d failed grabs so far): %s", screen.id, count, exc
+                    )
+                self._grab_failing = True
+        if self._grab_failing and len(frames) == len(self.screens):
+            self._grab_failing = False
+            log.info("screen capture works again")
+        return frames
 
     def _grab_tick(self, grabber: ScreenGrabber, time_ms: int) -> _Tick:
         position = self.platform.cursor_position()
@@ -351,14 +524,14 @@ class Recorder:
                 tick.zoom = list(zoom_provider())
             except Exception:  # pragma: no cover - never let zoom data stop capture
                 log.exception("zoom provider failed")
+        tick.frames = self._grab_screens(grabber)
         clipboard_provider = self.clipboard_provider
-        if clipboard_provider is not None:
+        if clipboard_provider is not None and tick.frames:
+            # Taken only when the tick is stored: the provider hands a text out once.
             try:
                 tick.clipboard = clipboard_provider()
             except Exception:  # pragma: no cover - never let clipboard data stop capture
                 log.exception("clipboard provider failed")
-        for screen in self.screens:
-            tick.frames.append(grabber.grab(screen))
         return tick
 
     def _write_tick(self, tick: _Tick) -> int:
@@ -406,10 +579,15 @@ def write_sidecar_index(frames_dir: Path) -> int:
 __all__ = [
     "ENCODE_WORKERS",
     "KEYPOINT_MIN_GAP_MS",
+    "MIN_FREE_BYTES",
     "ClipboardProvider",
     "DrawingNowProvider",
     "DrawingsProvider",
+    "LowDiskSpaceError",
     "Recorder",
     "RecorderEvent",
     "RecordingSummary",
+    "StopReason",
+    "free_disk_bytes",
+    "low_disk_message",
 ]

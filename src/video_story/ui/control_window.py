@@ -26,13 +26,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from video_story.capture.recorder import low_disk_message
 from video_story.core.timeline import format_timestamp
 from video_story.host.controller import SessionController
 from video_story.host.editor_launcher import launch_editor
 
 from .clipboard import ClipboardTracker
 from .icons import draw_icon, keypoint_icon, record_icon, settings_icon, stop_icon
-from .progress_dialog import ProgressDialog
 from .settings_dialog import SettingsDialog
 from .stop_dialog import StopChoice, StopDialog, confirm_discard
 
@@ -41,25 +41,22 @@ log = logging.getLogger(__name__)
 UI_TICK_MS = 200
 KEYPOINT_LABEL = "Insert keypoint"
 KEYPOINT_COOLDOWN_S = 3  # the button counts 3, 2, 1 before the next keypoint
+SAVED_NOTE = "What was recorded so far is saved and opens in the Video Story Editor."
 
 
 class ProcessingWorker(QObject):
-    """Runs the blocking processing step in a QThread."""
+    """Saves the recording (stop, manifest, final folder) in a QThread."""
 
-    progress = Signal(float, str)
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, controller: SessionController, hand_to_editor: bool = False) -> None:
+    def __init__(self, controller: SessionController) -> None:
         super().__init__()
         self._controller = controller
-        self._hand_to_editor = hand_to_editor
 
     def run(self) -> None:
         try:
-            final_dir = self._controller.process(
-                progress=self.progress.emit, hand_to_editor=self._hand_to_editor
-            )
+            final_dir = self._controller.process()
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -67,7 +64,15 @@ class ProcessingWorker(QObject):
 
 
 class ControlWindow(QWidget):
-    """Main window. ``on_finished`` is called with the final status when the session ends."""
+    """Main window. ``on_finished`` is called with the final status when the session ends.
+
+    However a recording ends - Stop and **Video Editor**, the auto stop, low disk space,
+    a capture failure - it is saved and opened in the Video Story Editor; nothing is
+    handed to the agent from here (only the editor's **Process** button does that).
+
+    ``preflight`` returns what the transcription would miss (the Whisper model, FFmpeg);
+    it is asked when Record is pressed so that the user hears about it at once.
+    """
 
     def __init__(
         self,
@@ -75,19 +80,20 @@ class ControlWindow(QWidget):
         on_finished: Callable[[str], None],
         overlay_factory: Callable[[], QObject] | None = None,
         config_file: Path | None = None,
+        preflight: Callable[[], list[str]] | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
         self._on_finished = on_finished
         self._overlay_factory = overlay_factory
         self._config_file = config_file
-        self._open_editor = False
+        self._preflight = preflight
         self._overlay: QObject | None = None
         self._processing = False
+        self._halting = False  # stopping by itself: a notice is on screen, no closing
         self._done = False
         self._thread: QThread | None = None
         self._worker: ProcessingWorker | None = None
-        self._progress_dialog: ProgressDialog | None = None
 
         self.setWindowTitle("Video Story")
         self.setWindowFlags(
@@ -171,7 +177,32 @@ class ControlWindow(QWidget):
         else:
             self._on_record()
 
+    def _confirm_missing_requirements(self) -> bool:
+        """True when recording may start (nothing is missing, or the user accepts that
+        the recording cannot be transcribed until the missing part is installed)."""
+        if self._preflight is None:
+            return True
+        try:
+            missing = self._preflight()
+        except Exception:  # noqa: BLE001 - a broken check must not block recording
+            log.exception("preflight check failed")
+            return True
+        if not missing:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Transcription is not ready",
+            "Missing: " + ", ".join(missing) + ".\n\n"
+            "You can record, but the recording cannot be transcribed until you run "
+            "`video-story setup` (it downloads the missing parts).\n\nRecord anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _on_record(self) -> None:
+        if not self._confirm_missing_requirements():
+            return
         try:
             self.controller.start_recording()
         except Exception as exc:
@@ -261,18 +292,15 @@ class ControlWindow(QWidget):
         while True:
             dialog = StopDialog(self)
             dialog.exec()
-            if self.controller.recorder is not None and self.controller.recorder.auto_stopped:
-                # Auto stop fired while the dialog was open: processing takes over.
-                self._begin_processing()
+            if self._processing or self._halting or not self.controller.recording:
+                # The recording ended by itself while the dialog was open (auto stop,
+                # low disk space): saving it has taken over.
                 return
             choice = dialog.choice
             if choice is StopChoice.CONTINUE:
                 return
-            if choice is StopChoice.PROCESS:
-                self._begin_processing()
-                return
             if choice is StopChoice.EDITOR:
-                self._begin_processing(open_editor=True)
+                self._begin_processing()
                 return
             if confirm_discard(self):
                 self._discard()
@@ -297,11 +325,12 @@ class ControlWindow(QWidget):
 
     # Processing -------------------------------------------------------------
 
-    def _begin_processing(self, open_editor: bool = False) -> None:
+    def _begin_processing(self) -> None:
+        """Save the recording and open it in the editor (nothing is transcribed here:
+        the editor does that in the background, so there is no dialog to wait in)."""
         if self._processing:
             return
         self._processing = True
-        self._open_editor = open_editor
         self._timer.stop()
         self._close_overlay()
         self._stop_clipboard_tracking()
@@ -310,29 +339,34 @@ class ControlWindow(QWidget):
         self._reset_keypoint_button()
         self.keypoint_button.setEnabled(False)
         self._thread = QThread(self)
-        self._worker = ProcessingWorker(self.controller, hand_to_editor=open_editor)
+        self._worker = ProcessingWorker(self.controller)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        if open_editor:
-            # No transcription here: the recording is saved and the editor opens at once
-            # (it transcribes in the background), so there is nothing to wait for in a
-            # dialog; the status line says what happens.
-            self.status_label.setText("Opening the Video Story Editor...")
-        else:
-            self.status_label.setText("Processing recording...")
-            self._progress_dialog = ProgressDialog(self)
-            self._worker.progress.connect(self._progress_dialog.set_progress)
+        self.status_label.setText("Opening the Video Story Editor...")
         self._worker.finished.connect(self._on_processed)
         self._worker.failed.connect(self._on_processing_failed)
         self._thread.start()
-        if self._progress_dialog is not None:
-            self._progress_dialog.show()
+
+    def _halt_recording(self, title: str, text: str) -> None:
+        """The recording cannot go on (low disk space, a write or capture failure):
+        stop it first - the microphone must not run on behind a message box -, tell the
+        user why, then save what there is and open the editor."""
+        if self._processing or self._halting:
+            return
+        self._halting = True
+        self._timer.stop()
+        self._close_overlay()
+        self._stop_clipboard_tracking()
+        try:
+            self.controller.stop_recording()
+        except Exception:  # noqa: BLE001 - saving below reports what is wrong
+            log.exception("stopping the recording failed")
+        self.status_label.setText(title)
+        QMessageBox.warning(self, title, f"{text}\n\n{SAVED_NOTE}")
+        self._halting = False
+        self._begin_processing()
 
     def _stop_thread(self) -> None:
-        if self._progress_dialog is not None:
-            self._progress_dialog.hide()
-            self._progress_dialog.deleteLater()
-            self._progress_dialog = None
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(5000)
@@ -342,10 +376,7 @@ class ControlWindow(QWidget):
     def _on_processed(self, final_dir: str) -> None:
         self._stop_thread()
         self._done = True
-        log.info("processed: %s", final_dir)
-        if not self._open_editor:
-            self._finish("processed")
-            return
+        log.info("recording saved: %s", final_dir)
         session_id = self.controller.paths.session_id
         try:
             info = launch_editor(
@@ -361,10 +392,10 @@ class ControlWindow(QWidget):
                 self,
                 "Video Editor",
                 f"The editor could not be opened: {exc}\n\n"
-                "The recording was saved; the agent will use the whole recording "
-                "(it can transcribe it with `video-story transcribe`).",
+                "The recording was saved and nothing was handed to the agent. Open it "
+                "later with Edit Video Story.",
             )
-            self._finish("processed")
+            self._finish("cancelled")
             return
         self.controller.editor_opened(int(info.get("pid") or 0))
         self._finish("editing")
@@ -374,8 +405,9 @@ class ControlWindow(QWidget):
         self._done = True
         QMessageBox.critical(
             self,
-            "Processing failed",
-            f"{message}\n\nThe recorded files were kept in the work folder.",
+            "Saving the recording failed",
+            f"{message}\n\nThe recorded files were kept; the next start of Video Story or "
+            "of the editor finishes the recording and lists it in the editor.",
         )
         self._finish("failed")
 
@@ -390,8 +422,15 @@ class ControlWindow(QWidget):
     def _open_settings(self) -> None:
         if self.controller.recording:
             return
+        # A new Recording Folder applies to this session at once: the session moves there
+        # while the dialog saves (see SessionController.relocating), so the recording, the
+        # editor and the waiting agent all use the folder the user chose.
         dialog = SettingsDialog(
-            self.controller.config, self, current_session_id=self.controller.paths.session_id
+            self.controller.config,
+            self,
+            current_session_id=self.controller.paths.session_id,
+            config_file=self._config_file,
+            save_guard=lambda config: self.controller.relocating(config.recording_folder),
         )
         if dialog.exec() and dialog.result_config is not None:
             self.controller.config = dialog.result_config
@@ -476,19 +515,32 @@ class ControlWindow(QWidget):
 
     def _tick(self) -> None:
         recorder = self.controller.recorder
-        if recorder is None or self._processing:
+        if recorder is None or self._processing or self._halting:
             return
         if recorder.auto_stopped:
-            self.status_label.setText("Auto stop reached. Processing...")
+            self.status_label.setText("Auto stop reached. Opening the editor...")
             self._begin_processing()
+            return
+        if getattr(recorder, "low_disk", False):
+            self._halt_recording(
+                "Recording stopped: disk almost full",
+                low_disk_message(self.controller.paths.recording_folder),
+            )
             return
         if not recorder.running and self.controller.summary is None:
             # Capture thread died: surface the error and stop cleanly.
-            self._timer.stop()
-            QMessageBox.critical(
-                self, "Recording stopped", "Screen capture stopped unexpectedly. See recording.log."
+            self._halt_recording(
+                "Recording stopped",
+                "Screen capture stopped unexpectedly. See recording.log.",
             )
-            self._begin_processing()
+            return
+        error = getattr(recorder, "error", None)
+        if error:
+            # Frames or audio can no longer be written (the folder went away, ...).
+            self._halt_recording(
+                "Recording stopped: files cannot be written",
+                f"The recording could not be written: {error}",
+            )
             return
         self._clipboard.poll()
         elapsed = format_timestamp(recorder.elapsed_ms)
@@ -506,7 +558,7 @@ class ControlWindow(QWidget):
         if self._done:
             event.accept()
             return
-        if self._processing:
+        if self._processing or self._halting:
             event.ignore()
             return
         if self.controller.recording:

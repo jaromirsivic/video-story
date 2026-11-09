@@ -96,6 +96,7 @@ from video_story.core.crop import Crop, read_crop, write_crop
 from video_story.core.instructions import read_instructions, write_instructions
 from video_story.core.session import SessionPaths
 from video_story.core.timeline import format_timestamp, parse_timestamp
+from video_story.core.transcript import transcript_status
 from video_story.export import ExportRequest, ExportResult
 from video_story.host.editor_session import (
     AttachRequest,
@@ -447,10 +448,24 @@ class EditorWindow(QMainWindow):
         render_row = QHBoxLayout()
         render_row.setSpacing(12)
         render_row.addStretch(1)
+        # Hidden unless the transcription of the shown recording failed.
+        self.retry_transcription_button = QPushButton("Retry transcription")
+        self.retry_transcription_button.setToolTip(
+            "The transcription failed; try again from where it stopped"
+        )
+        self.retry_transcription_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.retry_transcription_button.clicked.connect(self.retry_transcription)
+        self.retry_transcription_button.hide()
+        render_row.addWidget(self.retry_transcription_button)
+        # Auto process is a decision about the recording on screen right now: it is
+        # never ticked when the editor opens (it is not remembered) and it is unticked
+        # whenever another recording is selected or handed to this window.
         self.auto_process_checkbox = QCheckBox("Auto process")
         self.auto_process_checkbox.setToolTip(
             f"Once the transcription is complete, count down {AUTO_PROCESS_SECONDS} s on the "
-            "Process button and press it by itself; any click or key stops the countdown"
+            "Process button and press it by itself; any click or key stops the countdown. "
+            "Applies to this recording only: it is unticked when the editor opens and "
+            "when you select another recording"
         )
         self.auto_process_checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.auto_process_checkbox.toggled.connect(self._on_auto_process_toggled)
@@ -658,6 +673,9 @@ class EditorWindow(QMainWindow):
     def _load_recording(self, item: RecordingItem) -> None:
         if self.recording is not None and self.recording.paths == item.paths:
             return
+        # Another recording: Auto process was ticked for the previous one and must
+        # never press Process over this one by itself.
+        self.auto_process_checkbox.setChecked(False)
         self._load_generation += 1
         self._set_recording(None)
         self.preview.view.set_message(f"Loading {item.session_id}...")
@@ -1140,6 +1158,15 @@ class EditorWindow(QMainWindow):
         if not self.actions_allowed:
             self._show_status_message(TRANSCRIBING_NOTE + ".")
             return None
+        awaited = self._awaited_recording_pending()
+        if awaited is not None:
+            # Process would also finish the session of the recording that came from
+            # the Stop dialog, whose transcript is not complete yet.
+            self._show_status_message(
+                f"The agent waits for recording {awaited}, which is still being "
+                "transcribed: select it and wait for the transcript."
+            )
+            return None
         self._stop_countdown()
         self._commit_time_edits()
         if self.player.playing:
@@ -1214,7 +1241,41 @@ class EditorWindow(QMainWindow):
             return False
         return recording.transcript_complete or recording.session_id in self._transcription_failed
 
+    def _awaited_recording_pending(self) -> str | None:
+        """Id of the recording an agent waits for (``recording_session``) when it is not
+        the one shown and its transcript is not complete; ``None`` otherwise."""
+        session_id = self.recording_session
+        if session_id is None:
+            return None
+        if self.recording is not None and self.recording.session_id == session_id:
+            return None  # the shown recording: ``actions_allowed`` decides
+        if session_id in self._transcription_failed:
+            return None  # cannot be completed; must not lock the user out
+        paths = SessionPaths(self.config.recording_folder, session_id)
+        status = transcript_status(paths.transcript_json_path(paths.final_dir))
+        return None if status.complete else session_id
+
+    def retry_transcription(self) -> None:
+        """Start the failed transcription of the shown recording again; it continues
+        from the last stored segment and the agent's session stays as it is."""
+        recording = self.recording
+        if recording is None or recording.session_id not in self._transcription_failed:
+            return
+        del self._transcription_failed[recording.session_id]
+        self._show_status_message("Transcription restarted.")
+        self._update_transcription_ui()
+
     def _update_buttons(self) -> None:
+        failed = self.recording is not None and (
+            self.recording.session_id in self._transcription_failed
+        )
+        self.retry_transcription_button.setVisible(failed)
+        if failed:
+            self.retry_transcription_button.setToolTip(
+                "The transcription failed: "
+                f"{self._transcription_failed[self.recording.session_id]}\n"
+                "Try again from where it stopped"
+            )
         allowed = self.actions_allowed
         note = "" if allowed or self.recording is None else f"\n{TRANSCRIBING_NOTE}"
         self.render_button.setEnabled(allowed)
@@ -1516,7 +1577,9 @@ class EditorWindow(QMainWindow):
         The previous editor session that is still waiting gets ``closed`` and a
         previous recording session that was not finished is cancelled: only one agent
         waits on this window at a time, and the earlier one must not hang forever.
+        Auto process is unticked: for the newcomer this is a freshly opened editor.
         """
+        self.auto_process_checkbox.setChecked(False)
         if self.editor_session != request.editor_session:
             self._close_editor_session()
             self.editor_session = request.editor_session
@@ -1618,8 +1681,8 @@ class EditorWindow(QMainWindow):
         right_state = settings.value("splitter/right")
         if right_state is not None:
             self.right_splitter.restoreState(right_state)
-        auto = settings.value("process/auto", False, type=bool)
-        self.auto_process_checkbox.setChecked(bool(auto))
+        # Auto process is deliberately not restored: the editor always opens with it
+        # unticked, so that no recording is handed to the agent without a decision.
         if settings.contains("view/dark"):
             self.set_theme(settings.value("view/dark", self._dark, type=bool))
 
@@ -1630,7 +1693,7 @@ class EditorWindow(QMainWindow):
         settings.setValue("window/geometry", self.saveGeometry())
         settings.setValue("splitter/main", self.main_splitter.saveState())
         settings.setValue("splitter/right", self.right_splitter.saveState())
-        settings.setValue("process/auto", self.auto_process_checkbox.isChecked())
+        settings.remove("process/auto")  # stored by earlier versions; no longer used
         if self._theme_chosen:
             settings.setValue("view/dark", self._dark)
         settings.sync()

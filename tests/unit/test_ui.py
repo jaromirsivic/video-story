@@ -221,29 +221,6 @@ def test_stop_dialog_video_editor_is_first_and_default(qtbot):
     assert dialog.choice is StopChoice.EDITOR
 
 
-def test_progress_dialog_shows_position_line(qtbot):
-    from video_story.ui.progress_dialog import ELLIPSIS, ProgressDialog
-
-    dialog = ProgressDialog()
-    qtbot.addWidget(dialog)
-    dialog.show()
-    assert dialog.windowTitle() == "Transcribing Audio"
-    dialog.set_progress(0.05, "Transcribing audio, this may take a while")
-    assert dialog.message_label.text() == "Transcribing audio, this may take a while"
-    assert dialog.detail_label.isHidden()
-    dialog.set_progress(0.4, "Transcribing audio, this may take a while\n00:01:05  Hello there")
-    assert dialog.message_label.text() == "Transcribing audio, this may take a while"
-    assert dialog.detail_label.text() == "00:01:05  Hello there" + ELLIPSIS
-    assert not dialog.detail_label.isHidden() and dialog.bar.value() == 40
-    dialog.set_progress(
-        0.4, "Transcribing audio, this may take a while\n00:01:09  " + "word " * 200
-    )
-    shown = dialog.detail_label.text()
-    assert shown.startswith("00:01:09  word") and shown.endswith(ELLIPSIS) and len(shown) < 300
-    dialog.set_progress(0.98, "Writing transcript")
-    assert dialog.detail_label.isHidden()
-
-
 def test_discard_not_confirmed_keeps_files(window, controller, monkeypatch):
     window.record_button.click()
     answers = iter([(StopChoice.DISCARD, False), (StopChoice.CONTINUE, None)])
@@ -278,94 +255,20 @@ def test_discard_confirmed_deletes_and_resets(window, controller, monkeypatch):
     assert controller.recording and len(FakeRecorder.instances) == 2
 
 
-def test_process_runs_transcription_and_finishes(window, controller, monkeypatch, qtbot):
-    import video_story.transcribe.pipeline as pipeline_mod
-    from video_story.core.manifest import TranscriptInfo
-    from video_story.core.transcript import Segment, Transcript, write_transcript
+def _fake_editor_launch(monkeypatch) -> list[dict]:
+    """Replace the editor launch (no real process); returns the recorded calls."""
+    launched: list[dict] = []
 
-    class Result:
-        def __init__(self):
-            self.transcript = Transcript("en", [Segment(0, 500, "hello")])
-            self.info = TranscriptInfo(language="en", segments=1)
+    def fake_launch(config, session_id=None, config_file=None, recording_session=None):
+        launched.append({"session_id": session_id, "recording_session": recording_session})
+        return {"pid": 4321, "session_id": session_id, "editor_session": "x", "attached": False}
 
-    def fake_transcribe(paths, config, *, base_dir=None, progress=None):
-        base = base_dir or paths.work_dir
-        if progress:
-            progress(0.5, "Transcribing audio")
-        write_transcript(
-            paths.transcript_txt_path(base), paths.transcript_json_path(base), Result().transcript
-        )
-        return Result()
-
-    monkeypatch.setattr(pipeline_mod, "transcribe_recording", fake_transcribe, raising=False)
-    window.record_button.click()
-    _auto_answer_stop(monkeypatch, StopChoice.PROCESS)
-    window.record_button.click()
-    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
-    state = read_state(controller.paths.state_path)
-    assert state.status is Status.PROCESSED and state.status.final
-    final = controller.paths.final_dir
-    assert final.exists() and (final / "manifest.json").exists()
-    assert (
-        (final / "transcript.txt")
-        .read_text(encoding="utf-8")
-        .startswith("[00:00:00.000 --> 00:00:00.500] hello")
-    )
-    assert state.recording_dir == str(final)
-    assert state.crop == {"start_ms": 0, "end_ms": state.recorded_duration_ms}
-    assert state.processed_via == "stop_dialog"
-
-
-def test_process_survives_unwritable_progress(window, controller, monkeypatch, qtbot):
-    """A progress tick that cannot replace state.json (the agent holds it open on
-    Windows) is logged and skipped; the recording is still processed."""
-    import video_story.host.controller as ctl
-
-    _fake_transcription(monkeypatch, progress_fraction=0.5)
-    real_write_state = ctl.write_state
-    denied: list[float] = []
-
-    def flaky_write_state(path, state):
-        if state.status is Status.PROCESSING and state.progress == 0.5:
-            denied.append(state.progress)
-            raise PermissionError(13, "Access is denied")
-        real_write_state(path, state)
-
-    monkeypatch.setattr(ctl, "write_state", flaky_write_state)
-    window.record_button.click()
-    _auto_answer_stop(monkeypatch, StopChoice.PROCESS)
-    window.record_button.click()
-    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
-    assert denied == [0.5]
-    state = read_state(controller.paths.state_path)
-    assert state.status is Status.PROCESSED and state.progress == 1.0
-    assert (controller.paths.final_dir / "manifest.json").exists()
-
-
-def _fake_transcription(monkeypatch, progress_fraction: float | None = None):
-    import video_story.transcribe.pipeline as pipeline_mod
-    from video_story.core.manifest import TranscriptInfo
-    from video_story.core.transcript import Segment, Transcript, write_transcript
-
-    class Result:
-        def __init__(self):
-            self.transcript = Transcript("en", [Segment(0, 500, "hello")])
-            self.info = TranscriptInfo(language="en", segments=1)
-
-    def fake_transcribe(paths, config, *, base_dir=None, progress=None):
-        base = base_dir or paths.work_dir
-        if progress and progress_fraction is not None:
-            progress(progress_fraction, "Transcribing audio")
-        write_transcript(
-            paths.transcript_txt_path(base), paths.transcript_json_path(base), Result().transcript
-        )
-        return Result()
-
-    monkeypatch.setattr(pipeline_mod, "transcribe_recording", fake_transcribe, raising=False)
+    monkeypatch.setattr(cw, "launch_editor", fake_launch)
+    return launched
 
 
 def _no_transcription(monkeypatch):
-    """Stop -> Video Editor must not transcribe in the control window any more."""
+    """The control window never transcribes: the editor does."""
     import video_story.transcribe.pipeline as pipeline_mod
 
     def unexpected(*args, **kwargs):
@@ -374,17 +277,11 @@ def _no_transcription(monkeypatch):
     monkeypatch.setattr(pipeline_mod, "transcribe_recording", unexpected, raising=False)
 
 
-def test_video_editor_choice_processes_and_hands_over(window, controller, monkeypatch, qtbot):
+def test_video_editor_choice_saves_and_hands_over(window, controller, monkeypatch, qtbot):
     """Stop -> Video Editor: save the recording and open the editor at once (it transcribes
-    in the background); the session stays non-final and no progress dialog is shown."""
+    in the background); the session stays non-final and nothing is transcribed here."""
     _no_transcription(monkeypatch)
-    launched: list[dict] = []
-
-    def fake_launch(config, session_id=None, config_file=None, recording_session=None):
-        launched.append({"session_id": session_id, "recording_session": recording_session})
-        return {"pid": 4321, "session_id": session_id, "editor_session": "x", "attached": False}
-
-    monkeypatch.setattr(cw, "launch_editor", fake_launch)
+    launched = _fake_editor_launch(monkeypatch)
     window.record_button.click()
     _auto_answer_stop(monkeypatch, StopChoice.EDITOR)
     window.record_button.click()
@@ -405,13 +302,13 @@ def test_video_editor_choice_processes_and_hands_over(window, controller, monkey
     assert not (final / "transcript.txt").exists() and not (final / "transcript.json").exists()
     from video_story.core.manifest import read_manifest
 
-    assert read_manifest(final / "manifest.json").transcript is None
-    assert window._progress_dialog is None  # nothing to wait for: no transcription dialog
+    manifest = read_manifest(final / "manifest.json")
+    assert manifest.transcript is None and not manifest.in_progress
     assert "Editor" in window.status_label.text()
 
 
-def test_video_editor_choice_falls_back_to_processed(window, controller, monkeypatch, qtbot):
-    """When the editor cannot start, the session is processed with the whole range."""
+def test_editor_that_cannot_open_hands_nothing_to_the_agent(window, controller, monkeypatch, qtbot):
+    """Nobody pressed Process: the session ends ``cancelled`` and the recording is kept."""
     _no_transcription(monkeypatch)
 
     def failing_launch(config, session_id=None, config_file=None, recording_session=None):
@@ -422,35 +319,154 @@ def test_video_editor_choice_falls_back_to_processed(window, controller, monkeyp
     window.record_button.click()
     _auto_answer_stop(monkeypatch, StopChoice.EDITOR)
     window.record_button.click()
-    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
+    qtbot.waitUntil(lambda: window.finished_statuses == ["cancelled"], timeout=10000)
     state = read_state(controller.paths.state_path)
-    assert state.status is Status.PROCESSED and state.processed_via == "stop_dialog"
-    assert state.crop == {"start_ms": 0, "end_ms": state.recorded_duration_ms}
+    assert state.status is Status.CANCELLED and state.crop is None
     assert "no editor today" in (state.message or "")
+    assert (controller.paths.final_dir / "manifest.json").exists()  # the recording is kept
 
 
-def test_auto_stop_triggers_processing(window, controller, monkeypatch, qtbot):
-    import video_story.transcribe.pipeline as pipeline_mod
-    from video_story.core.manifest import TranscriptInfo
-    from video_story.core.transcript import Transcript, write_transcript
-
-    class Result:
-        transcript = Transcript("en", [])
-        info = TranscriptInfo(language="en", segments=0)
-
-    def fake_transcribe(paths, config, *, base_dir=None, progress=None):
-        base = base_dir or paths.work_dir
-        write_transcript(
-            paths.transcript_txt_path(base), paths.transcript_json_path(base), Result.transcript
-        )
-        return Result()
-
-    monkeypatch.setattr(pipeline_mod, "transcribe_recording", fake_transcribe, raising=False)
+def test_auto_stop_opens_the_editor_and_processes_nothing(window, controller, monkeypatch, qtbot):
+    """The auto stop ends like Stop -> Video Editor: only Process hands a recording over."""
+    _no_transcription(monkeypatch)
+    launched = _fake_editor_launch(monkeypatch)
     window.record_button.click()
     FakeRecorder.instances[-1].auto_stopped = True
     window._tick()
-    qtbot.waitUntil(lambda: window.finished_statuses == ["processed"], timeout=10000)
-    assert read_state(controller.paths.state_path).status is Status.PROCESSED
+    qtbot.waitUntil(lambda: window.finished_statuses == ["editing"], timeout=10000)
+    state = read_state(controller.paths.state_path)
+    assert state.status is Status.EDITING and state.crop is None
+    assert len(launched) == 1
+
+
+def test_low_disk_stops_tells_the_user_and_opens_the_editor(window, controller, monkeypatch, qtbot):
+    launched = _fake_editor_launch(monkeypatch)
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cw.QMessageBox, "warning", lambda _p, title, text: shown.append((title, text))
+    )
+    window.record_button.click()
+    recorder = FakeRecorder.instances[-1]
+    recorder.low_disk = True
+    recorder.running = False  # the capture loop left
+    window._tick()
+    assert recorder.stopped  # stopped before the message box, not after it
+    assert len(shown) == 1 and "disk" in shown[0][0].lower()
+    assert "At least 1 GB of free space" in shown[0][1] and "saved" in shown[0][1]
+    qtbot.waitUntil(lambda: window.finished_statuses == ["editing"], timeout=10000)
+    assert len(launched) == 1
+    assert read_state(controller.paths.state_path).status is Status.EDITING
+
+
+def test_write_error_stops_and_saves_what_there_is(window, controller, monkeypatch, qtbot):
+    _fake_editor_launch(monkeypatch)
+    shown: list[str] = []
+    monkeypatch.setattr(cw.QMessageBox, "warning", lambda _p, title, text: shown.append(text))
+    window.record_button.click()
+    recorder = FakeRecorder.instances[-1]
+    recorder.error = "frame write failed: disk went away"
+    window._tick()
+    assert recorder.stopped and "disk went away" in shown[0]
+    qtbot.waitUntil(lambda: window.finished_statuses == ["editing"], timeout=10000)
+
+
+def test_no_closing_while_a_stop_notice_is_shown(window, controller, monkeypatch, qtbot):
+    """While the "recording stopped" notice is up, the window cannot be closed (closing
+    would cancel the session instead of saving the recording)."""
+    _fake_editor_launch(monkeypatch)
+    seen: list[bool] = []
+
+    def notice(_parent, _title, _text):
+        window.close()
+        seen.append(window.isVisible() and not window.finished_statuses)
+
+    monkeypatch.setattr(cw.QMessageBox, "warning", notice)
+    window.record_button.click()
+    FakeRecorder.instances[-1].running = False  # the capture thread died
+    window._tick()
+    assert seen == [True]
+    qtbot.waitUntil(lambda: window.finished_statuses == ["editing"], timeout=10000)
+
+
+def test_record_reports_missing_transcription_parts(qtbot, controller, monkeypatch):
+    answers = iter([cw.QMessageBox.StandardButton.No, cw.QMessageBox.StandardButton.Yes])
+    asked: list[str] = []
+
+    def question(_parent, _title, text, *_args):
+        asked.append(text)
+        return next(answers)
+
+    monkeypatch.setattr(cw.QMessageBox, "question", question)
+    w = cw.ControlWindow(controller, on_finished=lambda _s: None, preflight=lambda: ["FFmpeg"])
+    w.show()
+    try:
+        w.record_button.click()
+        assert not controller.recording and "FFmpeg" in asked[0] and "setup" in asked[0]
+        w.record_button.click()
+        assert controller.recording and len(asked) == 2
+    finally:
+        w._done = True
+        w.close()
+
+
+def test_new_recording_folder_applies_to_the_open_session(qtbot, controller, tmp_path: Path):
+    """Settings -> Recording Folder: the session moves there at once, so the recording,
+    the editor and the waiting agent (which resolves the session through the saved
+    configuration) all use the new folder."""
+    import video_story.core.config as cfg_mod
+    from video_story.host.runner import resolve_session, session_status
+
+    config_file = tmp_path / "config.json"
+    old_paths = controller.paths
+    new_folder = tmp_path / "bigger disk"
+    dialog = SettingsDialog(
+        controller.config,
+        current_session_id=old_paths.session_id,
+        config_file=config_file,
+        save_guard=lambda config: controller.relocating(config.recording_folder),
+    )
+    qtbot.addWidget(dialog)
+    dialog.folder_edit.setText(str(new_folder))
+    dialog._save()
+    assert dialog.result_config is not None
+    controller.config = dialog.result_config
+    assert controller.paths.recording_folder == new_folder
+    assert controller.paths.session_id == old_paths.session_id
+    assert not old_paths.state_path.exists()
+    saved = cfg_mod.load_config(config_file)
+    assert saved.recording_folder == new_folder
+    status = session_status(resolve_session(saved, old_paths.session_id))
+    assert status["status"] == "ready" and status["recording_folder"] == str(new_folder)
+    controller.start_recording()
+    assert (new_folder / ".work" / old_paths.session_id / "frames").is_dir()
+    assert not (tmp_path / ".work" / old_paths.session_id / "frames").exists()
+    controller.stop_recording()
+
+
+def test_failed_settings_save_keeps_the_session_where_it_was(
+    qtbot, controller, tmp_path: Path, monkeypatch
+):
+    from video_story.ui import settings_dialog as sd
+
+    def cannot_save(config, path=None):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(sd, "save_config", cannot_save)
+    monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **k: None)
+    old_paths = controller.paths
+    new_folder = tmp_path / "elsewhere"
+    dialog = SettingsDialog(
+        controller.config,
+        config_file=tmp_path / "config.json",
+        save_guard=lambda config: controller.relocating(config.recording_folder),
+    )
+    qtbot.addWidget(dialog)
+    dialog.folder_edit.setText(str(new_folder))
+    dialog._save()
+    assert dialog.result_config is None
+    assert controller.paths == old_paths and old_paths.state_path.exists()
+    assert not (new_folder / ".work" / old_paths.session_id).exists()
+    assert read_state(old_paths.state_path).recording_folder == str(tmp_path)
 
 
 def test_close_in_ready_state_cancels(window, controller):

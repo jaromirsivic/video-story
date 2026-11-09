@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .fileio import atomic_write_text
 from .screens import Screen
 from .session import FRAMES_DIR_NAME
 
@@ -37,12 +38,16 @@ class FramesInfo:
     count: int = 0
     dropped_ticks: int = 0
     naming: str = "<seconds>_<millis>_<screenId>.<png|jpg> with sidecar .json"
+    # Grabs of one screen that failed (lock screen, UAC prompt): no frame of that
+    # screen exists for that tick; the frame before it is the latest one.
+    failed_grabs: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "dir": self.dir,
             "count": self.count,
             "dropped_ticks": self.dropped_ticks,
+            "failed_grabs": self.failed_grabs,
             "naming": self.naming,
         }
 
@@ -89,6 +94,15 @@ class Manifest:
     notes: list[str] = field(default_factory=list)
     # Moments the user marked with **Insert keypoint** while recording (ms, ascending).
     keypoints: list[int] = field(default_factory=list)
+    # Why the recording ended by itself: "auto_stop", "low_disk" (less than 1 GB free),
+    # "capture_failed" or "recovered" (the window died; finished afterwards). None when
+    # the user stopped it.
+    stop_reason: str | None = None
+
+    @property
+    def in_progress(self) -> bool:
+        """A recording that was never finished (written at Record, ``finished_at`` null)."""
+        return self.finished_at is None
 
     def keypoints_to_dict(self) -> list[dict[str, int]]:
         times = sorted({int(t) for t in self.keypoints if int(t) >= 0})
@@ -105,6 +119,7 @@ class Manifest:
             "frame names and transcript segments share this timeline",
             "auto_stopped": self.auto_stopped,
             "auto_stop_minutes": self.auto_stop_minutes,
+            "stop_reason": self.stop_reason,
             "capture_interval_ms": self.capture_interval_ms,
             "image_format": self.image_format,
             "jpeg_quality": self.jpeg_quality,
@@ -147,6 +162,7 @@ class Manifest:
                 dir=frames.get("dir", FRAMES_DIR_NAME),
                 count=int(frames.get("count", 0)),
                 dropped_ticks=int(frames.get("dropped_ticks", 0)),
+                failed_grabs=int(frames.get("failed_grabs", 0)),
             ),
             transcript=TranscriptInfo(
                 txt=transcript.get("txt", "transcript.txt"),
@@ -165,6 +181,7 @@ class Manifest:
             plugin_version=data.get("plugin_version", ""),
             notes=list(data.get("notes", [])),
             keypoints=_keypoints_from(data.get("keypoints")),
+            stop_reason=data.get("stop_reason"),
         )
 
 
@@ -185,9 +202,9 @@ def _keypoints_from(raw: Any) -> list[int]:
 
 
 def write_manifest(path: Path, manifest: Manifest) -> None:
-    path.write_text(
-        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    """Atomic: the manifest is rewritten while recording (keypoints) and must never be
+    left half written when the process dies."""
+    atomic_write_text(path, json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False) + "\n")
 
 
 def read_manifest(path: Path) -> Manifest:

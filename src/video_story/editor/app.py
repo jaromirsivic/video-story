@@ -13,7 +13,11 @@ import sys
 from pathlib import Path
 
 from video_story.core.config import load_config
-from video_story.host.editor_launcher import check_editor_session, editor_lock_path
+from video_story.host.editor_launcher import (
+    check_editor_session,
+    editor_lock_path,
+    recover_left_behind,
+)
 from video_story.host.editor_lock import EditorLock, lock_holder_pid
 from video_story.host.editor_session import write_editor_event
 from video_story.host.runner import SessionError
@@ -69,6 +73,7 @@ def run_editor(
 
     config = load_config(config_file)
     config.recording_folder.mkdir(parents=True, exist_ok=True)
+    recover_left_behind(config)  # recordings of a window that died show up in the list
     check_editor_session(config, session_id)
     lock_path = editor_lock_path(config)
     lock = EditorLock(lock_path)

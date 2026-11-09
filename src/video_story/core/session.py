@@ -5,7 +5,7 @@ Layout inside the Recording Folder::
     <recording_folder>/
       .work/<session_id>/      # while recording / processing
         state.json, lock, ui.log, audio.wav, recording.log, frames/
-      <session_id>/            # after "Process Recording"
+      <session_id>/            # once the recording was saved (Stop, auto stop, recovery)
         manifest.json, audio.wav, transcript.txt, transcript.json, recording.log, frames/
 
 ``state.json``, ``lock`` and ``ui.log`` never leave the work directory: ``state.json`` is
@@ -55,12 +55,12 @@ _SESSION_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
 class Status(StrEnum):
     READY = "ready"  # window open, not recording yet
     RECORDING = "recording"
-    PROCESSING = "processing"  # transcribing
-    EDITING = "editing"  # processed, the editor is open; waiting for Process / close
-    PROCESSED = "processed"  # final: recording folder ready for the agent
+    PROCESSING = "processing"  # saving the recording (manifest, final folder)
+    EDITING = "editing"  # saved, the editor is open; waiting for Process / close
+    PROCESSED = "processed"  # final: Process was pressed, the agent may act
     DISCARDED = "discarded"  # final: user discarded the recording
-    CANCELLED = "cancelled"  # final: window closed without recording
-    FAILED = "failed"  # final: unrecoverable error
+    CANCELLED = "cancelled"  # final: no recording, or the editor ended without Process
+    FAILED = "failed"  # final: the window died or the recording could not be saved
 
     @property
     def final(self) -> bool:
@@ -158,19 +158,26 @@ class SessionPaths:
     def create_work_dirs(self) -> None:
         self.frames_dir(self.work_dir).mkdir(parents=True, exist_ok=True)
 
-    def finalize(self) -> Path:
+    def finalize(self, resume: bool = False) -> Path:
         """Move the recording into its final directory (same volume => renames).
 
         Every entry of the work directory except ``state.json``, ``lock`` and ``ui.log``
         is moved; ``frames/`` goes as one rename. The work directory itself stays, so
         ``wait``/``status`` keep reading ``state.json`` at its documented location.
+
+        ``manifest.json`` goes last: a final directory without it is a move that
+        stopped half way (a file was locked), and ``resume`` continues such a move
+        instead of refusing the existing directory.
         """
         if self.final_dir.exists():
-            raise FileExistsError(f"final directory already exists: {self.final_dir}")
-        self.final_dir.mkdir(parents=True, exist_ok=False)
-        for entry in sorted(self.work_dir.iterdir()):
-            if entry.name in WORK_ONLY_FILES:
-                continue
+            if not resume or self.manifest_path(self.final_dir).exists():
+                raise FileExistsError(f"final directory already exists: {self.final_dir}")
+        self.final_dir.mkdir(parents=True, exist_ok=True)
+        entries = [e for e in self.work_dir.iterdir() if e.name not in WORK_ONLY_FILES]
+        entries.sort(key=lambda e: (e.name == MANIFEST_FILE_NAME, e.name))
+        for entry in entries:
+            if entry.name.endswith(".tmp"):
+                continue  # leftover of an interrupted atomic write
             _replace_with_retry(entry, self.final_dir / entry.name)
         return self.final_dir
 

@@ -1,8 +1,9 @@
 """End-to-end test of the real control window on the real desktop.
 
 Runs the window in-process (no detached process), presses Record, draws a rectangle on
-the primary screen through the overlay, stops with "Process Recording" and waits for
-the real transcription. Run it alone (not with the offscreen unit tests):
+the primary screen through the overlay, stops with "Video Editor" (the recording is
+saved at once; the editor launch is replaced) and then runs the real transcription the
+editor would run. Run it alone (not with the offscreen unit tests):
 
     VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_ui_e2e.py -q -s
 """
@@ -95,23 +96,37 @@ def test_record_draw_process(qapp_real, tmp_path: Path, monkeypatch):
     _wait(qapp_real, 900)
     end_of_drawing_ms = controller.elapsed_ms
 
-    # Stop -> Process Recording (dialog answered programmatically).
+    # Stop -> Video Editor (dialog answered programmatically; the editor process itself
+    # is covered by test_editor_flow.py, so its launch is replaced here).
     def fake_exec(self):
-        self.choice = StopChoice.PROCESS
+        self.choice = StopChoice.EDITOR
         return QDialog.DialogCode.Accepted
 
+    def fake_launch(config, session_id=None, config_file=None, recording_session=None):
+        return {"pid": os.getpid(), "session_id": session_id, "editor_session": "x"}
+
     monkeypatch.setattr(cw.StopDialog, "exec", fake_exec)
+    monkeypatch.setattr(cw, "launch_editor", fake_launch)
     window.record_button.click()
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 60
     while not finished and time.monotonic() < deadline:
         _wait(qapp_real, 100)
-    assert finished == ["processed"], finished
+    assert finished == ["editing"], finished
 
+    # Saved at once, nothing handed to the agent, nothing transcribed by the window.
     state = read_state(paths.state_path)
-    assert state.status is Status.PROCESSED and state.recording_dir == str(paths.final_dir)
+    assert state.status is Status.EDITING and state.recording_dir == str(paths.final_dir)
+    assert state.crop is None
     final = paths.final_dir
     manifest = read_manifest(paths.manifest_path(final))
-    assert manifest.transcript is not None and manifest.frames.count > 0
+    assert manifest.transcript is None and manifest.frames.count > 0
+    assert not manifest.in_progress and manifest.stop_reason is None
+    assert not paths.transcript_json_path(final).exists()
+
+    # The transcription the editor would run in the background.
+    from video_story.transcribe.pipeline import transcribe_recording
+
+    transcribe_recording(paths, config, base_dir=final)
     assert paths.transcript_txt_path(final).exists() and paths.transcript_json_path(final).exists()
     assert (
         json.loads(paths.transcript_json_path(final).read_text(encoding="utf-8"))["segments"]

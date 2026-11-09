@@ -50,6 +50,18 @@ def processed_recordings(config: Config) -> list[str]:
     return found
 
 
+def recover_left_behind(config: Config) -> list[str]:
+    """Finish recordings whose window died before saving them, so that the editor lists
+    them (see :mod:`video_story.host.recovery`); never fails the caller."""
+    from .recovery import recover_orphaned_recordings
+
+    try:
+        return recover_orphaned_recordings(config.recording_folder)
+    except Exception:  # noqa: BLE001 - opening the editor matters more
+        log.exception("recovery of left-behind recordings failed")
+        return []
+
+
 def check_editor_session(config: Config, session_id: str | None) -> list[str]:
     """Validate ``session_id`` against the processed recordings; returns the ids."""
     if session_id is not None and not is_session_id(session_id):
@@ -77,6 +89,7 @@ def launch_editor(
     ``recording_session`` is the id of a recording session in status ``editing``
     (the editor finishes or cancels it when the user presses Process or closes).
     """
+    recover_left_behind(config)
     recordings = check_editor_session(config, session_id)
     work = config.recording_folder / WORK_DIR_NAME
     work.mkdir(parents=True, exist_ok=True)
@@ -130,4 +143,5 @@ __all__ = [
     "editor_running_pid",
     "launch_editor",
     "processed_recordings",
+    "recover_left_behind",
 ]

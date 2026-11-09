@@ -14,11 +14,20 @@ from video_story.platform import get_platform
 log = logging.getLogger(__name__)
 
 
-def _purge_in_background(config, session_id: str) -> None:
-    """Apply the retention setting without delaying the window (deleting is slow)."""
+def _housekeeping_in_background(config, session_id: str) -> None:
+    """Finish recordings a dead window left behind, then apply the retention setting,
+    without delaying the window (deleting is slow)."""
+    from video_story.host.recovery import recover_orphaned_recordings
     from video_story.host.retention import purge_old_recordings
 
     def work() -> None:
+        try:
+            recovered = recover_orphaned_recordings(config.recording_folder)
+        except Exception:  # pragma: no cover - housekeeping must never break the window
+            log.exception("recovery of left-behind recordings failed")
+        else:
+            if recovered:
+                log.info("recovered recordings: %s", ", ".join(recovered))
         try:
             deleted = purge_old_recordings(config.recording_folder, config.retention_days)
         except Exception:  # pragma: no cover - housekeeping must never break the window
@@ -27,7 +36,7 @@ def _purge_in_background(config, session_id: str) -> None:
         if deleted:
             log.info("retention (%d days): deleted %s", config.retention_days, ", ".join(deleted))
 
-    threading.Thread(target=work, name="retention", daemon=True).start()
+    threading.Thread(target=work, name="housekeeping", daemon=True).start()
 
 
 def run_ui(session_id: str | None = None, config_file: Path | None = None) -> int:
@@ -56,7 +65,7 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
         QMessageBox.critical(None, "Video Story", status.reason)
         return 3
 
-    _purge_in_background(config, session_id)
+    _housekeeping_in_background(config, session_id)
 
     final_status = {"value": "cancelled"}
 
@@ -70,8 +79,17 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
 
         return DrawingOverlay()
 
+    def preflight() -> list[str]:
+        from video_story.transcribe.pipeline import missing_requirements
+
+        return missing_requirements(controller.config)
+
     window = ControlWindow(
-        controller, on_finished=finished, overlay_factory=overlay_factory, config_file=config_file
+        controller,
+        on_finished=finished,
+        overlay_factory=overlay_factory,
+        config_file=config_file,
+        preflight=preflight,
     )
     window.show()
     window.raise_()

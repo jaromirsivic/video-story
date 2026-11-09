@@ -75,8 +75,11 @@ straight from the Stop dialog is transcribed in the background of the editor: a 
 arrow under the audio track marks how far whisper got with `transcribing (ETA: m:ss)`
 under it, subtitles appear as they are produced, and Render and Process stay disabled
 until the transcript is complete (closing the editor early keeps the partial transcript;
-selecting the recording again resumes it). **Auto process** presses Process by itself
-five seconds after the transcript completes unless the user clicks or types.
+selecting the recording again resumes it; when it fails, **Retry transcription**
+continues it). **Auto process** presses Process by itself five seconds after the
+transcript completes unless the user clicks or types; it is unticked whenever the
+editor opens or another recording is selected. Recordings whose recording window died
+before saving them are finished when the editor starts and appear in the list.
 
 ## 3. Export without the window
 
