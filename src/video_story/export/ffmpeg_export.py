@@ -3,8 +3,10 @@
 The video is a slideshow of the screen's frames fed through the concat demuxer, turned
 into constant 24 fps, with the cursor pointer drawn by an ``overlay`` filter whose
 ``x``/``y`` expressions follow the recorded cursor per frame (see
-:func:`video_story.export.plan.cursor_expressions`). Audio is the recording's WAV
-cropped to the range and padded to the exact video length. Progress comes from
+:func:`video_story.export.plan.cursor_expressions`). Audio is the mix of the tracks
+switched on in the editor (the microphone and the computer's sound, see
+:mod:`video_story.core.audio_mix`; no audio when both are off) cropped to the range and
+padded to the exact video length. Progress comes from
 ``-progress pipe:1``; a cancel check is polled while ffmpeg runs.
 """
 
@@ -17,8 +19,10 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
+from video_story.core.audio_mix import selected_sources
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.manifest import read_manifest
 from video_story.core.screens import find_screen
@@ -59,14 +63,22 @@ def _even(value: int) -> int:
     return max(2, value - value % 2)
 
 
-def filter_graph(cursor: tuple[str, str] | None) -> str:
+def filter_graph(cursor: tuple[str, str] | None, audio_inputs: int = 0) -> str:
     """The ``-filter_complex`` graph: input 0 is the frame slideshow, input 1 (only with
-    a cursor) the pointer PNG. Output is constant ``EXPORT_FPS`` with even dimensions."""
+    a cursor) the pointer PNG. Output is constant ``EXPORT_FPS`` with even dimensions.
+
+    With more than one audio input (they follow the video inputs) the graph also adds
+    them together into ``[aout]``, padded with silence like a single track."""
     graph = f"[0:v]fps={EXPORT_FPS},scale=trunc(iw/2)*2:trunc(ih/2)*2"
     if cursor is not None:
         x_expr, y_expr = cursor
         graph += f"[v0];[v0][1:v]overlay=x='{x_expr}':y='{y_expr}':eval=frame:format=auto"
-    return graph + ",format=yuv420p[vout]"
+    graph += ",format=yuv420p[vout]"
+    if audio_inputs > 1:
+        first = 2 if cursor is not None else 1
+        inputs = "".join(f"[{first + i}:a]" for i in range(audio_inputs))
+        graph += f";{inputs}amix=inputs={audio_inputs}:duration=longest:normalize=0,apad[aout]"
+    return graph
 
 
 def build_command(
@@ -75,7 +87,7 @@ def build_command(
     output: Path,
     duration_ms: int,
     start_ms: int,
-    audio: Path | None,
+    audio: Path | Sequence[Path] | None,
     draw_cursor: bool,
     graph: str,
     graph_file: str | None = None,
@@ -83,7 +95,9 @@ def build_command(
     """The ffmpeg argv; ``frames.txt``, ``cursor.png`` and the filter script are relative
     to the working directory the process is started in (the temporary directory).
     ``output`` is the file ffmpeg writes (the partial file); the container is forced
-    with ``-f mp4`` so its name does not matter."""
+    with ``-f mp4`` so its name does not matter. Several ``audio`` tracks must be
+    mixed by ``graph`` (see :func:`filter_graph`)."""
+    audios = [] if audio is None else [audio] if isinstance(audio, Path) else list(audio)
     cmd = [
         str(ffmpeg),
         "-nostdin",
@@ -103,21 +117,21 @@ def build_command(
     ]
     if draw_cursor:
         cmd += ["-i", CURSOR_PNG_NAME]
-    if audio is not None:
+    for track in audios:
         cmd += [
             "-ss",
             f"{start_ms / 1000:.3f}",
             "-t",
             f"{duration_ms / 1000:.3f}",
             "-i",
-            str(audio),
+            str(track),
         ]
     if graph_file is not None:
         cmd += ["-filter_complex_script", graph_file]
     else:
         cmd += ["-filter_complex", graph]
     cmd += ["-map", "[vout]"]
-    if audio is not None:
+    if len(audios) == 1:
         audio_index = 2 if draw_cursor else 1
         cmd += [
             "-map",
@@ -129,6 +143,8 @@ def build_command(
             "-af",
             "apad",
         ]
+    elif audios:
+        cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", f"{config.export_audio_bitrate_k}k"]
     cmd += [
         "-c:v",
         "libx264",
@@ -345,8 +361,7 @@ def export_recording(
     planned: list[PlannedFrame] = plan_frames(names, start_ms, end_ms)
     duration_ms = end_ms - start_ms
 
-    audio = paths.audio_path(base)
-    audio_input = audio if audio.is_file() else None
+    audio_inputs = selected_sources(paths, base)
     output = normalise_output(request.output)
     partial = partial_output(output)
     try:
@@ -361,7 +376,7 @@ def export_recording(
         start_ms,
         end_ms,
         len(planned),
-        "with" if audio_input else "without",
+        f"{len(audio_inputs)} track(s) of" if audio_inputs else "without",
         output,
     )
 
@@ -377,7 +392,7 @@ def export_recording(
                 planned, sidecar_cursor_reader(index.info_dir), screen.id, CURSOR_HOTSPOT
             )
             cursor = cursor_expressions(keyframes)
-        graph = filter_graph(cursor)
+        graph = filter_graph(cursor, len(audio_inputs))
         graph_file: str | None = None
         if len(graph) > FILTER_INLINE_MAX_CHARS:
             graph_file = FILTER_SCRIPT_NAME
@@ -388,7 +403,7 @@ def export_recording(
             partial,
             duration_ms,
             start_ms,
-            audio_input,
+            audio_inputs or None,
             request.draw_cursor,
             graph,
             graph_file,

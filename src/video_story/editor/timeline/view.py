@@ -23,6 +23,13 @@ playhead. A white arrow on the ruler marks where Play was last pressed
 A full screen / normal toggle in the audio header stretches the waveform vertically so
 that the loudest sound of the recording reaches the full height of the track: quiet
 speech becomes visible. Only the drawing is scaled; the audio itself is unchanged.
+
+Next to it three icons: a microphone and a speaker switch the two audio tracks (the
+microphone, the sound this computer played) on and off - the waveform shows the sum of
+the tracks that are on, a crossed icon is a track that is off, a dim crossed speaker a
+recording without computer audio - and a pen writing on paper transcribes the audio
+again. The view only reports the clicks (:attr:`audio_track_toggled`,
+:attr:`transcribe_requested`); the window changes the recording.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from PySide6.QtGui import (
     QFont,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QPolygonF,
@@ -42,6 +50,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QScrollBar, QToolTip, QWidget
 
+from video_story.core.audio_mix import COMPUTER, MICROPHONE
 from video_story.core.timeline import format_timestamp
 from video_story.editor.recording import LoadedRecording
 
@@ -51,7 +60,7 @@ from .thumbnails import ThumbnailCache
 from .waveform import BLOCK_MS, WaveformLoader, column_peaks
 
 RULER_H = 26
-HEADER_W = 80  # wide enough for "narration" and its padlock
+HEADER_W = 92  # "narration" and its padlock; the fit toggle and three audio icons
 TRACK_H = 60
 AUDIO_H = TRACK_H  # the audio track is as tall as each screen track
 NARRATION_H = AUDIO_H // 2  # the narration track is half as tall as the audio track
@@ -76,6 +85,20 @@ THUMB_SPACING_PX = 160
 FIT_BUTTON = 20  # the audio header's full screen / normal toggle (square, px)
 FIT_TOOLTIP_ON = "Stretch the waveform so the loudest sound fills the track"
 FIT_TOOLTIP_OFF = "Show the waveform at its real level"
+TRANSCRIBE = "transcribe"  # the pen icon of the audio header
+AUDIO_ICONS = (MICROPHONE, COMPUTER, TRANSCRIBE)  # left to right, after the fit toggle
+AUDIO_ICON = 18  # px, square
+AUDIO_ICON_GAP = 2
+COLOR_TRACK_OFF = QColor("#e05050")  # the slash over a switched-off track
+AUDIO_ICON_TOOLTIPS = {
+    (MICROPHONE, True): "Microphone: in the audio track (click to leave it out)",
+    (MICROPHONE, False): "Microphone: left out of the audio track (click to add it)",
+    (COMPUTER, True): "Computer audio: in the audio track (click to leave it out)",
+    (COMPUTER, False): "Computer audio: left out of the audio track (click to add it)",
+    (COMPUTER, None): "No computer audio was recorded for this recording",
+    (TRANSCRIBE, True): "Transcribe again: delete the narration and create it again "
+    "from the current audio track",
+}
 MIN_TICK_PX = 70
 TICK_STEPS_MS = (
     100, 200, 500, 1000, 2000, 5000, 10_000, 15_000, 30_000, 60_000, 120_000, 300_000,
@@ -192,6 +215,8 @@ class TimelineView(QWidget):
     crop_changed = Signal()
     screen_selected = Signal(str)
     view_changed = Signal()
+    audio_track_toggled = Signal(str)  # "microphone" or "computer" was clicked
+    transcribe_requested = Signal()  # the pen icon was clicked
 
     def __init__(self, model: TimelineModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -213,6 +238,7 @@ class TimelineView(QWidget):
         self._audio_peak: float | None = None  # loudest sample of the loaded audio (0..1)
         self._search = ""  # folded search phrase: matching narration boxes are yellow
         self._hover_segment: tuple[int, int] | None = None  # narration box under the mouse
+        self._hover_icon: str | None = None  # audio header icon under the mouse
         self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -232,13 +258,18 @@ class TimelineView(QWidget):
         self.model.set_screens(recording.screen_ids if recording else [])
         self.model.set_keypoints(recording.keypoints if recording else [])
         self.model.fit(self._body_width())
-        audio = recording.audio if recording else None
         self._audio_peak = None
-        self.waveform.load(audio.path if audio else None)
+        self.waveform.load(recording.audio if recording else None)
         # Every track must stay visible: the splitter may not shrink the timeline below it.
         self.setMinimumHeight(self.sizeHint().height())
         self.updateGeometry()
         self._after_view_change()
+
+    def reload_audio(self) -> None:
+        """The audio tracks switched on changed: draw the waveform of the new mix."""
+        self._audio_peak = None
+        self.waveform.load(self.recording.audio if self.recording else None)
+        self.update()
 
     def set_transcription(
         self, state: str | None, transcribed_ms: int = 0, eta_s: float | None = None
@@ -310,6 +341,50 @@ class TimelineView(QWidget):
             return None
         audio = self.audio_rect()
         return QRect(audio.x() + 6, audio.bottom() - 5 - FIT_BUTTON, FIT_BUTTON, FIT_BUTTON)
+
+    def audio_icon_rects(self) -> dict[str, QRect]:
+        """The microphone, speaker and pen icons of the audio header (none without a
+        recording that has audio, e.g. an archived one)."""
+        recording = self.recording
+        if recording is None or recording.archived or not recording.tracks:
+            return {}
+        audio = self.audio_rect()
+        centre_y = audio.bottom() - 5 - FIT_BUTTON / 2
+        x = audio.x() + 6 + FIT_BUTTON + AUDIO_ICON_GAP
+        rects: dict[str, QRect] = {}
+        for name in AUDIO_ICONS:
+            rects[name] = QRect(x, int(centre_y - AUDIO_ICON / 2), AUDIO_ICON, AUDIO_ICON)
+            x += AUDIO_ICON + AUDIO_ICON_GAP
+        return rects
+
+    def audio_icon_state(self, name: str) -> bool | None:
+        """``True`` on, ``False`` off, ``None`` not available (no such track)."""
+        recording = self.recording
+        if recording is None:
+            return None
+        if name == TRANSCRIBE:
+            return True
+        if not recording.has_track(name):
+            return None
+        return recording.selection.enabled(name)
+
+    def audio_icon_at(self, pos: QPoint) -> str | None:
+        for name, rect in self.audio_icon_rects().items():
+            if rect.adjusted(-1, -1, 1, 1).contains(pos):
+                return name
+        return None
+
+    def audio_icon_tooltip(self, name: str) -> str:
+        return AUDIO_ICON_TOOLTIPS[(name, self.audio_icon_state(name))]
+
+    def click_audio_icon(self, name: str) -> None:
+        """What a click on an icon does (emits the request; unavailable icons do nothing)."""
+        if self.audio_icon_state(name) is None:
+            return
+        if name == TRANSCRIBE:
+            self.transcribe_requested.emit()
+        else:
+            self.audio_track_toggled.emit(name)
 
     def _on_fit_button(self, pos: QPoint) -> QRect | None:
         fit = self.fit_button_rect()
@@ -543,6 +618,10 @@ class TimelineView(QWidget):
             self.toggle_audio_fit()
             self._show_fit_tooltip(event.globalPosition().toPoint(), fit)
             return
+        icon = self.audio_icon_at(pos)
+        if icon is not None:
+            self.click_audio_icon(icon)
+            return
         self.setFocus()
         handle = self._handle_at(pos)
         on_playhead = (
@@ -576,6 +655,24 @@ class TimelineView(QWidget):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 self._show_fit_tooltip(event.globalPosition().toPoint(), fit)
                 return
+            icon = self.audio_icon_at(pos)
+            if icon is not None:
+                available = self.audio_icon_state(icon) is not None
+                self.setCursor(
+                    Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor
+                )
+                rect = self.audio_icon_rects()[icon]
+                QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    self.audio_icon_tooltip(icon),
+                    self,
+                    rect.adjusted(-1, -1, 1, 1),
+                )
+                self._hover_icon = icon
+                return
+            if self._hover_icon is not None:
+                self._hover_icon = None
+                QToolTip.hideText()
             near_handle = self._handle_at(pos) is not None
             self.setCursor(
                 Qt.CursorShape.SizeHorCursor if near_handle else Qt.CursorShape.ArrowCursor
@@ -620,9 +717,14 @@ class TimelineView(QWidget):
             QToolTip.hideText()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
-        if self._hover_keypoint is not None or self._hover_segment is not None:
+        if (
+            self._hover_keypoint is not None
+            or self._hover_segment is not None
+            or self._hover_icon is not None
+        ):
             self._hover_keypoint = None
             self._hover_segment = None
+            self._hover_icon = None
             QToolTip.hideText()
         super().leaveEvent(event)
 
@@ -662,6 +764,7 @@ class TimelineView(QWidget):
         for screen_id, rect in self.track_rects():
             self._paint_video_track(painter, screen_id, rect)
         self._paint_audio_track(painter, self.audio_rect())
+        self._paint_audio_icons(painter)
         self._paint_narration_track(painter, self.narration_rect())
         self._paint_crop(painter, canvas)
         self._paint_keypoints(painter)
@@ -780,6 +883,88 @@ class TimelineView(QWidget):
         painter.setPen(QPen(self.colors["tick"]))
         painter.drawLine(body.x(), int(mid), body.right(), int(mid))
         self._paint_fit_button(painter)
+
+    def _paint_audio_icons(self, painter: QPainter) -> None:
+        """Microphone, speaker (crossed when switched off) and the pen."""
+        rects = self.audio_icon_rects()
+        if not rects:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for name, rect in rects.items():
+            state = self.audio_icon_state(name)
+            color = self.colors["text"] if state else self.colors["text_dim"]
+            r = QRectF(rect).adjusted(2.0, 2.0, -2.0, -2.0)
+            pen = QPen(color, 1.5)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if name == MICROPHONE:
+                self._paint_microphone(painter, r, color)
+            elif name == COMPUTER:
+                self._paint_speaker(painter, r, color)
+            else:
+                self._paint_pen(painter, r, color)
+            if name != TRANSCRIBE and not state:
+                slash = QPen(COLOR_TRACK_OFF if state is False else color, 1.8)
+                slash.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(slash)
+                painter.drawLine(r.topLeft(), r.bottomRight())
+        painter.restore()
+
+    @staticmethod
+    def _paint_microphone(painter: QPainter, r: QRectF, color: QColor) -> None:
+        w, h = r.width(), r.height()
+        capsule = QRectF(r.x() + w * 0.34, r.y(), w * 0.32, h * 0.58)
+        painter.setBrush(QBrush(color))
+        painter.drawRoundedRect(capsule, w * 0.16, w * 0.16)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        holder = QRectF(r.x() + w * 0.18, r.y() + h * 0.12, w * 0.64, h * 0.6)
+        painter.drawArc(holder, 180 * 16, 180 * 16)  # the lower half: a U around it
+        painter.drawLine(QPointF(r.center().x(), holder.bottom()),
+                         QPointF(r.center().x(), r.bottom()))  # fmt: skip
+        painter.drawLine(QPointF(r.x() + w * 0.3, r.bottom()),
+                         QPointF(r.x() + w * 0.7, r.bottom()))  # fmt: skip
+
+    @staticmethod
+    def _paint_speaker(painter: QPainter, r: QRectF, color: QColor) -> None:
+        w, h = r.width(), r.height()
+        cone = QPolygonF(
+            [
+                QPointF(r.x(), r.y() + h * 0.36),
+                QPointF(r.x() + w * 0.22, r.y() + h * 0.36),
+                QPointF(r.x() + w * 0.5, r.y() + h * 0.1),
+                QPointF(r.x() + w * 0.5, r.y() + h * 0.9),
+                QPointF(r.x() + w * 0.22, r.y() + h * 0.64),
+                QPointF(r.x(), r.y() + h * 0.64),
+            ]
+        )
+        painter.setBrush(QBrush(color))
+        painter.drawPolygon(cone)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        centre = QPointF(r.x() + w * 0.5, r.center().y())
+        for radius in (w * 0.2, w * 0.4):
+            arc = QRectF(centre.x() - radius, centre.y() - radius, 2 * radius, 2 * radius)
+            painter.drawArc(arc, -45 * 16, 90 * 16)
+
+    @staticmethod
+    def _paint_pen(painter: QPainter, r: QRectF, color: QColor) -> None:
+        """A sheet of paper with lines of text and a pen writing the last one."""
+        w, h = r.width(), r.height()
+        painter.drawRect(QRectF(r.x(), r.y() + h * 0.08, w * 0.62, h * 0.9))
+        for i, length in enumerate((0.42, 0.42, 0.22)):
+            y = r.y() + h * (0.32 + i * 0.2)
+            painter.drawLine(QPointF(r.x() + w * 0.1, y), QPointF(r.x() + w * (0.1 + length), y))
+        nib = QPointF(r.x() + w * 0.42, r.y() + h * 0.8)
+        top = QPointF(r.right(), r.y())
+        body = QPainterPath()
+        body.moveTo(nib)
+        body.lineTo(QPointF(top.x() - w * 0.14, top.y()))
+        body.lineTo(QPointF(top.x(), top.y() + h * 0.14))
+        body.closeSubpath()
+        painter.setBrush(QBrush(color))
+        painter.drawPath(body)
 
     def _paint_narration_track(self, painter: QPainter, rect: QRect) -> None:
         """The locked narration track: a box wherever a subtitle has words (none in the
@@ -1041,6 +1226,8 @@ class TimelineView(QWidget):
 
 __all__ = [
     "AUDIO_H",
+    "AUDIO_ICONS",
+    "AUDIO_ICON_TOOLTIPS",
     "COLOR_KEYPOINT",
     "COLOR_MATCH",
     "COLOR_NARRATION",
@@ -1060,6 +1247,7 @@ __all__ = [
     "PROGRESS_H",
     "RULER_H",
     "TRACK_H",
+    "TRANSCRIBE",
     "TRANSCRIBING_LABEL",
     "TimelineView",
     "format_eta",

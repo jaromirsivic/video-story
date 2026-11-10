@@ -285,6 +285,14 @@ def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
         raise CliError(exc.code, str(exc)) from exc
 
 
+def _require_audio(paths: Any, base: Path) -> None:
+    """A recording without any audio track (microphone or computer) cannot be transcribed."""
+    from video_story.core.audio_mix import has_audio
+
+    if not has_audio(paths, base):
+        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
+
+
 def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
     """Re-run transcription for an existing recording directory."""
     from video_story.core.manifest import read_manifest, write_manifest
@@ -298,8 +306,7 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
     base = paths.current_dir
-    if not paths.audio_path(base).exists():
-        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
+    _require_audio(paths, base)
 
     def progress(fraction: float, text: str) -> None:
         log.info("%3d%% %s", int(fraction * 100), text)
@@ -338,8 +345,7 @@ def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
     base = paths.current_dir
-    if not paths.audio_path(base).exists():
-        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
+    _require_audio(paths, base)
 
     def emit_event(event: dict[str, Any]) -> None:
         sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -393,8 +399,7 @@ def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
         threading.Thread(target=watch_stdin, name="stdin-eof", daemon=True).start()
 
     if not transcript_status(paths.transcript_json_path(base)).complete:
-        if not paths.audio_path(base).exists():
-            raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
+        _require_audio(paths, base)
         emit_event({"event": "phase", "phase": "transcribing"})
         recording = LoadedRecording.load(paths)
 

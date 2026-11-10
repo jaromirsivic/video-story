@@ -17,7 +17,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -177,8 +177,14 @@ def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
 
 
-def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
-    """Decode ``src`` to 16 kHz mono 16-bit PCM WAV at ``dst`` (whisper input)."""
+def convert_to_16k_mono(ffmpeg: Path, src: Path | Sequence[Path], dst: Path) -> None:
+    """Decode ``src`` to 16 kHz mono 16-bit PCM WAV at ``dst`` (whisper input).
+
+    Several sources (the microphone and the computer's sound) are added together
+    (``amix`` without level normalisation, as long as the longest of them)."""
+    sources = [src] if isinstance(src, Path) else list(src)
+    if not sources:
+        raise ValueError("no audio source to convert")
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(ffmpeg),
@@ -189,8 +195,18 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
         "-y",
         "-protocol_whitelist",
         "file,pipe",
-        "-i",
-        str(src),
+    ]
+    for source in sources:
+        cmd += ["-i", str(source)]
+    if len(sources) > 1:
+        inputs = "".join(f"[{i}:a]" for i in range(len(sources)))
+        cmd += [
+            "-filter_complex",
+            f"{inputs}amix=inputs={len(sources)}:duration=longest:normalize=0[mix]",
+            "-map",
+            "[mix]",
+        ]
+    cmd += [
         "-vn",
         "-sn",
         "-dn",
@@ -214,7 +230,8 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
         raise FfmpegError(f"ffmpeg failed with exit code {proc.returncode}: {tail}")
     if not dst.exists() or dst.stat().st_size <= EMPTY_WAV_MAX_BYTES:
         tail = "\n".join((proc.stderr or "").strip().splitlines()[-10:])
-        raise FfmpegError(f"ffmpeg produced no audio for {src.name}: {tail or 'empty output'}")
+        names = ", ".join(source.name for source in sources)
+        raise FfmpegError(f"ffmpeg produced no audio for {names}: {tail or 'empty output'}")
 
 
 # Download ---------------------------------------------------------------------

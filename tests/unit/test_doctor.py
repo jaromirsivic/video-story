@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from video_story.capture import computer_audio
 from video_story.capture.audio_recorder import AudioDevice, AudioError
 from video_story.core.config import Config
 from video_story.core.screens import RawScreen
@@ -57,6 +58,11 @@ def healthy(tmp_path: Path, monkeypatch) -> tuple[Config, FakePlatform]:
     monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: tmp_path / "ffmpeg")
     monkeypatch.setattr(doctor, "ffmpeg_version", lambda path: "7.1")
     monkeypatch.setattr(doctor, "config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr(
+        computer_audio,
+        "computer_audio_support",
+        lambda: computer_audio.ComputerAudioSupport(True, "", "Speakers"),
+    )
     cfg = Config(recording_folder=tmp_path / "rec", whisper_model_path=model)
     return cfg, platform
 
@@ -75,6 +81,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
         "platform",
         "screens",
         "audio",
+        "computer_audio",
         "ffmpeg",
         "model",
         "backend",
@@ -85,6 +92,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
     assert set(checks["python"]) == {"name", "ok", "detail", "hint"}
     assert "screen1 1920x1080 (primary)" in checks["screens"]["detail"] and platform.prepared
     assert "USB Mic" in checks["audio"]["detail"]
+    assert checks["computer_audio"]["detail"] == "recorded from Speakers (loopback)"
     assert checks["ffmpeg"]["detail"].startswith("ffmpeg 7.1")
     assert "SHA-256 verified" in checks["model"]["detail"]
     assert report["ffmpeg"] == str(tmp_path / "ffmpeg")
@@ -202,3 +210,14 @@ def test_doctor_unwritable_recording_folder(healthy, tmp_path: Path):
     blocker.write_text("x", encoding="utf-8")
     check = _by_name(doctor.run_doctor(cfg.with_values(recording_folder=str(blocker))))
     assert check["recording_folder"]["ok"] is False and check["recording_folder"]["hint"]
+
+
+def test_computer_audio_is_optional_and_never_fails_the_doctor(monkeypatch):
+    monkeypatch.setattr(
+        computer_audio,
+        "computer_audio_support",
+        lambda: computer_audio.ComputerAudioSupport(False, "no audio output device"),
+    )
+    check = doctor.check_computer_audio(Config())
+    assert check.ok and "no audio output device" in check.detail
+    assert "switched off" in doctor.check_computer_audio(Config(computer_audio=False)).detail

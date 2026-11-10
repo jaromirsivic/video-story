@@ -120,6 +120,17 @@ class TranscriptionManager(QObject):
         self._launch(recording)
         return True
 
+    def restart(self, recording: LoadedRecording) -> None:
+        """Transcribe ``recording`` again from where its (just reset) transcript stands,
+        even while a worker - of this recording or another - is still running: that one
+        is killed and the new one starts as soon as it has ended."""
+        if self._process is not None:
+            self.stop()
+            self._pending = recording
+            return
+        self._pending = None
+        self._launch(recording)
+
     def adopt(self, recording: LoadedRecording) -> None:
         """The window shows a fresh ``LoadedRecording`` of the recording being
         transcribed: segments stored since it was loaded are merged into it and the

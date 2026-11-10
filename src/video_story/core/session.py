@@ -4,10 +4,15 @@ Layout inside the Recording Folder::
 
     <recording_folder>/
       .work/<session_id>/      # while recording / processing
-        state.json, lock, ui.log, recording.log, audio/audio.wav, frames/, frames_info/
+        state.json, lock, ui.log, recording.log, audio/, frames/, frames_info/
       <session_id>/            # once the recording was saved (Stop, auto stop, recovery)
         manifest.json, transcript.txt, transcript.json, recording.log, crop.json,
-        instructions.txt, audio/audio.wav, frames/, frames_info/, archive/
+        instructions.txt, audio/, frames/, frames_info/, archive/
+
+``audio/`` holds the microphone (``audio.wav``), the sound this computer played
+(``computer.wav``, Windows only, when it could be recorded) and ``tracks.json``, the
+tracks the editor plays, shows, transcribes and renders (see
+:mod:`video_story.core.audio_mix`).
 
 ``frames/`` holds only the images (``<seconds>_<millis>_<screenId>.<png|jpg>``),
 ``frames_info/`` the sidecar JSON of every frame (same name, ``.json``). Archiving
@@ -45,6 +50,8 @@ FRAMES_INFO_DIR_NAME = "frames_info"
 AUDIO_DIR_NAME = "audio"
 AUDIO_FILE_NAME = "audio.wav"
 AUDIO_16K_FILE_NAME = "audio16k.wav"
+COMPUTER_AUDIO_FILE_NAME = "computer.wav"  # what this computer played (loopback)
+AUDIO_TRACKS_FILE_NAME = "tracks.json"  # which audio tracks are switched on
 ARCHIVE_DIR_NAME = "archive"
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = "lock"
@@ -141,6 +148,14 @@ class SessionPaths:
 
     def audio_path(self, base: Path | None = None) -> Path:
         return self.audio_dir(base) / AUDIO_FILE_NAME
+
+    def computer_audio_path(self, base: Path | None = None) -> Path:
+        """The sound this computer played while recording (``audio/computer.wav``)."""
+        return self.audio_dir(base) / COMPUTER_AUDIO_FILE_NAME
+
+    def audio_tracks_path(self, base: Path | None = None) -> Path:
+        """Which audio tracks are switched on in the editor (``audio/tracks.json``)."""
+        return self.audio_dir(base) / AUDIO_TRACKS_FILE_NAME
 
     def audio_16k_path(self, base: Path | None = None) -> Path:
         return self.audio_dir(base) / AUDIO_16K_FILE_NAME
@@ -315,6 +330,8 @@ __all__ = [
     "AUDIO_16K_FILE_NAME",
     "AUDIO_DIR_NAME",
     "AUDIO_FILE_NAME",
+    "AUDIO_TRACKS_FILE_NAME",
+    "COMPUTER_AUDIO_FILE_NAME",
     "CROP_FILE_NAME",
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",

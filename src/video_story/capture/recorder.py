@@ -2,7 +2,9 @@
 
 The :class:`Recorder` owns a capture thread that ticks every ``capture_interval_ms``,
 reads the cursor once, grabs every screen and hands the raw frames to a bounded
-thread pool for encoding and writing. Audio is recorded by :class:`AudioRecorder`.
+thread pool for encoding and writing. Audio is recorded by :class:`AudioRecorder`; what
+the computer plays meanwhile by :class:`ComputerAudioRecorder` (Windows; when it is
+switched on and can be opened - a failure there never stops the recording).
 The recording never pauses; it ends on :meth:`stop`, :meth:`discard`, when the
 auto-stop limit is reached or when less than :data:`MIN_FREE_BYTES` are left on the disk
 of the recording folder (``stop_reason`` says which).
@@ -33,7 +35,13 @@ from typing import Any
 from video_story import __version__
 from video_story.core.config import Config
 from video_story.core.cursor import CursorPosition, locate_cursor
-from video_story.core.manifest import AudioInfo, FramesInfo, Manifest, write_manifest
+from video_story.core.manifest import (
+    COMPUTER_AUDIO_FILE,
+    AudioInfo,
+    FramesInfo,
+    Manifest,
+    write_manifest,
+)
 from video_story.core.naming import frame_filename, sidecar_filename
 from video_story.core.screens import Screen, assign_screen_ids
 from video_story.core.session import SessionPaths, now_iso
@@ -41,6 +49,7 @@ from video_story.core.timeline import RecordingClock
 from video_story.platform.base import Platform, PlatformError
 
 from .audio_recorder import AudioError, AudioRecorder, AudioResult
+from .computer_audio import ComputerAudioError, ComputerAudioRecorder
 from .screen_grabber import RawFrame, ScreenGrabber, encode_frame
 
 log = logging.getLogger(__name__)
@@ -106,6 +115,7 @@ class RecordingSummary:
     keypoints: list[int] = field(default_factory=list)
     failed_grabs: int = 0  # screen grabs that failed (that screen has no frame then)
     stop_reason: str | None = None  # a StopReason value, None when the user stopped
+    computer_audio: AudioResult | None = None  # what the computer played (loopback)
 
     def to_manifest(
         self, config: Config, platform_name: str, notes: list[str] | None = None
@@ -118,6 +128,15 @@ class RecordingSummary:
                 channels=self.audio.channels,
                 duration_ms=self.audio.duration_ms,
             )
+        computer = None
+        if self.computer_audio:
+            computer = AudioInfo(
+                file=COMPUTER_AUDIO_FILE,
+                device=self.computer_audio.device,
+                sample_rate=self.computer_audio.sample_rate,
+                channels=self.computer_audio.channels,
+                duration_ms=self.computer_audio.duration_ms,
+            )
         return Manifest(
             session_id=self.session_id,
             started_at=self.started_at,
@@ -128,6 +147,7 @@ class RecordingSummary:
             jpeg_quality=config.jpeg_quality if config.image_format == "jpeg" else None,
             screens=self.screens,
             audio=audio,
+            computer_audio=computer,
             frames=FramesInfo(
                 count=self.frame_count,
                 dropped_ticks=self.dropped_ticks,
@@ -185,6 +205,8 @@ class Recorder:
         self._pending = threading.Semaphore(MAX_PENDING_TICKS)
         self._audio: AudioRecorder | None = None
         self._audio_result: AudioResult | None = None
+        self._computer: ComputerAudioRecorder | None = None
+        self._computer_result: AudioResult | None = None
         self._frame_count = 0
         self._dropped_ticks = 0
         self._failed_grabs = 0
@@ -295,6 +317,15 @@ class Recorder:
                 frames_written=0,
                 dropped_blocks=0,
             )
+        computer = None
+        if self._computer is not None:
+            computer = AudioResult(
+                device=self._computer.device,
+                sample_rate=self._computer.sample_rate,
+                channels=self._computer.channels,
+                frames_written=0,
+                dropped_blocks=0,
+            )
         summary = RecordingSummary(
             session_id=self.paths.session_id,
             started_at=self.started_at,
@@ -306,6 +337,7 @@ class Recorder:
             audio=audio,
             auto_stopped=False,
             keypoints=self.keypoints,
+            computer_audio=computer,
         )
         manifest = summary.to_manifest(self.config, self.platform.name)
         manifest.finished_at = None
@@ -342,6 +374,7 @@ class Recorder:
                 self._pool.shutdown(wait=False)
                 self._pool = None
                 raise
+            self._start_computer_audio()
         # The timeline starts once the audio stream is live, so audio and frames align.
         self.started_at = now_iso()
         self.clock.start()
@@ -368,6 +401,11 @@ class Recorder:
                 self._error = self._error or f"audio stop failed: {exc}"
         if self._audio_result is not None and self._audio_result.error:
             self._error = self._error or self._audio_result.error
+        if self._computer is not None and self._computer_result is None:
+            try:
+                self._computer_result = self._computer.stop()
+            except Exception:  # pragma: no cover - never let this track fail the recording
+                log.exception("computer audio stop failed")
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -385,6 +423,7 @@ class Recorder:
             keypoints=self.keypoints,
             failed_grabs=self.failed_grabs,
             stop_reason=str(self._stop_reason) if self._stop_reason else None,
+            computer_audio=self._computer_result,
         )
         self._on_event(RecorderEvent.STOPPED, "")
         log.info(
@@ -395,6 +434,28 @@ class Recorder:
             self._auto_stopped,
         )
         return self._summary
+
+    def _start_computer_audio(self) -> None:
+        """Start recording what the computer plays, when switched on; a failure is only
+        logged (the recording then has no computer track)."""
+        if not self.config.computer_audio or self._audio is None:
+            return
+        recorder = ComputerAudioRecorder(
+            self.paths.computer_audio_path(self.paths.work_dir), self._audio.sample_rate
+        )
+        try:
+            recorder.start()
+        except Exception as exc:  # never let this track stop the recording
+            if isinstance(exc, ComputerAudioError):
+                log.warning("computer audio is not recorded: %s", exc)
+            else:  # pragma: no cover
+                log.exception("computer audio is not recorded")
+            try:
+                recorder.path.unlink(missing_ok=True)
+            except OSError:  # still held by a stream that did not open in time
+                log.debug("cannot remove %s", recorder.path, exc_info=True)
+            return
+        self._computer = recorder
 
     def discard(self) -> None:
         """Stop and delete every file of this recording."""

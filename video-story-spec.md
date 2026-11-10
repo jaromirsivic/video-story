@@ -52,6 +52,7 @@ Dialog **Settings** nabízí položky v tomto pořadí; ostatní klíče `config
 | Image Format | `image_format` | JPEG | JPEG, PNG |
 | JPEG Quality | `jpeg_quality` | 70 % | 20–100, jen pro JPEG |
 | Audio Input | `audio_input` | systémový výchozí vstup | – |
+| Computer Audio (Record computer audio) | `computer_audio` | zapnuto | zatím jen Windows; jinde zašedlé |
 | Auto Stop Recording | `auto_stop_minutes` | 120 min | 1–1440 |
 | Archive After | `archive_after_days` | 30 dní | 1–3650 |
 | Recordings | – | **Open Folder**, **Delete All Recordings** (s potvrzením; relace otevřeného okna se nemaže) | – |
@@ -63,6 +64,7 @@ Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho re
 ## 6. Co se zaznamenává
 
 - **Zvuk:** `audio/audio.wav`, 16bit PCM, mono, vzorkovací frekvence zařízení.
+- **Zvuk počítače:** `audio/computer.wav` – co počítač během nahrávání přehrával (video na pozadí, hovor); 16bit PCM, mono, stejná vzorkovací frekvence jako mikrofon, začíná ve stejném okamžiku. Zatím jen Windows (WASAPI loopback výchozího výstupního zařízení, balíček `soundcard`); na Linuxu a macOS stopa nevzniká, kód je na ně připravený (`capture/computer_audio.py`). Stopa se drží hodin nahrávky: když nic nehraje, doplní se ticho, a když se zařízení rozejde s hodinami o víc než 100 ms, ticho se doplní nebo přebytek zahodí. Když výstup nejde otevřít (vypnuto v Settings, žádné výstupní zařízení), nahrávka prostě nemá druhou stopu; selhání této stopy nahrávání nikdy nezastaví. Manifest ji popisuje v `computer_audio` (jinak `null`).
 - **Obrazovky:** v každém intervalu snímek každé obrazovky, i nezměněný. Název `<sekundy>_<ms>_screenN.<jpg|png>`, čas od začátku nahrávky. `screen1` je primární obrazovka, další jsou řazené podle polohy.
 - **Doprovodný JSON** ke každému snímku (stejný název s příponou `.json`, ve složce `frames_info/`; ve `frames/` jsou jen obrázky): obrazovka a poloha kurzoru v pixelech jejího snímku (počátek vlevo nahoře), dokončené kresby, právě kreslený tvar, zoom, zkopírovaný text.
 - **Kresby:** obdélník (výchozí nástroj), štětec, šipka; pravé tlačítko myši kreslí vždy šipku; 8 barev, výchozí červená. `Esc` kreslení opustí, `Ctrl+Z` vrátí, `Ctrl+Alt+C` smaže vše. Kolečko myši při kreslení přiblíží obrazovku až na 800 %. Kresba je vidět ve snímcích; do JSONu se tvar dostane až po puštění tlačítka myši, s identifikátorem a časy stisku a puštění. Nahrávací okno zůstává nad kreslicí vrstvou.
@@ -98,6 +100,8 @@ Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story�
 - **Vyhledávání** pod seznamem: textové pole, vedle něj tlačítko s lupou a tlačítko **Refresh** jen s ikonou kruhové šipky (F5). Enter nebo lupa hledá slovo či frázi přesně, jak je napsaná, ale bez ohledu na velká/malá písmena a diakritiku (`prilis` najde `příliš`) v titulcích (přepisu). Nejdřív se prohledá zobrazená nahrávka (její odpovídající obdélníčky na stopě narration hned zežloutnou), potom ostatní ve vlákně na pozadí; každá nahrávka s nálezem dostane v seznamu žlutý rámeček a po kliknutí na ni jsou žluté její odpovídající obdélníčky. V titulku pod náhledem je hledaná fráze tučně a červeně. Vymazání pole hledání zruší. Fráze se hledá v rámci jednoho titulku.
 - **Náhled** s transportem (na In, krok zpět, přehrát, stop, krok vpřed, na Out; Stop se vrací tam, kde bylo naposledy stisknuto Play), titulky pod náhledem (oblast titulku má vždy výšku aspoň dvou řádků, takže jeden řádek textu zabírá stejně místa jako dva a náhled nad ním neposkakuje; nejvýš pět řádků, pak se posouvá), kolečko myši přibližuje až na 800 %, přiblížený obraz se posouvá tažením levým i prostředním tlačítkem, přepínač světlého a tmavého vzhledu. Plocha kolem snímku nese nevýrazný diagonální vodoznak `screenN ŠxV` (opakovaný), barevně odlišený podle obrazovky: screen1 šedá, screen2 modrá, screen3 zelená, screen4 červená, screen5 znovu šedá atd. (tmavší text na světlém podkladu; v tmavém motivu je modrá screen2 světlejší než ostatní, aby nesplývala s černou).
 - **Časová osa:** jedna stopa na obrazovku s miniaturami, jedna zvuková stopa, pod ní zamčená stopa **narration** (zámeček v hlavičce, poloviční výška zvukové stopy, nejde upravovat ani posouvat): obdélníček všude, kde titulek obsahuje text, v pauzách nic; od přiblížení 40 px/s ukazují obdélníčky text titulku zkrácený trojtečkou, najetí myší ukáže celý text, zoom `-`/posuvník/`+` u pravého okraje (bez tlačítka Fit; levý konec posuvníku je celá nahrávka, `Ctrl+0` tam skočí). Od náhledu ji odděluje tenká linka (táhlo rozdělovače). Kliknutí nebo tažení červené čáry po puštění tlačítka myši přesune pod ni i tmavý trojúhelník na pravítku (místo, odkud Play začne a kam se Stop vrací). Úchyty **In/Out** (nebo klávesy `I`/`O`; pole In, Out a délka ukazují `HH:MM:SS.ss`) nastavují crop společný pro všechny obrazovky; ukládá se do `crop.json` při každé změně a přichytává se ke keypointům. Kliknutí na stopu vybírá obrazovku pro náhled a export.
+- **Zvukové stopy:** v hlavičce zvukové stopy jsou za přepínačem roztažení tři ikony. **Mikrofon** a **reproduktor** zapínají a vypínají stopu mikrofonu a stopu zvuku počítače; obě jsou ve výchozím stavu zapnuté a zvuková stopa pak ukazuje i přehrává jejich součet (smíšenou vlnu). Vypnutá stopa má ikonu přeškrtnutou červeně; nahrávka bez zvuku počítače má reproduktor zašedlý a přeškrtnutý a nejde zapnout. Když jsou vypnuté obě, je ve stopě ticho. Volba se ukládá do `audio/tracks.json` a platí pro přehrávání, vlnu, přepis, Render i archivaci. Přepnutí stopy hned změní vlnu i zvuk a vzápětí se zeptá, jako by uživatel klikl na pero.
+- **Pero (nový přepis):** ikona pera píšícího na papír po potvrzení (okno „Transcribe again“: narration se smaže a vytvoří znovu přepisem aktuální zvukové stopy, opravy z Edit se ztratí; vypíše, zda je zahrnut mikrofon a zvuk počítače, a když není zahrnuto nic, že narration bude prázdná) smaže přepis a spustí přepis od začátku – i když předchozí přepis ještě běží (ten se ukončí). Bez potvrzení se nic nemění. Render a Process čekají na nový přepis. Archivovaná nahrávka ikony nemá.
 - **Přepis** běží na pozadí editoru (Whisper large-v3-turbo přes whisper.cpp, CPU, automatický jazyk). Zelená šipka pod stopou narration ukazuje postup (ve světlém motivu tmavší zelená) a odhad zbývajícího času, titulky přibývají průběžně. Zavření editoru přepis přeruší, příští výběr nahrávky naváže. Když přepis selže, tlačítko **Retry transcription** ho spustí znovu od místa, kde skončil. Halucinované titulkové kredity se zahazují.
 - **Edit** opraví text titulku (časy zůstávají); změna se zapíše do `transcript.json` i `transcript.txt`.
 - **Instructions:** hlavní pokyny pro agenta k celé nahrávce, uložené v `instructions.txt`; šablony Draft Intent, Create Plan a Implement.
@@ -166,7 +170,9 @@ Další příkazy: `describe`, `status`, `sessions`, `transcribe`, `export`, `co
     manifest.json, recording.log
     transcript.txt, transcript.json     (complete false, dokud editor přepisuje)
     crop.json, instructions.txt         (jen pokud je uživatel nastavil)
-    audio/audio.wav
+    audio/audio.wav                     mikrofon
+    audio/computer.wav                  zvuk počítače (Windows, pokud šel nahrát)
+    audio/tracks.json                   zapnuté stopy (jen pokud je uživatel přepnul)
     frames/<s>_<ms>_screenN.jpg         jen obrázky
     frames_info/<s>_<ms>_screenN.json   doprovodné JSONy
     archive/                            po archivaci: screenN.mp4, .srt, .jpg, archive.json
@@ -181,4 +187,5 @@ Nic se nemaže automaticky. Nahrávky starší než **Archive After** se při st
 - MCP server přes HTTP nemá autentizaci.
 - Odpojení nebo připojení monitoru během nahrávání se nepromítne do rozložení obrazovek.
 - Zvuk a snímky nemají společné hodiny; odchylka bývá do půl sekundy.
+- Zvuk počítače se nahrává jen na Windows. Bez sluchátek zachytí mikrofon i zvuk z reproduktorů, takže ve smíšené stopě je zvuk počítače dvakrát (s malým zpožděním). Změna výchozího výstupního zařízení během nahrávání (připojená sluchátka) se do stopy nepromítne.
 - Další otevřené body jsou v [video-story-review.md](video-story-review.md).

@@ -75,6 +75,21 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
     assert abs(summary.recorded_duration_ms - 2000) < 400
     assert manifest.frames.count == len(frames)
 
+    # What the computer played: a second track at the microphone's rate, as long as the
+    # microphone (it is kept on the recording clock even while nothing plays).
+    from video_story.capture.computer_audio import computer_audio_support
+
+    if computer_audio_support().supported:
+        computer = paths.computer_audio_path(final)
+        assert computer.is_file() and manifest.computer_audio is not None
+        with wave.open(str(computer), "rb") as wav:
+            assert wav.getnchannels() == 1 and wav.getsampwidth() == 2
+            assert wav.getframerate() == manifest.audio.sample_rate
+            computer_ms = wav.getnframes() * 1000 / wav.getframerate()
+        assert abs(computer_ms - duration_ms) < 300, (computer_ms, duration_ms)
+    else:
+        assert manifest.computer_audio is None
+
 
 def test_jpeg_format_and_auto_stop(tmp_path: Path):
     paths, summary, _ = _record(

@@ -9,11 +9,18 @@ from typing import Any
 
 from .fileio import atomic_write_text
 from .screens import Screen
-from .session import AUDIO_DIR_NAME, AUDIO_FILE_NAME, FRAMES_DIR_NAME, FRAMES_INFO_DIR_NAME
+from .session import (
+    AUDIO_DIR_NAME,
+    AUDIO_FILE_NAME,
+    COMPUTER_AUDIO_FILE_NAME,
+    FRAMES_DIR_NAME,
+    FRAMES_INFO_DIR_NAME,
+)
 
 SCHEMA_VERSION = 2  # 2: audio/audio.wav, frames/ images only, sidecars in frames_info/
 
 AUDIO_FILE = f"{AUDIO_DIR_NAME}/{AUDIO_FILE_NAME}"
+COMPUTER_AUDIO_FILE = f"{AUDIO_DIR_NAME}/{COMPUTER_AUDIO_FILE_NAME}"
 
 
 @dataclass
@@ -32,6 +39,16 @@ class AudioInfo:
             "channels": self.channels,
             "duration_ms": self.duration_ms,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], default_file: str = AUDIO_FILE) -> AudioInfo:
+        return cls(
+            file=data.get("file", default_file),
+            device=data.get("device"),
+            sample_rate=int(data.get("sample_rate", 0)),
+            channels=int(data.get("channels", 1)),
+            duration_ms=int(data.get("duration_ms", 0)),
+        )
 
 
 @dataclass
@@ -92,6 +109,9 @@ class Manifest:
     jpeg_quality: int | None
     screens: list[Screen]
     audio: AudioInfo = field(default_factory=AudioInfo)
+    # What this computer played meanwhile (``audio/computer.wav``); None when it was not
+    # recorded (switched off, not Windows, no output device).
+    computer_audio: AudioInfo | None = None
     frames: FramesInfo = field(default_factory=FramesInfo)
     transcript: TranscriptInfo | None = None
     auto_stopped: bool = False
@@ -134,6 +154,10 @@ class Manifest:
             "cursor": "each frame sidecar JSON holds {screen, x, y}: the screen the cursor was on "
             "and its position in pixels of that screen's image, origin top-left",
             "audio": self.audio.to_dict(),
+            "computer_audio": self.computer_audio.to_dict() if self.computer_audio else None,
+            "audio_note": "audio is the microphone; computer_audio (when recorded) is what "
+            "this computer played; both start at 0 ms. The transcript is made from the "
+            "tracks switched on in the editor (audio/tracks.json, both by default)",
             "frames": self.frames.to_dict(),
             "transcript": self.transcript.to_dict() if self.transcript else None,
             "keypoints": self.keypoints_to_dict(),
@@ -159,13 +183,10 @@ class Manifest:
             image_format=data.get("image_format", "png"),
             jpeg_quality=data.get("jpeg_quality"),
             screens=[Screen.from_manifest(s) for s in data.get("screens", [])],
-            audio=AudioInfo(
-                file=audio.get("file", AUDIO_FILE),
-                device=audio.get("device"),
-                sample_rate=int(audio.get("sample_rate", 0)),
-                channels=int(audio.get("channels", 1)),
-                duration_ms=int(audio.get("duration_ms", 0)),
-            ),
+            audio=AudioInfo.from_dict(audio),
+            computer_audio=AudioInfo.from_dict(data["computer_audio"], COMPUTER_AUDIO_FILE)
+            if isinstance(data.get("computer_audio"), dict)
+            else None,
             frames=FramesInfo(
                 dir=frames.get("dir", FRAMES_DIR_NAME),
                 info_dir=frames.get("info_dir", FRAMES_INFO_DIR_NAME),
@@ -221,6 +242,8 @@ def read_manifest(path: Path) -> Manifest:
 
 
 __all__ = [
+    "AUDIO_FILE",
+    "COMPUTER_AUDIO_FILE",
     "SCHEMA_VERSION",
     "AudioInfo",
     "FramesInfo",

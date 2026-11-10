@@ -1,7 +1,9 @@
 """Offline transcription of a recorded session: ffmpeg -> whisper -> transcript files.
 
-:func:`transcribe_audio` runs whisper over ``audio.wav`` (optionally from ``start_ms``
-on, which is how the editor resumes an interrupted transcription) and returns the
+:func:`transcribe_audio` runs whisper over the audio of a recording - the mix of the
+tracks switched on in the editor (the microphone and the computer's sound, see
+:mod:`video_story.core.audio_mix`) - optionally from ``start_ms`` on, which is how the
+editor resumes an interrupted transcription, and returns the
 segments; :func:`transcribe_recording` does that for the whole audio and writes
 ``transcript.txt``/``transcript.json``; :func:`stream_transcription` reports every
 segment as a JSON event the moment whisper produces it (the ``transcribe-stream``
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from video_story.core.audio_mix import existing_tracks, selected_sources
 from video_story.core.config import Config
 from video_story.core.manifest import TranscriptInfo
 from video_story.core.session import SessionPaths
@@ -136,7 +139,10 @@ def transcribe_audio(
     on_segment: SegmentCallback | None = None,
     backend: TranscriptionBackend | None = None,
 ) -> TranscriptionResult:
-    """Transcribe ``audio.wav`` in ``base_dir`` from ``start_ms`` on; nothing is written.
+    """Transcribe the audio in ``base_dir`` from ``start_ms`` on; nothing is written.
+
+    The audio is the mix of the tracks switched on (``audio/tracks.json``); with every
+    track switched off the transcript is empty.
 
     Segment times are absolute (milliseconds since the recording start) even when
     ``start_ms`` is positive. ``on_segment`` receives every segment with text as soon
@@ -147,7 +153,6 @@ def transcribe_audio(
     transcript with zero segments, not an error.
     """
     base = Path(base_dir) if base_dir is not None else paths.work_dir
-    audio = paths.audio_path(base)
     audio16k = paths.audio_16k_path(base)
     start_ms = max(0, int(start_ms))
 
@@ -182,14 +187,14 @@ def transcribe_audio(
             on_segment(absolute)
 
     report(0.0, "Preparing audio")
-    if not audio.is_file():
-        raise FileNotFoundError(f"audio file not found: {audio}")
-    frames = _audio_frames(audio)
-    if frames == 0:
-        log.warning("Recording %s contains no audio samples; writing an empty transcript", audio)
+    if not existing_tracks(paths, base):
+        raise FileNotFoundError(f"audio file not found: {paths.audio_path(base)}")
+    sources = [s for s in selected_sources(paths, base) if _audio_frames(s) != 0]
+    if not sources:
+        log.warning("Recording %s has no audio switched on (or no samples); empty transcript", base)
     else:
         ffmpeg = ensure_ffmpeg(config, download=False)
-        convert_to_16k_mono(ffmpeg, audio, audio16k)
+        convert_to_16k_mono(ffmpeg, sources, audio16k)
         try:
             audio_duration_ms = wav_duration_ms(audio16k)
             if start_ms > 0:
@@ -269,7 +274,7 @@ def transcribe_recording(
     progress: ProgressCallback | None = None,
     backend: TranscriptionBackend | None = None,
 ) -> TranscriptionResult:
-    """Transcribe the whole ``audio.wav`` in ``base_dir`` and write ``transcript.txt``/``.json``.
+    """Transcribe the whole audio in ``base_dir`` and write ``transcript.txt``/``.json``.
 
     ``base_dir`` defaults to the session work directory; the ``transcribe DIR``
     command passes the final directory. The written transcript is complete.

@@ -117,6 +117,7 @@ from PySide6.QtWidgets import (
 )
 
 from video_story.core.archive_state import request_archive
+from video_story.core.audio_mix import COMPUTER, MICROPHONE, TRACK_LABELS, TRACK_NAMES
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.crop import Crop, read_crop, write_crop
 from video_story.core.instructions import read_instructions, write_instructions
@@ -561,6 +562,8 @@ class EditorWindow(QMainWindow):
         self.timeline.crop_changed.connect(self._on_crop_changed)
         self.timeline.screen_selected.connect(self._on_screen_selected)
         self.timeline.view_changed.connect(self._sync_zoom_slider)
+        self.timeline.audio_track_toggled.connect(self.toggle_audio_track)
+        self.timeline.transcribe_requested.connect(self.request_transcribe_again)
         bottom_layout.addWidget(self.timeline, 1)
 
         # Bottom row: Auto process | Process | Instructions || Render.
@@ -1676,6 +1679,103 @@ class EditorWindow(QMainWindow):
         paths = SessionPaths(self.config.recording_folder, session_id)
         status = transcript_status(paths.transcript_json_path(paths.final_dir))
         return None if status.complete else session_id
+
+    # Audio tracks and transcribing again -----------------------------------
+
+    def _audio_editable(self) -> LoadedRecording | None:
+        """The shown recording when its audio may change (not archived or being
+        archived, at least one audio track); ``None`` otherwise."""
+        recording = self.recording
+        if recording is None or recording.archived or not recording.tracks:
+            return None
+        if self.archiver.is_queued(recording.session_id):
+            return None
+        return recording
+
+    def toggle_audio_track(self, track: str) -> None:
+        """Switch the microphone or the computer audio on or off: the waveform and the
+        sound change at once, then the user is asked whether to transcribe again (the
+        narration was made from the previous mix)."""
+        recording = self._audio_editable()
+        if recording is None or track not in TRACK_NAMES or not recording.has_track(track):
+            return
+        selection = recording.selection.toggled(track)
+        was_playing = self.player.playing
+        if was_playing:
+            self._pause_playback()
+        try:
+            recording.set_selection(selection)
+        except OSError as exc:
+            self._show_status_message(f"Cannot change the audio tracks: {exc}")
+            return
+        self.player.set_audio(recording.audio)
+        self.player.set_range(self.model.in_ms, self.model.out_ms)
+        if was_playing:
+            self._start_playback()  # carry on with the new mix
+        self.timeline.reload_audio()
+        state = "on" if selection.enabled(track) else "off"
+        self._show_status_message(f"{TRACK_LABELS[track]} {state}.")
+        self.request_transcribe_again()
+
+    def transcribe_again_text(self, recording: LoadedRecording) -> str:
+        """What the confirmation says: the narration is replaced, from which tracks."""
+
+        def line(track: str) -> str:
+            label = TRACK_LABELS[track]
+            if not recording.has_track(track):
+                return f"{label}: not recorded"
+            included = recording.selection.enabled(track)
+            return f"{label}: {'included' if included else 'not included'}"
+
+        text = (
+            "The narration will be deleted and created again by transcribing the current "
+            "audio track. Subtitles corrected with Edit are lost.\n\n"
+            f"{line(MICROPHONE)}\n{line(COMPUTER)}"
+        )
+        if not recording.audio or not recording.audio.sources:
+            text += "\n\nNo audio track is included: the narration will be empty."
+        return text
+
+    def _confirm_transcribe_again(self, recording: LoadedRecording) -> bool:
+        """Ask before the narration is replaced (tests override this)."""
+        answer = QMessageBox.question(
+            self,
+            "Transcribe again",
+            self.transcribe_again_text(recording),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        return answer == QMessageBox.StandardButton.Ok
+
+    def request_transcribe_again(self) -> bool:
+        """The pen icon (or a switched track): after a confirmation the narration is
+        deleted and the current audio is transcribed from the start - also while a
+        transcription is still running. Returns True when it started."""
+        recording = self._audio_editable()
+        if recording is None or not self._confirm_transcribe_again(recording):
+            return False
+        if self.recording is not recording:
+            return False  # another recording was shown meanwhile
+        try:
+            recording.reset_transcript()
+        except OSError as exc:
+            self._show_status_message(f"Cannot delete the narration: {exc}")
+            return False
+        session_id = recording.session_id
+        self._stop_countdown()
+        self._transcription_failed.pop(session_id, None)
+        self._transcription_fraction.pop(session_id, None)
+        self._transcription_origin.pop(session_id, None)
+        self._transcription_eta.pop(session_id, None)
+        self.transcription.restart(recording)
+        self._show_status_message("Transcribing again.")
+        self.timeline.update()  # the narration track is empty now
+        self._sync_playhead()  # and so is the subtitle
+        self._update_current_search_match()
+        self.refresh_recordings()
+        self._update_transcription_ui()
+        self.transcription_changed.emit(session_id)
+        return True
 
     def retry_transcription(self) -> None:
         """Start the failed transcription of the shown recording again; it continues

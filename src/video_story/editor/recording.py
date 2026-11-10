@@ -3,6 +3,10 @@
 An archived recording (see :mod:`video_story.export.archive`) has no frames and no
 audio any more: every screen shows its still ``archive/<screenId>.jpg`` for the whole
 length, there is no sound and no cursor; the transcript is still there.
+
+The audio of a recording is the mix of its tracks that are switched on (the microphone
+and the computer's sound, :mod:`video_story.core.audio_mix`); :class:`AudioFile`
+describes that mix and opens a reader for it.
 """
 
 from __future__ import annotations
@@ -10,11 +14,19 @@ from __future__ import annotations
 import bisect
 import json
 import logging
-import wave
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from video_story.core.archive_state import ArchiveState, read_archive_state
+from video_story.core.audio_mix import (
+    MICROPHONE,
+    MixReader,
+    TrackSelection,
+    existing_tracks,
+    read_selection,
+    wav_info,
+    write_selection,
+)
 from video_story.core.cursor import CursorPosition, cursor_from_json
 from video_story.core.manifest import Manifest, TranscriptInfo, read_manifest, write_manifest
 from video_story.core.naming import FrameName
@@ -35,31 +47,40 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AudioFile:
-    path: Path
+    """The audio the editor plays and draws: the sum of ``sources`` (the tracks that
+    are switched on; none: silence), as long as the longest of ``tracks`` (every track
+    on disk), at ``sample_rate`` (the microphone's)."""
+
+    sources: tuple[Path, ...]
+    tracks: tuple[Path, ...]
     sample_rate: int
-    channels: int
-    sample_width: int
     frames: int
 
     @property
     def duration_ms(self) -> int:
         return int(self.frames * 1000 / self.sample_rate) if self.sample_rate else 0
 
+    @property
+    def key(self) -> str:
+        """Identifies the mix (which tracks are heard) for caches of derived data."""
+        return "|".join(str(p) for p in self.sources) + "#" + "|".join(str(p) for p in self.tracks)
 
-def read_audio_info(path: Path) -> AudioFile | None:
-    """Header of a WAV file (never reads the samples)."""
-    try:
-        with wave.open(str(path), "rb") as wf:
-            return AudioFile(
-                path=path,
-                sample_rate=wf.getframerate(),
-                channels=wf.getnchannels(),
-                sample_width=wf.getsampwidth(),
-                frames=wf.getnframes(),
-            )
-    except (OSError, wave.Error, EOFError) as exc:
-        log.warning("cannot read audio %s: %s", path, exc)
+    def open(self) -> MixReader:
+        return MixReader(self.sources, length_from=self.tracks, sample_rate=self.sample_rate)
+
+
+def audio_mix(tracks: dict[str, Path], selection: TrackSelection) -> AudioFile | None:
+    """The :class:`AudioFile` of ``tracks`` (name -> WAV) with ``selection`` switched on;
+    ``None`` without any readable track."""
+    infos = {name: info for name, path in tracks.items() if (info := wav_info(path)) is not None}
+    infos = {name: info for name, info in infos.items() if info.sample_rate > 0}
+    if not infos:
         return None
+    reference = infos.get(MICROPHONE) or next(iter(infos.values()))
+    rate = reference.sample_rate
+    frames = max(int(i.frames * rate / i.sample_rate) for i in infos.values())
+    sources = tuple(info.path for name, info in infos.items() if selection.enabled(name))
+    return AudioFile(sources, tuple(i.path for i in infos.values()), rate, frames)
 
 
 class StillFrames(FrameIndex):
@@ -101,6 +122,9 @@ class LoadedRecording:
         self.frames = frames
         self.transcript = transcript
         self.audio = audio
+        # The audio tracks on disk (microphone, computer) and which are switched on.
+        self.tracks: dict[str, Path] = {}
+        self.selection = TrackSelection()
         self._times: dict[str, list[int]] = {
             sid: [n.time_ms for n in names] for sid, names in frames.by_screen.items()
         }
@@ -129,14 +153,28 @@ class LoadedRecording:
             )
             return cls(paths, manifest, frames, transcript, None, archive)
         frames = _load_frame_index(paths, base)
-        audio_path = base / manifest.audio.file
-        audio = read_audio_info(audio_path) if audio_path.exists() else None
-        return cls(paths, manifest, frames, transcript, audio, archive)
+        recording = cls(paths, manifest, frames, transcript, None, archive)
+        recording.tracks = existing_tracks(paths, base)
+        recording.selection = read_selection(paths, base)
+        recording.audio = audio_mix(recording.tracks, recording.selection)
+        return recording
 
     @property
     def archived(self) -> bool:
         """Archived: stills instead of frames, no audio; only subtitles can change."""
         return self.archive is not None and self.archive.archived
+
+    # Audio tracks -----------------------------------------------------------
+
+    def has_track(self, track: str) -> bool:
+        return track in self.tracks
+
+    def set_selection(self, selection: TrackSelection) -> None:
+        """Switch audio tracks on or off: written to ``audio/tracks.json`` first, then
+        :attr:`audio` describes the new mix (``OSError`` when it cannot be written)."""
+        write_selection(self.paths, self.paths.final_dir, selection)
+        self.selection = selection
+        self.audio = audio_mix(self.tracks, selection)
 
     # Screens ----------------------------------------------------------------
 
@@ -268,6 +306,13 @@ class LoadedRecording:
         )
         return new
 
+    def reset_transcript(self) -> None:
+        """Throw the narration away before it is made again from the current audio: an
+        empty, incomplete transcript is written (the transcription starts at 0 ms)."""
+        self._store_transcript(
+            Transcript(language=None, segments=[], complete=False, transcribed_ms=0)
+        )
+
     def finish_transcript(
         self, language: str | None, model: str | None, backend: str | None
     ) -> None:
@@ -356,4 +401,4 @@ class LoadedRecording:
         self._store_transcript(replace(transcript, segments=segments))
 
 
-__all__ = ["AudioFile", "LoadedRecording", "read_audio_info"]
+__all__ = ["AudioFile", "LoadedRecording", "audio_mix"]

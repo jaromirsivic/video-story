@@ -1,8 +1,9 @@
-"""Audio waveform peaks (min/max per block) computed by streaming the WAV file.
+"""Audio waveform peaks (min/max per block) computed by streaming the audio.
 
-The WAV is read in chunks with :mod:`wave` and reduced with numpy, so a two-hour
-recording (about 700 MB at 48 kHz) never sits in memory; the result is a small
-``(blocks, 2)`` float32 array in -1..1.
+The audio (a WAV file, or the mix of a recording's switched-on tracks) is read in
+chunks and reduced with numpy, so a two-hour recording (about 700 MB at 48 kHz per
+track) never sits in memory; the result is a small ``(blocks, 2)`` float32 array in
+-1..1.
 """
 
 from __future__ import annotations
@@ -14,6 +15,9 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
+from video_story.core.audio_mix import MixReader
+
+from ..recording import AudioFile
 from ..workers import automatic_gc_paused
 
 log = logging.getLogger(__name__)
@@ -73,31 +77,64 @@ def compute_peaks(path: Path, block_ms: int = BLOCK_MS) -> np.ndarray:
     return peaks
 
 
+def compute_mix_peaks(reader: MixReader, block_ms: int = BLOCK_MS) -> np.ndarray:
+    """Like :func:`compute_peaks` for a mix of tracks (zeros when nothing is on)."""
+    rate = reader.sample_rate
+    total = reader.frames
+    block = max(1, int(rate * block_ms / 1000)) if rate else 1
+    blocks = (total + block - 1) // block
+    peaks = np.zeros((max(blocks, 0), 2), dtype=np.float32)
+    if reader.silent:
+        return peaks
+    chunk = max(block, (CHUNK_FRAMES // block) * block)
+    reader.setpos(0)
+    position = 0
+    while position < total:
+        data = reader.read(min(chunk, total - position)).astype(np.float32) / 32768.0
+        frames = len(data)
+        if frames == 0:
+            break
+        full = frames // block
+        first = position // block
+        if full:
+            view = data[: full * block].reshape(full, block)
+            peaks[first : first + full, 0] = view.min(axis=1)
+            peaks[first : first + full, 1] = view.max(axis=1)
+        rest = data[full * block :]
+        if len(rest):
+            peaks[first + full, 0] = rest.min()
+            peaks[first + full, 1] = rest.max()
+        position += frames
+    return peaks
+
+
 class _Signals(QObject):
     ready = Signal(str, object)  # path, peaks array
     failed = Signal(str, str)
 
 
 class _PeaksJob(QRunnable):
-    def __init__(self, path: Path, block_ms: int, signals: _Signals) -> None:
+    def __init__(self, audio: AudioFile, block_ms: int, signals: _Signals) -> None:
         super().__init__()
         self.setAutoDelete(True)
-        self._path = path
+        self._audio = audio
         self._block_ms = block_ms
         self._signals = signals
 
     def run(self) -> None:
+        key = self._audio.key
         with automatic_gc_paused():
             try:
-                peaks = compute_peaks(self._path, self._block_ms)
+                with self._audio.open() as reader:
+                    peaks = compute_mix_peaks(reader, self._block_ms)
             except Exception as exc:  # noqa: BLE001 - reported to the UI
-                self._signals.failed.emit(str(self._path), str(exc))
+                self._signals.failed.emit(key, str(exc))
                 return
-            self._signals.ready.emit(str(self._path), peaks)
+            self._signals.ready.emit(key, peaks)
 
 
 class WaveformLoader(QObject):
-    """Computes peaks for one WAV file at a time on a private thread pool."""
+    """Computes peaks for one audio mix at a time on a private thread pool."""
 
     ready = Signal(object)  # peaks of the current path
     failed = Signal(str)
@@ -106,19 +143,19 @@ class WaveformLoader(QObject):
         super().__init__(parent)
         self.block_ms = block_ms
         self.peaks: np.ndarray | None = None
-        self.path: Path | None = None
+        self.key: str | None = None  # the mix being shown (AudioFile.key)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
         self._signals = _Signals(self)
         self._signals.ready.connect(self._on_ready)
         self._signals.failed.connect(self._on_failed)
 
-    def load(self, path: Path | None) -> None:
-        self.path = path
+    def load(self, audio: AudioFile | None) -> None:
+        self.key = audio.key if audio is not None else None
         self.peaks = None
-        if path is None:
+        if audio is None:
             return
-        self._pool.start(_PeaksJob(path, self.block_ms, self._signals))
+        self._pool.start(_PeaksJob(audio, self.block_ms, self._signals))
 
     @property
     def busy(self) -> bool:
@@ -127,16 +164,16 @@ class WaveformLoader(QObject):
     def wait(self, timeout_ms: int = 10_000) -> bool:
         return self._pool.waitForDone(timeout_ms)
 
-    def _on_ready(self, path: str, peaks: np.ndarray) -> None:
-        if self.path is None or str(self.path) != path:
+    def _on_ready(self, key: str, peaks: np.ndarray) -> None:
+        if self.key != key:
             return
         self.peaks = peaks
         self.ready.emit(peaks)
 
-    def _on_failed(self, path: str, message: str) -> None:
-        if self.path is None or str(self.path) != path:
+    def _on_failed(self, key: str, message: str) -> None:
+        if self.key != key:
             return
-        log.warning("waveform of %s failed: %s", path, message)
+        log.warning("waveform of %s failed: %s", key, message)
         self.failed.emit(message)
 
 
@@ -159,4 +196,4 @@ def column_peaks(
     return out
 
 
-__all__ = ["BLOCK_MS", "WaveformLoader", "column_peaks", "compute_peaks"]
+__all__ = ["BLOCK_MS", "WaveformLoader", "column_peaks", "compute_mix_peaks", "compute_peaks"]

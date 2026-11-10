@@ -174,8 +174,12 @@ dialog here", the look of something). Skip the rest.
   many frames.
 
 Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` in `frames_dir`; their
-sidecars `<same>.json` lie in `frames_info_dir` (`frames_info/`), the audio in
-`audio/audio.wav`. An archived recording (the editor's **Archive Video**, or any
+sidecars `<same>.json` lie in `frames_info_dir` (`frames_info/`), the microphone in
+`audio/audio.wav` and, on Windows, what the computer played meanwhile (a video in
+the background, a call) in `audio/computer.wav` (`computer_audio` in the manifest).
+The transcript is made from the tracks the user left switched on in the editor
+(both by default), so it may contain speech that came from the computer, not from
+the user. An archived recording (the editor's **Archive Video**, or any
 recording older than `archive_after_days`) has no frame images and no audio any more:
 `archive/<screenId>.mp4` (with `<screenId>.srt` and a still `<screenId>.jpg`) replace
 them; `timeline` still works (sidecars and transcript stay), `frames` returns
@@ -197,7 +201,8 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
 
 - `config get|set <key> <value>|path` - settings (`recording_folder`,
   `capture_interval_ms` 1-1000, `image_format` png|jpeg, `jpeg_quality` 20-100,
-  `audio_input`, `auto_stop_minutes`, `archive_after_days`). The user can also use
+  `audio_input`, `computer_audio` true|false, `auto_stop_minutes`,
+  `archive_after_days`). The user can also use
   the **Settings** button, which also opens the recording folder and can delete all
   recordings. Recordings older than `archive_after_days` (default 30) are archived when
   the editor starts (one MP4 per screen; frames and audio are deleted); nothing is

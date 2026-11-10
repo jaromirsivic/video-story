@@ -67,6 +67,7 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `image_format` | `jpeg` | `jpeg` or `png` |
 | `jpeg_quality` | 70 | 20 to 100, used for JPEG only |
 | `audio_input` | `null` | device name; `null` means the system default input |
+| `computer_audio` | `true` | also record what the computer plays (`audio/computer.wav`, WASAPI loopback of the default output; Windows only for now, ignored elsewhere) |
 | `auto_stop_minutes` | 120 | recording stops by itself after this time; it is saved and opened in the editor like after Stop |
 | `archive_after_days` | 30 | recordings older than this (by their start time) are archived when the editor starts (one MP4 per screen; frames and audio deleted; nothing is deleted automatically), 1 to 3650 |
 | `export_preset` | `medium` | libx264 preset for MP4 export (`ultrafast` ... `slow`) |

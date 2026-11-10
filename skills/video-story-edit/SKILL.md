@@ -5,7 +5,8 @@ description: Open the Video Story Editor, a simple cutting room for recordings m
 
 # Video Story Editor
 
-Recordings made with Video Story (screens as frames, microphone audio, transcript) can
+Recordings made with Video Story (screens as frames, microphone audio and, on
+Windows, the computer's sound, transcript) can
 be turned into an MP4 video: the editor shows every recording still stored in the
 recording folder, plays it back with subtitles, lets the user crop the start and the
 end and renders the selected screen to MP4 (H.264 + AAC, constant 24 fps, screen

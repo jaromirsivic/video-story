@@ -103,6 +103,7 @@ class Config:
     image_format: ImageFormat = IMAGE_FORMAT_DEFAULT  # type: ignore[assignment]
     jpeg_quality: int = JPEG_QUALITY_DEFAULT
     audio_input: str | None = None
+    computer_audio: bool = True  # also record what this computer plays (Windows only)
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
     archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
     export_preset: str = EXPORT_PRESET_DEFAULT
@@ -219,6 +220,7 @@ def config_from_dict(data: dict[str, Any]) -> Config:
             data, "jpeg_quality", JPEG_QUALITY_MIN, JPEG_QUALITY_MAX, JPEG_QUALITY_DEFAULT
         ),
         audio_input=_optional_str(data, "audio_input"),
+        computer_audio=_require_bool(data, "computer_audio", True),
         auto_stop_minutes=_require_int(
             data,
             "auto_stop_minutes",

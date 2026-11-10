@@ -24,6 +24,7 @@ from pathlib import Path
 
 from video_story import __version__
 from video_story.core.manifest import (
+    COMPUTER_AUDIO_FILE,
     AudioInfo,
     FramesInfo,
     Manifest,
@@ -183,6 +184,13 @@ def _completed_manifest(paths: SessionPaths, index: FrameIndex) -> Manifest | No
     manifest.finished_at = _finished_at(index)
     manifest.recorded_duration_ms = duration_ms
     manifest.audio = audio
+    computer_path = paths.computer_audio_path(work)
+    if computer_path.is_file():
+        computer = _audio_info(computer_path, manifest.computer_audio)
+        computer.file = COMPUTER_AUDIO_FILE
+        manifest.computer_audio = computer
+    else:
+        manifest.computer_audio = None
     manifest.frames = FramesInfo(count=frame_count)
     manifest.stop_reason = RECOVERED_REASON
     manifest.notes.append(RECOVERED_NOTE)

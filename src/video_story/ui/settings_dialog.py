@@ -4,6 +4,7 @@ archiving setting and the recording folder actions (Open Folder, Delete All)."""
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -114,6 +116,18 @@ class SettingsDialog(QDialog):
         self.audio_combo.addItem(SYSTEM_DEFAULT_LABEL, None)
         self._populate_audio_devices(config.audio_input)
         form.addRow("Audio Input", self.audio_combo)
+
+        # 4b. Computer Audio: also record what this computer plays
+        self.computer_audio_check = QCheckBox("Record computer audio")
+        self.computer_audio_check.setChecked(config.computer_audio)
+        self.computer_audio_check.setToolTip(
+            "Also record what this computer plays (a video in the background, a call) as a "
+            "second audio track. The editor mixes it with the microphone; either track can "
+            "be switched off there. Windows only for now."
+        )
+        if sys.platform != "win32":
+            self.computer_audio_check.setEnabled(False)
+        form.addRow("Computer Audio", self.computer_audio_check)
 
         # 5. Auto Stop Recording
         self.auto_stop_spin = QSpinBox()
@@ -245,6 +259,7 @@ class SettingsDialog(QDialog):
                 "image_format": self.format_combo.currentData(),
                 "jpeg_quality": self.quality_spin.value(),
                 "audio_input": self.audio_combo.currentData(),
+                "computer_audio": self.computer_audio_check.isChecked(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
                 "archive_after_days": self.archive_after_spin.value(),
             }

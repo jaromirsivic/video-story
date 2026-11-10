@@ -153,6 +153,18 @@ def check_audio(config: Config) -> Check:
     )
 
 
+def check_computer_audio(config: Config) -> Check:
+    """Recording what this computer plays is optional: never a failure."""
+    if not config.computer_audio:
+        return Check("computer_audio", True, "switched off (computer_audio false)")
+    from video_story.capture.computer_audio import computer_audio_support
+
+    support = computer_audio_support()
+    if support.supported:
+        return Check("computer_audio", True, f"recorded from {support.device} (loopback)")
+    return Check("computer_audio", True, f"not recorded: {support.reason}")
+
+
 def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
     path = find_ffmpeg(config)
     if path is None and fix:
@@ -280,6 +292,7 @@ def run_doctor(config: Config, fix: bool = False, download_model: bool = False) 
     report.add(platform_check)
     report.add(check_screens(platform))
     report.add(check_audio(config))
+    report.add(check_computer_audio(config))
     report.add(check_ffmpeg(config, fix, report))
     report.add(check_model(config, download_model, report))
     report.add(check_backend(config))
