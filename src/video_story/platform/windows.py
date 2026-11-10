@@ -118,7 +118,17 @@ class WindowsPlatform(Platform):
         """Low-level mouse hook in a helper process (see ``windows_input``)."""
         from .windows_input import WindowsMouseSource
 
-        return WindowsMouseSource()
+        self._mouse = WindowsMouseSource()
+        return self._mouse
+
+    def touchpad_source(self):  # -> WindowsTouchpadSource | None
+        """Precision Touchpad frames, read by the helper of the last mouse source."""
+        mouse = getattr(self, "_mouse", None)
+        if mouse is None:
+            return None
+        from .windows_input import WindowsTouchpadSource
+
+        return WindowsTouchpadSource(mouse)
 
     def element_inspector(self):  # -> WindowsElementInspector
         """UI Automation in a helper process (see ``windows_uia``)."""

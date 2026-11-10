@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable
 from ctypes import wintypes
 
+from video_story.core.gestures import ContactFrame, TouchpadGeometry
 from video_story.core.input_events import (
     MouseButton,
     MouseCapabilities,
@@ -31,9 +32,10 @@ from video_story.core.input_events import (
 )
 from video_story.core.timeline import RecordingClock
 
-from .base import MouseSource, PlatformError
+from .base import MouseSource, PlatformError, TouchpadSource
 from .process import console_python
 from .windows_mouse_hook import parse_line
+from .windows_touchpad import PadLine, TouchLine, parse_touch_line
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +207,10 @@ class WindowsMouseSource(MouseSource):
         self._last_event = 0.0
         self._restarts = 0
         self._gave_up = False
+        # Precision Touchpads the helper found, and where their frames go (see
+        # WindowsTouchpadSource); frames arriving without a sink are dropped.
+        self.touchpads: dict[int, TouchpadGeometry] = {}
+        self.touch_sink: Callable[[ContactFrame], None] | None = None
 
     # MouseSource ---------------------------------------------------------------
 
@@ -304,7 +310,11 @@ class WindowsMouseSource(MouseSource):
         self, raw: bytes, clock: RecordingClock, sink: Callable[[RawMouseEvent], None]
     ) -> None:
         self._last_event = time.monotonic()
-        line = parse_line(raw.decode("ascii", errors="replace"))
+        text = raw.decode("ascii", errors="replace")
+        if text[:1] in ("P", "T"):
+            self._handle_touch(text, clock)
+            return
+        line = parse_line(text)
         if line is None:
             return
         t_ms = clock.ms_at(line.ns)
@@ -329,6 +339,23 @@ class WindowsMouseSource(MouseSource):
             sink(event)
         except Exception:  # noqa: BLE001 - the recorder must not kill the reader
             log.exception("mouse event not stored")
+
+    def _handle_touch(self, text: str, clock: RecordingClock) -> None:
+        line = parse_touch_line(text)
+        if isinstance(line, PadLine):
+            if line.width > 0 and line.height > 0:
+                self.touchpads[line.device] = TouchpadGeometry(line.width, line.height)
+            return
+        if not isinstance(line, TouchLine):
+            return
+        sink = self.touch_sink
+        t_ms = clock.ms_at(line.ns)
+        if sink is None or t_ms is None or t_ms < 0:
+            return
+        try:
+            sink(ContactFrame(t_ms, line.contacts, line.device))
+        except Exception:  # noqa: BLE001 - the recorder must not kill the reader
+            log.exception("touchpad frame not stored")
 
     def _watch(self) -> None:
         last_pos = self._cursor()
@@ -386,6 +413,31 @@ class WindowsMouseSource(MouseSource):
                 log.exception("mouse status not stored")
 
 
+class WindowsTouchpadSource(TouchpadSource):
+    """Touchpad frames read by the mouse hook helper (one process for both)."""
+
+    def __init__(self, mouse: WindowsMouseSource) -> None:
+        self.mouse = mouse
+
+    @property
+    def geometry(self) -> TouchpadGeometry:  # type: ignore[override]
+        pads = list(self.mouse.touchpads.values())
+        return pads[0] if pads else TouchpadGeometry(0, 0)
+
+    def geometry_of(self, device: int) -> TouchpadGeometry | None:
+        return self.mouse.touchpads.get(device) or (self.geometry if self.available else None)
+
+    @property
+    def available(self) -> bool:
+        return bool(self.mouse.touchpads)
+
+    def start(self, sink: Callable[[ContactFrame], None], clock: RecordingClock) -> None:
+        self.mouse.touch_sink = sink
+
+    def stop(self) -> None:
+        self.mouse.touch_sink = None
+
+
 def _cursor_position() -> tuple[int, int] | None:
     point = wintypes.POINT()
     try:
@@ -430,4 +482,10 @@ def _end(proc: subprocess.Popen) -> None:
             log.warning("mouse hook helper %s did not end", proc.pid)
 
 
-__all__ = ["WindowsMouseSource", "hook_command", "system_params", "window_at"]
+__all__ = [
+    "WindowsMouseSource",
+    "WindowsTouchpadSource",
+    "hook_command",
+    "system_params",
+    "window_at",
+]

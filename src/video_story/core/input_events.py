@@ -539,6 +539,7 @@ class GestureRecord(_PointRecord):
     scale: float | None = None  # pinch: end distance / start distance
     direction: str | None = None  # pinch: in / out; scroll: up / down / left / right (fingers)
     distance: float | None = None  # scroll: share of the touchpad width the fingers moved
+    win: int | None = None  # window under the pointer when the fingers touched the pad
 
     @property
     def end(self) -> int:

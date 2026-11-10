@@ -28,9 +28,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from video_story.core.cursor import locate_cursor
+from video_story.core.gestures import ContactFrame, GestureTracker, TouchGesture
 from video_story.core.input_events import (
     ButtonRecord,
     ContentRequest,
+    GestureRecord,
     HoverRecord,
     MouseLogWriter,
     MoveRecord,
@@ -45,7 +47,7 @@ from video_story.core.manifest import MouseInfo
 from video_story.core.mouse_actions import SCROLL_GAP_MS
 from video_story.core.screens import Screen
 from video_story.core.timeline import RecordingClock
-from video_story.platform.base import ElementInspector, MouseSource
+from video_story.platform.base import ElementInspector, MouseSource, TouchpadSource
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class _Move:
     gx: int
     gy: int
     target: str
+    window: int | None = None
 
 
 class InputRecorder:
@@ -95,6 +98,7 @@ class InputRecorder:
         own_pid: int | None = None,
         drawing_windows: Callable[[], frozenset[int]] = frozenset,
         inspector: ElementInspector | None = None,
+        touchpad: TouchpadSource | None = None,
     ) -> None:
         self.path = path
         self.screens = list(screens)
@@ -103,6 +107,9 @@ class InputRecorder:
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self.drawing_windows = drawing_windows
         self.inspector = inspector
+        self.touchpad = touchpad
+        self._trackers: dict[int, GestureTracker] = {}
+        self._touch_at: dict[int, _Move | None] = {}  # pointer when the fingers touched
         self.writer = MouseLogWriter(path)
         self._wheels = WheelCoalescer()
         self._throttle = MoveThrottle()
@@ -135,9 +142,20 @@ class InputRecorder:
                 t=max(0, self.clock.elapsed_ms()), state="started", reason=self.source.name
             )
         )
+        if self.touchpad is not None:  # first: on Windows its frames come with the mouse's
+            try:
+                self.touchpad.start(self._on_frame, self.clock)
+            except Exception as exc:  # noqa: BLE001 - events are still recorded
+                log.warning("touchpad gestures are not recorded: %s", exc)
+                self.touchpad = None
         try:
             self.source.start(self._on_event, self.clock, self._on_status)
         except Exception:
+            if self.touchpad is not None:
+                try:
+                    self.touchpad.stop()
+                except Exception:  # noqa: BLE001
+                    log.debug("touchpad stop failed", exc_info=True)
             self.writer.close()
             try:
                 self.path.unlink(missing_ok=True)
@@ -159,6 +177,11 @@ class InputRecorder:
     def stop(self) -> MouseInfo:
         """Stop the source and the queries, close the file and describe it."""
         if self._started:
+            if self.touchpad is not None:
+                try:
+                    self.touchpad.stop()
+                except Exception:  # noqa: BLE001
+                    log.exception("touchpad source did not stop cleanly")
             try:
                 self.source.stop()
             except Exception:  # noqa: BLE001 - never let the mouse fail a recording
@@ -179,6 +202,9 @@ class InputRecorder:
             if self.writer.is_open:
                 for record in self._wheels.flush():
                     self.writer.write(record)
+                for device, tracker in self._trackers.items():
+                    for gesture in tracker.flush():
+                        self._write_gesture(device, gesture)
                 self.writer.write(StatusRecord(t=max(0, self.clock.elapsed_ms()), state="stopped"))
                 self.writer.close()
         self._started = False
@@ -192,6 +218,7 @@ class InputRecorder:
             self.source.capabilities,
             elements=self._elements_ok,
             element_content=self._elements_ok,
+            touchpad_gestures=bool(self.touchpad is not None and self.touchpad.available),
         )
         return MouseInfo(
             platform=self.source.name,
@@ -255,7 +282,7 @@ class InputRecorder:
                 self._on_button(event, target)
 
     def _on_move(self, event: RawMouseEvent, target: str) -> None:
-        self._last_move = _Move(event.t_ms, event.gx, event.gy, target)
+        self._last_move = _Move(event.t_ms, event.gx, event.gy, target, event.window)
         drag_px = self.source.params.drag_px
         for press in self._pressed.values():
             if not press.dragging and (
@@ -336,6 +363,56 @@ class InputRecorder:
                 self.writer.write(
                     StatusRecord(t=max(0, self.clock.elapsed_ms()), state=state, reason=reason)
                 )
+
+    # Touchpad -----------------------------------------------------------------------
+
+    def _on_frame(self, frame: ContactFrame) -> None:
+        """A touchpad scan (touchpad thread): gestures are written when fingers lift."""
+        with self._lock:
+            if not self.writer.is_open or self.touchpad is None:
+                return
+            tracker = self._trackers.get(frame.device)
+            if tracker is None:
+                pad = self.touchpad.geometry_of(frame.device)
+                if pad is None:
+                    return
+                tracker = self._trackers[frame.device] = GestureTracker(pad)
+            if frame.contacts and frame.device not in self._touch_at:
+                self._touch_at[frame.device] = self._last_move
+            finished = tracker.add(frame)
+            for gesture in finished:
+                self._write_gesture(frame.device, gesture)
+            if not frame.contacts:
+                self._touch_at.pop(frame.device, None)
+            elif finished:  # this frame already belongs to a new touch
+                self._touch_at[frame.device] = self._last_move
+
+    def _write_gesture(self, device: int, gesture: TouchGesture) -> None:
+        """Write a finished gesture at the pointer where the fingers touched the pad
+        (gestures over Video Story's own windows are left out)."""
+        at = self._touch_at.get(device) or self._last_move
+        if at is None or at.target != Target.APP.value:
+            return
+        win = None
+        if at.window is not None:
+            probe = RawMouseEvent(
+                kind="move", t_ms=gesture.t_ms, gx=at.gx, gy=at.gy, window=at.window
+            )
+            win = self._window(probe, at.target)
+        point = self._point(RawMouseEvent(kind="move", t_ms=gesture.t_ms, gx=at.gx, gy=at.gy))
+        seq = self.writer.write(
+            GestureRecord(
+                t=gesture.t_ms,
+                kind=gesture.kind,
+                until=gesture.until_ms,
+                scale=gesture.scale,
+                direction=gesture.direction,
+                distance=gesture.distance,
+                win=win,
+                **point,  # type: ignore[arg-type]
+            )
+        )
+        self._enqueue(_Query(seq, at.gx, at.gy, ContentRequest.NONE, win))
 
     # Rest points --------------------------------------------------------------------
 
@@ -436,6 +513,10 @@ class InputRecorder:
                 now = self.clock.elapsed_ms()
                 for record in self._wheels.due(now):
                     self.writer.write(record)
+                for device, tracker in self._trackers.items():
+                    for gesture in tracker.due(now):
+                        self._write_gesture(device, gesture)
+                        self._touch_at.pop(device, None)
                 self._check_hover(now)
                 if ticks % 10 == 0:
                     self.writer.flush()

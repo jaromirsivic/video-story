@@ -387,6 +387,7 @@ def _gesture_action(g: GestureRecord) -> MouseAction:
         direction=g.direction,
         scale=g.scale,
         touchpad=True,
+        win=g.win,
         ref=g.seq,
         end_ref=g.seq,
     )

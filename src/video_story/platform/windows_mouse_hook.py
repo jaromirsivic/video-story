@@ -13,7 +13,10 @@ Protocol (ASCII lines on stdout):
 * ``<ns> <msg> <x> <y> <data> <flags> <mods>`` per event: ``msg`` the ``WM_*`` message,
   ``x``/``y`` physical pixels of the virtual desktop, ``data`` the signed wheel delta or
   the X button number, ``flags`` the ``LLMHF_*`` flags (1 = injected), ``mods`` a bit set
-  of Ctrl (1), Shift (2), Alt (4) and the Windows key (8).
+  of Ctrl (1), Shift (2), Alt (4) and the Windows key (8);
+* ``PAD`` and ``T`` lines of a Precision Touchpad, read on a second thread
+  (:mod:`video_story.platform.windows_touchpad`): two-finger gestures that the hook does
+  not see over browsers and modern applications.
 
 Moves are thinned here already: while a button is down at most one per
 :data:`DRAG_MOVE_MS`, otherwise one per :data:`IDLE_MOVE_MS` (they keep the parent's
@@ -160,9 +163,12 @@ def run() -> int:  # pragma: no cover - exercised by the Windows integration tes
     }
     pressed = user32.GetAsyncKeyState
 
+    write_lock = threading.Lock()
+
     def emit(text: str) -> bool:
         try:
-            os.write(out, text.encode("ascii"))
+            with write_lock:  # the touchpad thread writes too: whole lines only
+                os.write(out, text.encode("ascii"))
             return True
         except OSError:  # the parent is gone
             state["broken"] = True
@@ -231,6 +237,12 @@ def run() -> int:  # pragma: no cover - exercised by the Windows integration tes
 
     threading.Thread(target=watch_stdin, name="stdin-watch", daemon=True).start()
     emit(f"READY {os.getpid()}\n")
+    if os.environ.get("VIDEO_STORY_NO_TOUCHPAD") != "1":
+        from .windows_touchpad import reader
+
+        threading.Thread(
+            target=reader, args=(emit, time.perf_counter_ns), name="touchpad", daemon=True
+        ).start()
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         pass

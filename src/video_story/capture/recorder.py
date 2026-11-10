@@ -499,6 +499,11 @@ class Recorder:
         except Exception:  # noqa: BLE001 - events are recorded without elements
             log.exception("element inspector unavailable")
             inspector = None
+        try:
+            touchpad = self.platform.touchpad_source()
+        except Exception:  # noqa: BLE001 - events are recorded without gestures
+            log.exception("touchpad source unavailable")
+            touchpad = None
         recorder = InputRecorder(
             self.paths.mouse_log_path(self.paths.work_dir),
             self.screens,
@@ -506,6 +511,7 @@ class Recorder:
             self.clock,
             drawing_windows=lambda: self.drawing_windows,
             inspector=inspector,
+            touchpad=touchpad,
         )
         self._input = recorder
 

@@ -45,6 +45,7 @@ class ContactFrame:
 
     t_ms: int
     contacts: tuple[Contact, ...]
+    device: int = 0  # which touchpad (a machine may have more than one)
 
 
 @dataclass(frozen=True)

@@ -112,6 +112,15 @@ class TouchpadSource(ABC):
 
     geometry: TouchpadGeometry = TouchpadGeometry(0, 0)
 
+    def geometry_of(self, device: int) -> TouchpadGeometry | None:
+        """Logical size of the touchpad ``device`` of a frame (``None``: unknown yet)."""
+        return self.geometry if self.geometry.width > 0 else None
+
+    @property
+    def available(self) -> bool:
+        """Whether a touchpad was found (a source may only know once it started)."""
+        return self.geometry.width > 0
+
     @abstractmethod
     def start(self, sink: Callable[[ContactFrame], None], clock: RecordingClock) -> None:
         """Begin delivering frames; raises :class:`PlatformError` when it cannot."""
