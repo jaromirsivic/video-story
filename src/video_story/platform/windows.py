@@ -114,6 +114,12 @@ class WindowsPlatform(Platform):
             return point.x, point.y
         return None
 
+    def mouse_source(self):  # -> WindowsMouseSource
+        """Low-level mouse hook in a helper process (see ``windows_input``)."""
+        from .windows_input import WindowsMouseSource
+
+        return WindowsMouseSource()
+
     def exclude_window_from_capture(self, window_handle: int) -> bool:
         try:
             return bool(

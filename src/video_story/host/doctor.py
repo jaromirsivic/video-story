@@ -165,6 +165,24 @@ def check_computer_audio(config: Config) -> Check:
     return Check("computer_audio", True, f"not recorded: {support.reason}")
 
 
+def check_mouse(config: Config, platform: Any) -> Check:
+    """Recording the mouse is optional: never a failure."""
+    if not config.mouse_actions:
+        return Check("mouse", True, "switched off (mouse_actions false)")
+    try:
+        offer = getattr(platform, "mouse_source", None)
+        source = offer() if offer is not None else None
+    except Exception as exc:  # noqa: BLE001
+        return Check("mouse", True, f"not recorded: {exc}")
+    if source is None:
+        name = platform.name if platform is not None else "this platform"
+        return Check("mouse", True, f"not recorded: not available on {name} yet")
+    problem = source.probe()
+    if problem:
+        return Check("mouse", True, f"not recorded: {problem}")
+    return Check("mouse", True, f"recorded ({source.name})")
+
+
 def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
     path = find_ffmpeg(config)
     if path is None and fix:
@@ -293,6 +311,7 @@ def run_doctor(config: Config, fix: bool = False, download_model: bool = False) 
     report.add(check_screens(platform))
     report.add(check_audio(config))
     report.add(check_computer_audio(config))
+    report.add(check_mouse(config, platform))
     report.add(check_ffmpeg(config, fix, report))
     report.add(check_model(config, download_model, report))
     report.add(check_backend(config))

@@ -1,6 +1,6 @@
 # Video Story – implementační plán: akce myši, prvky pod myší, gesta touchpadu
 
-Stav: **M0 a M1 hotové** (10. 11. 2026; výsledky M0 v kap. 12, M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest, zatím bez nahrávání). Po implementaci se platné chování přepíše do [video-story-spec.md](video-story-spec.md) (kap. 5, 6, 9, 11, 12); tam, kde se tento plán od specifikace pak liší, neplatí.
+Stav: **M0, M1 a M2 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu); prvky pod myší (M3), timeline (M4) a gesta touchpadu (M5) zatím ne.
 
 ## 1. Cíl a rozsah
 
@@ -132,7 +132,7 @@ Nová složka `input/` vedle `audio/`, `frames/`, `frames_info/`. Jeden JSON na 
 {"seq":61,"t":16000,"type":"wheel","axis":"v","delta":-360,"count":3,"until":16120,"screen":"screen2","x":900,"y":500,"mods":[]}
 {"seq":70,"t":18000,"type":"hover","screen":"screen1","x":640,"y":400}
 {"seq":90,"t":20000,"type":"gesture","kind":"pinch","fingers":2,"until":20800,"scale":1.8,"screen":"screen1","x":640,"y":400}
-{"seq":99,"t":30000,"type":"status","hook":"restarted","reason":"no events for 5 s while the cursor moved"}
+{"seq":99,"t":30000,"type":"status","source":"mouse","state":"restarted","reason":"no events for 5 s while the pointer moved"}
 ```
 
 - Řádky s bodem nesou kromě `screen`/`x`/`y` (pixely snímku té obrazovky, jako kurzor v sidecarech) i `gx`/`gy` (fyzické pixely virtuální plochy). Vzdálenosti pro dvojklik a tažení se měří v nich, takže fungují i přes hranici obrazovek.
@@ -140,6 +140,8 @@ Nová složka `input/` vedle `audio/`, `frames/`, `frames_info/`. Jeden JSON na 
 - `wheel`: události stejné osy a modifikátorů do 40 ms od sebe se sloučí do jednoho řádku (`delta` je součet, `count` počet, `until` poslední). Touchpad posílá 60–100 událostí za sekundu, takže bez slučování by soubor zbytečně rostl.
 - `target`: `app` (cizí okno), `video_story` (vlastní okno, pozná se podle PID okna pod bodem) nebo `drawing` (kreslicí vrstva; HWND vrstev předá `DrawingOverlay`). Timeline vlastní okna i kreslení vynechá, protože ty pokrývají KEYPOINT, DRAW a ZOOM. U `video_story` a `drawing` se na prvek neptáme.
 - `win` je pořadové číslo okna v rámci nahrávky. Titulek a proces okna se zapíšou jednou do řádku `{"type":"window",...}`, ne ke každé události. Když okno změní titulek, dostane nové číslo, takže každá akce má titulek z té chvíle.
+- `status` má stavy `started`, `restarted` (pomocný proces skončil, nebo se kurzor hýbal a 5 s nepřišla žádná událost), `gave_up` (po 3 restartech už se nerestartuje, běží dál ten poslední) a `stopped`.
+- Pomocný proces se spouští ve vlákně na pozadí, aby pomalý start Pythonu (antivir, pomalý disk) nezdržel snímky a zvuk; události z prvních desetin sekundy se tak mohou ztratit.
 - `element` přichází asynchronně a na svou událost odkazuje přes `ref`. `ms` je, jak dlouho dotaz trval (pro ladění).
 - **Obsah se ukládá jednou.** Řádek `content` nese text (nejvýš 4096 znaků) a jeho hash (SHA-1 z textu). Další prvek se stejným obsahem (opakované kliky do téhož pole nebo dokumentu) už má jen odkaz `hash`. Soubor tak neroste a timeline může napsat „stejný text jako v 12345“.
 

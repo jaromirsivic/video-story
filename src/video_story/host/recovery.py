@@ -23,11 +23,13 @@ from datetime import datetime
 from pathlib import Path
 
 from video_story import __version__
+from video_story.core.input_events import read_mouse_log
 from video_story.core.manifest import (
     COMPUTER_AUDIO_FILE,
     AudioInfo,
     FramesInfo,
     Manifest,
+    MouseInfo,
     read_manifest,
     write_manifest,
 )
@@ -64,6 +66,27 @@ def _owner_alive(paths: SessionPaths) -> bool | None:
     except RuntimeError:
         return None
     return pid_alive(state.pid)
+
+
+def _mouse_info(path: Path, known: MouseInfo | None) -> MouseInfo | None:
+    """The manifest's mouse section with the counts taken from ``input/mouse.jsonl``
+    (the process died before it could write them)."""
+    if not path.is_file():
+        return known if known is not None and known.error else None
+    try:
+        recorded = read_mouse_log(path)
+    except OSError:
+        log.warning("cannot read %s", path, exc_info=True)
+        return known
+    info = known or MouseInfo()
+    info.events = (
+        len(recorded.buttons) + len(recorded.moves) + len(recorded.wheels) + len(recorded.gestures)
+    )
+    info.elements = sum(len(items) for items in recorded.elements.values())
+    info.contents = len(recorded.contents)
+    info.windows = len(recorded.windows)
+    info.hook_restarts = sum(1 for s in recorded.statuses if s.state == "restarted")
+    return info
 
 
 def _audio_info(path: Path, known: AudioInfo | None) -> AudioInfo:
@@ -191,6 +214,7 @@ def _completed_manifest(paths: SessionPaths, index: FrameIndex) -> Manifest | No
         manifest.computer_audio = computer
     else:
         manifest.computer_audio = None
+    manifest.mouse = _mouse_info(paths.mouse_log_path(work), manifest.mouse)
     manifest.frames = FramesInfo(count=frame_count)
     manifest.stop_reason = RECOVERED_REASON
     manifest.notes.append(RECOVERED_NOTE)

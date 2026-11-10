@@ -129,6 +129,19 @@ class SettingsDialog(QDialog):
             self.computer_audio_check.setEnabled(False)
         form.addRow("Computer Audio", self.computer_audio_check)
 
+        # 4c. Mouse: clicks, drags, wheel and what was under the mouse
+        self.mouse_check = QCheckBox("Record mouse actions")
+        self.mouse_check.setChecked(config.mouse_actions)
+        self.mouse_check.setToolTip(
+            "Record clicks, double clicks, drags, the wheel and two-finger touchpad gestures, "
+            "with the window titles, the element under the mouse and its content (at most "
+            "4096 characters; never the content of password fields). The agent reads them "
+            "like the screenshots and the clipboard. Windows only for now."
+        )
+        if sys.platform != "win32":
+            self.mouse_check.setEnabled(False)
+        form.addRow("Mouse", self.mouse_check)
+
         # 5. Auto Stop Recording
         self.auto_stop_spin = QSpinBox()
         self.auto_stop_spin.setRange(AUTO_STOP_MIN_MINUTES, AUTO_STOP_MAX_MINUTES)
@@ -260,6 +273,7 @@ class SettingsDialog(QDialog):
                 "jpeg_quality": self.quality_spin.value(),
                 "audio_input": self.audio_combo.currentData(),
                 "computer_audio": self.computer_audio_check.isChecked(),
+                "mouse_actions": self.mouse_check.isChecked(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
                 "archive_after_days": self.archive_after_spin.value(),
             }

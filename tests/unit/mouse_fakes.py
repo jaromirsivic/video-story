@@ -37,8 +37,14 @@ class FakeMouseSource(MouseSource):
         self.clock: RecordingClock | None = None
         self.running = False
 
-    def start(self, sink: Callable[[RawMouseEvent], None], clock: RecordingClock) -> None:
+    def start(
+        self,
+        sink: Callable[[RawMouseEvent], None],
+        clock: RecordingClock,
+        on_status: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.sink, self.clock, self.running = sink, clock, True
+        self.on_status = on_status
 
     def stop(self) -> None:
         self.running = False

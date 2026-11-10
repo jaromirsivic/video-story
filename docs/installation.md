@@ -94,9 +94,10 @@ MP4 export). Register both the same way; the install scripts do.
 Personal skills live in `~/.claude/skills/<name>/`. Link the skill directories there:
 
 ```powershell
-# Windows (junction, no administrator rights needed)
-cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story" "D:\git\video-story\skills\video-story"
-cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story-edit" "D:\git\video-story\skills\video-story-edit"
+# Windows (junction, no administrator rights needed); run it in the repository folder
+$repo = (Get-Location).Path
+cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story" "$repo\skills\video-story"
+cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story-edit" "$repo\skills\video-story-edit"
 ```
 
 ```bash
@@ -116,7 +117,8 @@ next to the code.
 Codex discovers skills in `~/.codex/skills/`. Link the same directory:
 
 ```powershell
-cmd /c mklink /J "$env:USERPROFILE\.codex\skills\video-story" "D:\git\video-story\skills\video-story"
+$repo = (Get-Location).Path   # run it in the repository folder
+cmd /c mklink /J "$env:USERPROFILE\.codex\skills\video-story" "$repo\skills\video-story"
 ```
 
 ```bash
@@ -135,7 +137,7 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
   "mcpServers": {
     "video-story": {
       "command": "uv",
-      "args": ["run", "--project", "D:\\git\\video-story", "video-story", "mcp"]
+      "args": ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
     }
   }
 }

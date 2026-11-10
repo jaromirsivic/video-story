@@ -82,6 +82,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
         "screens",
         "audio",
         "computer_audio",
+        "mouse",
         "ffmpeg",
         "model",
         "backend",
@@ -210,6 +211,41 @@ def test_doctor_unwritable_recording_folder(healthy, tmp_path: Path):
     blocker.write_text("x", encoding="utf-8")
     check = _by_name(doctor.run_doctor(cfg.with_values(recording_folder=str(blocker))))
     assert check["recording_folder"]["ok"] is False and check["recording_folder"]["hint"]
+
+
+def test_mouse_is_optional_and_never_fails_the_doctor():
+    class NoMouse:
+        name = "fake-os"
+
+        def mouse_source(self):
+            return None
+
+    class Broken:
+        name = "windows-ll-hook"
+
+        def probe(self):
+            return "mouse hook not installed: blocked"
+
+    class Works(Broken):
+        def probe(self):
+            return None
+
+    class WithMouse:
+        name = "fake-os"
+
+        def __init__(self, source):
+            self.source = source
+
+        def mouse_source(self):
+            return self.source
+
+    off = doctor.check_mouse(Config(mouse_actions=False), NoMouse())
+    assert off.ok and "switched off" in off.detail
+    assert "not available on fake-os" in doctor.check_mouse(Config(), NoMouse()).detail
+    broken = doctor.check_mouse(Config(), WithMouse(Broken()))
+    assert broken.ok and "blocked" in broken.detail
+    assert doctor.check_mouse(Config(), WithMouse(Works())).detail == "recorded (windows-ll-hook)"
+    assert doctor.check_mouse(Config(), None).ok
 
 
 def test_computer_audio_is_optional_and_never_fails_the_doctor(monkeypatch):

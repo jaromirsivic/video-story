@@ -4,7 +4,9 @@ The :class:`Recorder` owns a capture thread that ticks every ``capture_interval_
 reads the cursor once, grabs every screen and hands the raw frames to a bounded
 thread pool for encoding and writing. Audio is recorded by :class:`AudioRecorder`; what
 the computer plays meanwhile by :class:`ComputerAudioRecorder` (Windows; when it is
-switched on and can be opened - a failure there never stops the recording).
+switched on and can be opened - a failure there never stops the recording); the mouse by
+:class:`InputRecorder` into ``input/mouse.jsonl`` (when Mouse is switched on and the
+platform offers it - again never a reason to stop).
 The recording never pauses; it ends on :meth:`stop`, :meth:`discard`, when the
 auto-stop limit is reached or when less than :data:`MIN_FREE_BYTES` are left on the disk
 of the recording folder (``stop_reason`` says which).
@@ -40,6 +42,7 @@ from video_story.core.manifest import (
     AudioInfo,
     FramesInfo,
     Manifest,
+    MouseInfo,
     write_manifest,
 )
 from video_story.core.naming import frame_filename, sidecar_filename
@@ -50,6 +53,7 @@ from video_story.platform.base import Platform, PlatformError
 
 from .audio_recorder import AudioError, AudioRecorder, AudioResult
 from .computer_audio import ComputerAudioError, ComputerAudioRecorder
+from .input_recorder import InputRecorder
 from .screen_grabber import RawFrame, ScreenGrabber, encode_frame
 
 log = logging.getLogger(__name__)
@@ -60,6 +64,7 @@ MIN_FREE_BYTES = 1024**3  # recording needs at least 1 GB of free disk space
 DISK_CHECK_INTERVAL_NS = 2_000_000_000  # how often the free space is looked at
 GRAB_REOPEN_AFTER = 10  # ticks without any frame before the screen grabber is reopened
 GRAB_LOG_EVERY = 100  # failed grabs between two log lines
+MOUSE_START_WAIT_S = 30  # Stop waits at most this long for a mouse source still starting
 
 
 class RecorderEvent(StrEnum):
@@ -116,6 +121,7 @@ class RecordingSummary:
     failed_grabs: int = 0  # screen grabs that failed (that screen has no frame then)
     stop_reason: str | None = None  # a StopReason value, None when the user stopped
     computer_audio: AudioResult | None = None  # what the computer played (loopback)
+    mouse: MouseInfo | None = None  # input/mouse.jsonl; None when not recorded
 
     def to_manifest(
         self, config: Config, platform_name: str, notes: list[str] | None = None
@@ -160,6 +166,7 @@ class RecordingSummary:
             plugin_version=__version__,
             notes=list(notes or []),
             keypoints=list(self.keypoints),
+            mouse=self.mouse,
         )
 
 
@@ -207,6 +214,9 @@ class Recorder:
         self._audio_result: AudioResult | None = None
         self._computer: ComputerAudioRecorder | None = None
         self._computer_result: AudioResult | None = None
+        self._input: InputRecorder | None = None
+        self._mouse_info: MouseInfo | None = None
+        self._mouse_thread: threading.Thread | None = None
         self._frame_count = 0
         self._dropped_ticks = 0
         self._failed_grabs = 0
@@ -231,6 +241,10 @@ class Recorder:
         # since the previous tick (at most 65535 characters, "..." when cut), stored as
         # ``clipboard`` in the sidecars of this tick only; None (null) in every other tick.
         self.clipboard_provider: ClipboardProvider | None = None
+        # Native handles of the drawing layer's windows (set by the control window on
+        # the GUI thread, read by the mouse thread): a click there is "drawing", not a
+        # click into Video Story's own window.
+        self.drawing_windows: frozenset[int] = frozenset()
         self._keypoints: list[int] = []
 
     # Properties -------------------------------------------------------------
@@ -338,6 +352,7 @@ class Recorder:
             auto_stopped=False,
             keypoints=self.keypoints,
             computer_audio=computer,
+            mouse=self._provisional_mouse(),
         )
         manifest = summary.to_manifest(self.config, self.platform.name)
         manifest.finished_at = None
@@ -345,6 +360,11 @@ class Recorder:
             write_manifest(self.paths.manifest_path(self.paths.work_dir), manifest)
         except OSError as exc:  # never let bookkeeping stop a recording
             log.warning("provisional manifest not written: %s", exc)
+
+    def _provisional_mouse(self) -> MouseInfo | None:
+        with self._lock:
+            recorder, info = self._input, self._mouse_info
+        return recorder.info() if recorder is not None else info
 
     # Lifecycle --------------------------------------------------------------
 
@@ -378,6 +398,7 @@ class Recorder:
         # The timeline starts once the audio stream is live, so audio and frames align.
         self.started_at = now_iso()
         self.clock.start()
+        self._start_mouse()
         self._write_provisional_manifest()
         self._capture_thread = threading.Thread(
             target=self._capture_loop, name="capture", daemon=True
@@ -392,6 +413,7 @@ class Recorder:
         self._stop_event.set()
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=60)
+        self._stop_mouse()
         duration_ms = self.clock.stop() if self.clock.running or self.clock.elapsed_ns() else 0
         if self._audio is not None and self._audio_result is None:
             try:
@@ -424,6 +446,7 @@ class Recorder:
             failed_grabs=self.failed_grabs,
             stop_reason=str(self._stop_reason) if self._stop_reason else None,
             computer_audio=self._computer_result,
+            mouse=self._mouse_info,
         )
         self._on_event(RecorderEvent.STOPPED, "")
         log.info(
@@ -456,6 +479,63 @@ class Recorder:
                 log.debug("cannot remove %s", recorder.path, exc_info=True)
             return
         self._computer = recorder
+
+    def _start_mouse(self) -> None:
+        """Record the mouse into ``input/mouse.jsonl`` when switched on and the platform
+        offers it. The source starts on a thread of its own (a helper process may take a
+        while on a slow machine) so frames and audio are not held up; a failure is logged
+        and noted in the manifest, never raised."""
+        if not self.config.mouse_actions:
+            return
+        try:
+            source = self.platform.mouse_source()
+        except Exception:  # noqa: BLE001 - never let the mouse stop a recording
+            log.exception("mouse source unavailable")
+            return
+        if source is None:
+            return
+        recorder = InputRecorder(
+            self.paths.mouse_log_path(self.paths.work_dir),
+            self.screens,
+            source,
+            self.clock,
+            drawing_windows=lambda: self.drawing_windows,
+        )
+        self._input = recorder
+
+        def start() -> None:
+            try:
+                recorder.start()
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, PlatformError):
+                    log.warning("mouse is not recorded: %s", exc)
+                else:  # pragma: no cover
+                    log.exception("mouse is not recorded")
+                with self._lock:
+                    self._mouse_info = recorder.info(error=str(exc) or type(exc).__name__)
+                    self._input = None
+                return
+            log.info("mouse recorded by %s", source.name)
+
+        self._mouse_thread = threading.Thread(target=start, name="mouse-start", daemon=True)
+        self._mouse_thread.start()
+
+    def _stop_mouse(self) -> None:
+        if self._mouse_thread is not None:
+            self._mouse_thread.join(timeout=MOUSE_START_WAIT_S)
+            self._mouse_thread = None
+        with self._lock:
+            recorder, self._input = self._input, None
+        if recorder is None:
+            return
+        try:
+            self._mouse_info = recorder.stop()
+        except Exception:  # pragma: no cover - never let the mouse fail the recording
+            log.exception("mouse recording did not stop cleanly")
+            self._mouse_info = recorder.info(error="did not stop cleanly")
+        log.info(
+            "mouse: %d events, %d restarts", self._mouse_info.events, self._mouse_info.hook_restarts
+        )
 
     def discard(self) -> None:
         """Stop and delete every file of this recording."""

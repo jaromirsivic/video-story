@@ -498,10 +498,12 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
         "Audio Input",
     ]
     assert form.itemAt(5, form.ItemRole.LabelRole).widget().text() == "Computer Audio"
-    assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
-    assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Archive After"
-    assert form.itemAt(8, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Mouse"
+    assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
+    assert form.itemAt(8, form.ItemRole.LabelRole).widget().text() == "Archive After"
+    assert form.itemAt(9, form.ItemRole.LabelRole).widget().text() == "Recordings"
     assert dialog.computer_audio_check.isChecked()  # recorded by default
+    assert dialog.mouse_check.isChecked()  # recorded by default
     assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "jpeg"
     assert dialog.quality_spin.value() == 70
     assert dialog.auto_stop_spin.value() == 120 and dialog.archive_after_spin.value() == 30
@@ -516,6 +518,7 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     dialog.auto_stop_spin.setValue(45)
     dialog.archive_after_spin.setValue(7)
     dialog.computer_audio_check.setChecked(False)
+    dialog.mouse_check.setChecked(False)
     dialog._save()
     assert dialog.result_config is not None
     assert dialog.result_config.capture_interval_ms == 1000
@@ -523,6 +526,7 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert dialog.result_config.auto_stop_minutes == 45
     assert dialog.result_config.archive_after_days == 7
     assert dialog.result_config.computer_audio is False
+    assert dialog.result_config.mouse_actions is False
     reloaded = cfg_mod.load_config()
     assert reloaded == dialog.result_config
 

@@ -540,6 +540,7 @@ class ControlWindow(QWidget):
                 # The overlay takes the keyboard focus (B / R / A pick a tool); the overlay
                 # keeps this window above it (keep_above).
                 self._overlay.show()  # type: ignore[attr-defined]
+                self._share_drawing_windows()
                 self.raise_()
         elif self._overlay is not None:
             self._overlay.hide()  # type: ignore[attr-defined]
@@ -567,6 +568,20 @@ class ControlWindow(QWidget):
         if zoom is not None:
             recorder.zoom_provider = zoom
 
+    def _share_drawing_windows(self) -> None:
+        """Tell the recorder which windows are the drawing layer (a click there is drawing,
+        not a click into another application). Handles are read here, on the GUI thread."""
+        recorder = self.controller.recorder
+        windows = getattr(self._overlay, "windows", None)
+        if recorder is None or windows is None:
+            return
+        try:
+            handles = frozenset(int(w.winId()) for w in windows)
+        except Exception:  # noqa: BLE001 - only a label in the mouse file depends on it
+            log.debug("drawing windows unknown", exc_info=True)
+            return
+        recorder.drawing_windows = handles
+
     def _overlay_closed(self) -> None:
         self.draw_button.blockSignals(True)
         self.draw_button.setChecked(False)
@@ -578,6 +593,7 @@ class ControlWindow(QWidget):
             recorder.drawings_provider = None
             recorder.drawing_now_provider = None
             recorder.zoom_provider = None
+            recorder.drawing_windows = frozenset()
         if self._overlay is not None:
             try:
                 self._overlay.close()  # type: ignore[attr-defined]

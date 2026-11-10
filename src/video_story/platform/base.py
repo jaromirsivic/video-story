@@ -47,8 +47,16 @@ class MouseSource(ABC):
     name: str = "unknown"  # manifest "platform", e.g. "windows-ll-hook"
 
     @abstractmethod
-    def start(self, sink: Callable[[RawMouseEvent], None], clock: RecordingClock) -> None:
-        """Begin delivering events; raises :class:`PlatformError` when it cannot."""
+    def start(
+        self,
+        sink: Callable[[RawMouseEvent], None],
+        clock: RecordingClock,
+        on_status: Callable[[str, str], None] | None = None,
+    ) -> None:
+        """Begin delivering events; raises :class:`PlatformError` when it cannot.
+
+        ``on_status(state, reason)`` reports what happened to the source while recording
+        (``restarted``, ``failed``) so the recorder can write it into the file."""
 
     @abstractmethod
     def stop(self) -> None:
@@ -62,6 +70,11 @@ class MouseSource(ABC):
     def restarts(self) -> int:
         """How often the source had to be restarted while recording."""
         return 0
+
+    def probe(self) -> str | None:
+        """Check that the source can start here (``doctor``); ``None`` when it can, else
+        the reason. The default cannot tell and says so."""
+        return None
 
 
 class ElementInspector(ABC):

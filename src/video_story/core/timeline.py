@@ -62,6 +62,14 @@ class RecordingClock:
     def elapsed_ms(self) -> int:
         return self.elapsed_ns() // 1_000_000
 
+    def ms_at(self, perf_counter_ns: int) -> int | None:
+        """Recording time of a ``time.perf_counter_ns()`` stamp, also one taken in another
+        process: the counter is system wide (QueryPerformanceCounter on Windows,
+        CLOCK_MONOTONIC elsewhere). ``None`` before :meth:`start`."""
+        if self._start_ns is None:
+            return None
+        return (perf_counter_ns - self._start_ns) // 1_000_000
+
     def perf_counter_at(self, elapsed_ns: int) -> float:
         """Absolute ``perf_counter`` value for a point on the timeline (for sleeping)."""
         if self._start_ns is None:
