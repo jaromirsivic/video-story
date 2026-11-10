@@ -7,7 +7,7 @@ Layout inside the Recording Folder::
         state.json, lock, ui.log, recording.log, audio/, frames/, frames_info/
       <session_id>/            # once the recording was saved (Stop, auto stop, recovery)
         manifest.json, transcript.txt, transcript.json, recording.log, crop.json,
-        instructions.txt, audio/, frames/, frames_info/, archive/
+        instructions.txt, audio/, frames/, frames_info/, input/, archive/
 
 ``audio/`` holds the microphone (``audio.wav``), the sound this computer played
 (``computer.wav``, Windows only, when it could be recorded) and ``tracks.json``, the
@@ -19,6 +19,10 @@ tracks the editor plays, shows, transcribes and renders (see
 (:mod:`video_story.core.archive`) turns every screen into ``archive/<screenId>.mp4``
 with a still ``<screenId>.jpg`` and subtitles ``<screenId>.srt``, then deletes
 ``audio/`` and ``frames/``; ``frames_info/`` and the transcript stay.
+
+``input/mouse.jsonl`` holds the mouse actions and the elements under the mouse (see
+:mod:`video_story.core.input_events`); it exists only when Mouse was switched on and the
+platform could record it. Archiving keeps it.
 
 ``state.json``, ``lock`` and ``ui.log`` never leave the work directory: ``state.json`` is
 the agent's contract, and ``ui.log`` is the stdout/stderr of the detached window process,
@@ -53,6 +57,8 @@ AUDIO_16K_FILE_NAME = "audio16k.wav"
 COMPUTER_AUDIO_FILE_NAME = "computer.wav"  # what this computer played (loopback)
 AUDIO_TRACKS_FILE_NAME = "tracks.json"  # which audio tracks are switched on
 ARCHIVE_DIR_NAME = "archive"
+INPUT_DIR_NAME = "input"
+MOUSE_FILE_NAME = "mouse.jsonl"  # mouse actions, elements under the mouse
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = "lock"
 LOG_FILE_NAME = "recording.log"
@@ -159,6 +165,14 @@ class SessionPaths:
 
     def audio_16k_path(self, base: Path | None = None) -> Path:
         return self.audio_dir(base) / AUDIO_16K_FILE_NAME
+
+    def input_dir(self, base: Path | None = None) -> Path:
+        """Mouse input of the recording (``input/``)."""
+        return (base or self.current_dir) / INPUT_DIR_NAME
+
+    def mouse_log_path(self, base: Path | None = None) -> Path:
+        """``input/mouse.jsonl``; missing when the mouse was not recorded."""
+        return self.input_dir(base) / MOUSE_FILE_NAME
 
     def archive_dir(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / ARCHIVE_DIR_NAME
@@ -336,11 +350,13 @@ __all__ = [
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",
     "FRAMES_INFO_DIR_NAME",
+    "INPUT_DIR_NAME",
     "INSTRUCTIONS_FILE_NAME",
     "LOG_FILE_NAME",
     "UI_LOG_FILE_NAME",
     "WORK_ONLY_FILES",
     "MANIFEST_FILE_NAME",
+    "MOUSE_FILE_NAME",
     "STATE_FILE_NAME",
     "TRANSCRIPT_JSON_NAME",
     "TRANSCRIPT_TXT_NAME",

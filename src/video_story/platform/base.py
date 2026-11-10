@@ -8,9 +8,20 @@ share one coordinate system.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from video_story.core.gestures import ContactFrame, TouchpadGeometry
+from video_story.core.input_events import (
+    ContentRequest,
+    ElementInfo,
+    MouseCapabilities,
+    MouseSystemParams,
+    RawMouseEvent,
+    WindowInfo,
+)
 from video_story.core.screens import RawScreen
+from video_story.core.timeline import RecordingClock
 
 
 class PlatformError(RuntimeError):
@@ -21,6 +32,72 @@ class PlatformError(RuntimeError):
 class SupportStatus:
     supported: bool
     reason: str = ""
+
+
+class MouseSource(ABC):
+    """Global mouse events (buttons, wheel, moves) while recording.
+
+    Must never slow the system's pointer down: on Windows the hook runs in a helper
+    process. ``t_ms`` of every event is on the recording clock passed to :meth:`start`.
+    The sink may be called from any thread.
+    """
+
+    capabilities: MouseCapabilities = MouseCapabilities()
+    params: MouseSystemParams = MouseSystemParams()
+    name: str = "unknown"  # manifest "platform", e.g. "windows-ll-hook"
+
+    @abstractmethod
+    def start(self, sink: Callable[[RawMouseEvent], None], clock: RecordingClock) -> None:
+        """Begin delivering events; raises :class:`PlatformError` when it cannot."""
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop delivering events (idempotent)."""
+
+    @abstractmethod
+    def healthy(self) -> bool:
+        """Whether events still arrive (the recorder restarts a source that is not)."""
+
+    @property
+    def restarts(self) -> int:
+        """How often the source had to be restarted while recording."""
+        return 0
+
+
+class ElementInspector(ABC):
+    """What is under a point: role, name, window, process and content.
+
+    Calls block for at most ``timeout_ms`` (the recorder calls them on its own
+    thread). Content is cut by the caller's rules (:func:`core.input_events.make_content`);
+    the content of a password field is never read.
+    """
+
+    @abstractmethod
+    def element_at(
+        self, gx: int, gy: int, want: ContentRequest, timeout_ms: int
+    ) -> ElementInfo | None:
+        """The element at the virtual desktop point, or ``None`` (nothing / timeout)."""
+
+    @abstractmethod
+    def window_info(self, window: int) -> WindowInfo | None:
+        """Title and process of a top-level window (native handle)."""
+
+    def close(self) -> None:  # noqa: B027 - optional hook
+        """Release OS resources (COM, D-Bus connections)."""
+
+
+class TouchpadSource(ABC):
+    """Contacts of a multi-touch touchpad (two-finger gestures only are derived)."""
+
+    geometry: TouchpadGeometry = TouchpadGeometry(0, 0)
+
+    @abstractmethod
+    def start(self, sink: Callable[[ContactFrame], None], clock: RecordingClock) -> None:
+        """Begin delivering frames; raises :class:`PlatformError` when it cannot."""
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop delivering frames (idempotent)."""
 
 
 class Platform(ABC):
@@ -48,9 +125,30 @@ class Platform(ABC):
         """Best effort: hide a window from screen capture. Returns True when applied."""
         return False
 
+    # Mouse (implementation-plan-mouse.md); None = not available on this platform.
+
+    def mouse_source(self) -> MouseSource | None:
+        """Global mouse events, or ``None`` when this platform has none (yet)."""
+        return None
+
+    def element_inspector(self) -> ElementInspector | None:
+        """Elements under the mouse, or ``None``."""
+        return None
+
+    def touchpad_source(self) -> TouchpadSource | None:
+        """Touchpad contacts, or ``None`` (no precision touchpad, not supported)."""
+        return None
+
     def describe(self) -> dict[str, object]:
         status = self.support_status()
         return {"name": self.name, "supported": status.supported, "reason": status.reason}
 
 
-__all__ = ["Platform", "PlatformError", "SupportStatus"]
+__all__ = [
+    "ElementInspector",
+    "MouseSource",
+    "Platform",
+    "PlatformError",
+    "SupportStatus",
+    "TouchpadSource",
+]

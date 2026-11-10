@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .fileio import atomic_write_text
+from .input_events import MAX_ELEMENT_TEXT_CHARS, MouseCapabilities, MouseSystemParams
 from .screens import Screen
 from .session import (
     AUDIO_DIR_NAME,
@@ -15,12 +16,15 @@ from .session import (
     COMPUTER_AUDIO_FILE_NAME,
     FRAMES_DIR_NAME,
     FRAMES_INFO_DIR_NAME,
+    INPUT_DIR_NAME,
+    MOUSE_FILE_NAME,
 )
 
 SCHEMA_VERSION = 2  # 2: audio/audio.wav, frames/ images only, sidecars in frames_info/
 
 AUDIO_FILE = f"{AUDIO_DIR_NAME}/{AUDIO_FILE_NAME}"
 COMPUTER_AUDIO_FILE = f"{AUDIO_DIR_NAME}/{COMPUTER_AUDIO_FILE_NAME}"
+MOUSE_FILE = f"{INPUT_DIR_NAME}/{MOUSE_FILE_NAME}"
 
 
 @dataclass
@@ -77,6 +81,65 @@ class FramesInfo:
 
 
 @dataclass
+class MouseInfo:
+    """``input/mouse.jsonl``: what the platform could record and how much was recorded."""
+
+    file: str = MOUSE_FILE
+    platform: str = ""  # e.g. "windows-ll-hook"
+    capabilities: MouseCapabilities = field(default_factory=MouseCapabilities)
+    params: MouseSystemParams = field(default_factory=MouseSystemParams)
+    max_content_chars: int = MAX_ELEMENT_TEXT_CHARS
+    events: int = 0
+    elements: int = 0
+    contents: int = 0
+    windows: int = 0
+    element_timeouts: int = 0
+    hook_restarts: int = 0
+    error: str | None = None  # the source could not start; the file may be missing
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "file": self.file,
+            "platform": self.platform,
+            "capabilities": self.capabilities.to_dict(),
+            "params": self.params.to_dict(),
+            "max_content_chars": self.max_content_chars,
+            "events": self.events,
+            "elements": self.elements,
+            "contents": self.contents,
+            "windows": self.windows,
+            "element_timeouts": self.element_timeouts,
+            "hook_restarts": self.hook_restarts,
+        }
+        if self.error:
+            data["error"] = self.error
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MouseInfo:
+        def count(key: str) -> int:
+            try:
+                return max(0, int(data.get(key, 0)))
+            except (TypeError, ValueError):
+                return 0
+
+        return cls(
+            file=str(data.get("file") or MOUSE_FILE),
+            platform=str(data.get("platform") or ""),
+            capabilities=MouseCapabilities.from_dict(data.get("capabilities")),
+            params=MouseSystemParams.from_dict(data.get("params")),
+            max_content_chars=count("max_content_chars") or MAX_ELEMENT_TEXT_CHARS,
+            events=count("events"),
+            elements=count("elements"),
+            contents=count("contents"),
+            windows=count("windows"),
+            element_timeouts=count("element_timeouts"),
+            hook_restarts=count("hook_restarts"),
+            error=data.get("error") or None,
+        )
+
+
+@dataclass
 class TranscriptInfo:
     txt: str = "transcript.txt"
     json_file: str = "transcript.json"
@@ -114,6 +177,9 @@ class Manifest:
     computer_audio: AudioInfo | None = None
     frames: FramesInfo = field(default_factory=FramesInfo)
     transcript: TranscriptInfo | None = None
+    # Mouse actions and the elements under the mouse (``input/mouse.jsonl``); None when
+    # Mouse was switched off or the platform cannot record it.
+    mouse: MouseInfo | None = None
     auto_stopped: bool = False
     auto_stop_minutes: int | None = None
     platform: str = ""
@@ -160,6 +226,11 @@ class Manifest:
             "tracks switched on in the editor (audio/tracks.json, both by default)",
             "frames": self.frames.to_dict(),
             "transcript": self.transcript.to_dict() if self.transcript else None,
+            "mouse": self.mouse.to_dict() if self.mouse else None,
+            "mouse_note": "input/mouse.jsonl (when mouse is not null): clicks, drags, wheel "
+            "and two-finger touchpad gestures with the window, the element under the mouse "
+            "and its content (at most max_content_chars, never password fields); times on "
+            "the recording timeline, screen/x/y like the cursor in the frame sidecars",
             "keypoints": self.keypoints_to_dict(),
             "keypoints_note": "moments the user marked as important while recording "
             "(Keypoint button, Ctrl+Alt+K); the editor shows them as green lines and snaps "
@@ -210,6 +281,9 @@ class Manifest:
             platform=data.get("platform", ""),
             plugin_version=data.get("plugin_version", ""),
             notes=list(data.get("notes", [])),
+            mouse=MouseInfo.from_dict(data["mouse"])
+            if isinstance(data.get("mouse"), dict)
+            else None,
             keypoints=_keypoints_from(data.get("keypoints")),
             stop_reason=data.get("stop_reason"),
         )
@@ -244,10 +318,12 @@ def read_manifest(path: Path) -> Manifest:
 __all__ = [
     "AUDIO_FILE",
     "COMPUTER_AUDIO_FILE",
+    "MOUSE_FILE",
     "SCHEMA_VERSION",
     "AudioInfo",
     "FramesInfo",
     "Manifest",
+    "MouseInfo",
     "TranscriptInfo",
     "read_manifest",
     "write_manifest",

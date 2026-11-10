@@ -104,6 +104,9 @@ class Config:
     jpeg_quality: int = JPEG_QUALITY_DEFAULT
     audio_input: str | None = None
     computer_audio: bool = True  # also record what this computer plays (Windows only)
+    # Mouse actions plus everything about them: window titles, the elements under the
+    # mouse and their content (at most 4096 characters, never password fields).
+    mouse_actions: bool = True
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
     archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
     export_preset: str = EXPORT_PRESET_DEFAULT
@@ -221,6 +224,7 @@ def config_from_dict(data: dict[str, Any]) -> Config:
         ),
         audio_input=_optional_str(data, "audio_input"),
         computer_audio=_require_bool(data, "computer_audio", True),
+        mouse_actions=_require_bool(data, "mouse_actions", True),
         auto_stop_minutes=_require_int(
             data,
             "auto_stop_minutes",

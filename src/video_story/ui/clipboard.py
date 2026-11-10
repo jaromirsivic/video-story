@@ -22,17 +22,16 @@ import threading
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QClipboard, QGuiApplication
 
+from video_story.core.textcut import ELLIPSIS, truncate_text
+
 log = logging.getLogger(__name__)
 
 MAX_CLIPBOARD_CHARS = 65535
-ELLIPSIS = "..."
 
 
 def truncate_clipboard(text: str, limit: int = MAX_CLIPBOARD_CHARS) -> str:
     """``text`` unchanged when it is at most ``limit`` characters, else cut plus ``...``."""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + ELLIPSIS
+    return truncate_text(text, limit)
 
 
 class ClipboardTracker(QObject):
