@@ -120,6 +120,12 @@ class WindowsPlatform(Platform):
 
         return WindowsMouseSource()
 
+    def element_inspector(self):  # -> WindowsElementInspector
+        """UI Automation in a helper process (see ``windows_uia``)."""
+        from .windows_uia import WindowsElementInspector
+
+        return WindowsElementInspector()
+
     def exclude_window_from_capture(self, window_handle: int) -> bool:
         try:
             return bool(

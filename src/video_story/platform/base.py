@@ -85,11 +85,19 @@ class ElementInspector(ABC):
     the content of a password field is never read.
     """
 
+    name: str = "unknown"  # e.g. "windows-uia"
+
+    def prepare(self) -> None:  # noqa: B027 - optional hook
+        """Get ready for queries (start helpers, load libraries); called on the thread
+        that will query. Raises :class:`PlatformError` when elements cannot be read."""
+
     @abstractmethod
     def element_at(
         self, gx: int, gy: int, want: ContentRequest, timeout_ms: int
     ) -> ElementInfo | None:
-        """The element at the virtual desktop point, or ``None`` (nothing / timeout)."""
+        """The element at the virtual desktop point, or ``None`` when there is none.
+
+        Raises :class:`TimeoutError` when the answer took longer than ``timeout_ms``."""
 
     @abstractmethod
     def window_info(self, window: int) -> WindowInfo | None:

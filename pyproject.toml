@@ -16,6 +16,7 @@ dependencies = [
     "platformdirs>=4.0",
     "python-xlib>=0.33; sys_platform == 'linux'",
     "soundcard>=0.4.6; sys_platform == 'win32'",
+    "comtypes>=1.4 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

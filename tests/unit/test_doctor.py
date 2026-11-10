@@ -244,7 +244,24 @@ def test_mouse_is_optional_and_never_fails_the_doctor():
     assert "not available on fake-os" in doctor.check_mouse(Config(), NoMouse()).detail
     broken = doctor.check_mouse(Config(), WithMouse(Broken()))
     assert broken.ok and "blocked" in broken.detail
-    assert doctor.check_mouse(Config(), WithMouse(Works())).detail == "recorded (windows-ll-hook)"
+    detail = doctor.check_mouse(Config(), WithMouse(Works())).detail
+    assert detail == "recorded (windows-ll-hook); elements not recorded on this platform yet"
+
+    class Inspector:
+        name = "windows-uia"
+
+        def prepare(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Full(WithMouse):
+        def element_inspector(self):
+            return Inspector()
+
+    full = doctor.check_mouse(Config(), Full(Works())).detail
+    assert full == "recorded (windows-ll-hook); elements recorded (windows-uia)"
     assert doctor.check_mouse(Config(), None).ok
 
 

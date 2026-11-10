@@ -494,12 +494,18 @@ class Recorder:
             return
         if source is None:
             return
+        try:
+            inspector = self.platform.element_inspector()
+        except Exception:  # noqa: BLE001 - events are recorded without elements
+            log.exception("element inspector unavailable")
+            inspector = None
         recorder = InputRecorder(
             self.paths.mouse_log_path(self.paths.work_dir),
             self.screens,
             source,
             self.clock,
             drawing_windows=lambda: self.drawing_windows,
+            inspector=inspector,
         )
         self._input = recorder
 

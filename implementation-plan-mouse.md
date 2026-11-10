@@ -1,6 +1,6 @@
 # Video Story – implementační plán: akce myši, prvky pod myší, gesta touchpadu
 
-Stav: **M0, M1 a M2 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu); prvky pod myší (M3), timeline (M4) a gesta touchpadu (M5) zatím ne.
+Stav: **M0–M3 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu). M3 = prvky pod myší, jejich obsah a okna (UI Automation v druhém pomocném procesu). Timeline (M4) a gesta touchpadu (M5) zatím ne.
 
 ## 1. Cíl a rozsah
 
@@ -185,11 +185,11 @@ Klik tlačítkem, které vyvolalo tažení jiného tlačítka (např. pravé bě
 
 ## 6. Prvky pod myší (UI Automation, Windows)
 
-- **Kdy se ptáme:** při každém `down`, na začátku a na konci tažení (cíl přetažení), na začátku `scroll` a při **zastavení kurzoru**: kurzor stojí aspoň 600 ms, od posledního dotazu se posunul o víc než `drag_px` a od posledního `hover` uplynulo aspoň 500 ms. Zastavení se zjišťuje z `move` událostí hooku (počítají se i bez uložení) a z `GetCursorPos` v ticku snímání.
+- **Kdy se ptáme:** při každém `down` (prvek + `value_and_text`), při `up` tažení a dvoj/vícenásobného kliku (cíl a `selection`), na začátku scrollu (jen prvek, bez obsahu: odstavec pod kolečkem nic neřekne) a při **zastavení kurzoru** (`hover`): kurzor stojí aspoň 600 ms nad cizím oknem, od posledního dotazu se posunul o víc než `drag_px` a od posledního `hover` uplynulo aspoň 500 ms. Zastavení se zjišťuje z pohybů, které pomocný proces hooku posílá i bez stisku (nejvýš 20× za s).
 - **Proč při `down`:** akce tlačítka proběhne obvykle až při `up`, takže při stisku je dialog ještě otevřený a prvek ještě existuje.
-- **Vlákno:** `ElementInspectorThread` s COM v MTA, jedna fronta; nejvýš 8 čekajících dotazů, při zahlcení se zahazují nejdřív `hover`. Jeden `CacheRequest` načte ControlType, Name, AutomationId, ClassName, FrameworkId, BoundingRectangle, IsPassword, ProcessId a dostupnost vzorů Value a Text jedním voláním; předci přes `ControlViewWalker` (nejvýš 3 kroky, jen pojmenovaní). `IUIAutomation2.ConnectionTimeout` a `TransactionTimeout` jsou 400 ms, takže zamrzlá aplikace dotaz nezablokuje.
+- **Pomocný proces:** UI Automation běží v `python -m video_story.platform.windows_uia_helper` (vlastní MTA, JSON po řádcích přes rouru, Job Object, nejvýš 3 restarty), ne ve vlákně okna. COM tak nekoliduje s apartmentem Qt, pád nebo zaseknutí cizího poskytovatele přístupnosti neshodí Video Story a dotazy nečekají na GIL kódování snímků. V okně běží jen fronta (nejvýš 8 čekajících, při zahlcení se zahazují nejdřív `hover`) a čekání na odpověď (1,5 s; pozdní odpověď se zahodí, pomocný proces přeskočí žádost, na kterou už nikdo nečeká). Jeden `CacheRequest` načte ControlType, Name, AutomationId, ClassName, FrameworkId, BoundingRectangle, IsPassword, ProcessId a dostupnost vzorů Value a Text; předci přes `ControlViewWalker` (nejvýš 6 kroků, 3 pojmenovaní). `ConnectionTimeout` a `TransactionTimeout` jsou 400 ms. Titulek a proces okna se čtou v okně přes `InternalGetWindowText`, která cizímu oknu neposílá zprávu, takže nezamrzne na aplikaci, která neodpovídá.
 - **Známá daň:** Chrome, Edge a Electron (VS Code) zapnou svůj strom přístupnosti až na první dotaz UIA; první dotaz trvá déle a prohlížeč může být nepatrně pomalejší. Podle M0 je to snesitelné: `ElementFromPoint` s cache trvá 2–25 ms, první dotaz na okno Firefoxu 95 ms.
-- **Závislost:** `comtypes` (čistý Python, `sys_platform == 'win32'`). Vygenerovaný wrapper `UIAutomationCore` se vytvoří při prvním spuštění; `doctor` ověří, že se načte.
+- **Závislost:** `comtypes` (čistý Python, `sys_platform == 'win32'`). Wrapper `UIAutomationCore` se vygeneruje při prvním spuštění (na tomto počítači 0,9 s); když `site-packages` není zapisovatelné, `comtypes` použije vlastní složku v profilu uživatele. `doctor` ověří, že se pomocný proces spustí. Když UI Automation nejde, zapíše se `status` `elements_unavailable` a nahrávají se jen události.
 
 ### 6.1 Obsah prvku (nejvýš 4096 znaků)
 
@@ -203,7 +203,7 @@ Limit 4096 znaků stačí na adresu, pole formuláře i jeden odstavec a zárove
 
 | `kind` | Kdy | Windows (UIA) |
 | --- | --- | --- |
-| `value` | při stisku a zastavení kurzoru, když prvek má Value | `ValuePattern.CurrentValue` (pole, combobox, adresní řádek, buňka tabulky) |
+| `value` | při stisku a zastavení kurzoru, když prvek má Value | `ValuePattern.CurrentValue` (pole, combobox, adresní řádek, buňka tabulky). Hodnota delší než 1000 znaků je celý dokument (např. Poznámkový blok): pak se místo ní vezme odstavec v bodě (`text`). |
 | `text` | při stisku a zastavení kurzoru, když prvek nemá Value, ale má Text | `TextPattern.RangeFromPoint(bod)` → `ExpandToEnclosingUnit(Paragraph)` → `GetText(4096)`: odstavec v místě myši, ne celý dokument |
 | `selection` | po `up` tažení a dvoj/vícenásobného kliku | `TextPattern.GetSelection()` → `GetText(4096)`; prázdný výběr se neukládá |
 

@@ -180,7 +180,28 @@ def check_mouse(config: Config, platform: Any) -> Check:
     problem = source.probe()
     if problem:
         return Check("mouse", True, f"not recorded: {problem}")
-    return Check("mouse", True, f"recorded ({source.name})")
+    return Check("mouse", True, f"recorded ({source.name}); {_elements_state(platform)}")
+
+
+def _elements_state(platform: Any) -> str:
+    """Whether the elements under the mouse can be read (starts and stops the inspector)."""
+    offer = getattr(platform, "element_inspector", None)
+    try:
+        inspector = offer() if offer is not None else None
+    except Exception as exc:  # noqa: BLE001
+        return f"elements not recorded: {exc}"
+    if inspector is None:
+        return "elements not recorded on this platform yet"
+    try:
+        inspector.prepare()
+    except Exception as exc:  # noqa: BLE001
+        return f"elements not recorded: {exc}"
+    finally:
+        try:
+            inspector.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return f"elements recorded ({inspector.name})"
 
 
 def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:

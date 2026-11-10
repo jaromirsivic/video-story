@@ -177,8 +177,8 @@ class WindowsMouseSource(MouseSource):
         horizontal_wheel=True,
         high_resolution_wheel=True,
         touchpad_gestures=False,  # M5
-        elements=False,  # M3
-        element_content=False,  # M3
+        elements=True,  # with the UI Automation inspector (the recorder says if it ran)
+        element_content=True,
     )
 
     def __init__(
@@ -310,9 +310,8 @@ class WindowsMouseSource(MouseSource):
         t_ms = clock.ms_at(line.ns)
         if t_ms is None or t_ms < 0:
             return  # before Record
-        window = pid = None
-        if line.kind != "move":
-            window, pid = window_at(line.x, line.y)
+        # Also for moves: a rest point over Video Story's own window is not queried.
+        window, pid = window_at(line.x, line.y)
         event = RawMouseEvent(
             kind=line.kind,  # type: ignore[arg-type]
             t_ms=t_ms,
