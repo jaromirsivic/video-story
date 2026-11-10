@@ -167,3 +167,27 @@ def test_archived_recording_has_no_audio_icons(qtbot, tmp_path: Path):
     assert window.recording.archived
     assert window.timeline.audio_icon_rects() == {}
     assert not window.request_transcribe_again()
+
+
+def test_arrow_follows_whisper_through_silence(qtbot, tmp_path: Path):
+    """No segment comes while nothing is said (e.g. only the microphone switched on and
+    the sound was on the computer track): the arrow still moves with whisper's progress
+    and never jumps back when a segment that ends earlier arrives."""
+    make_recording(tmp_path, NEWEST, with_transcript=False)  # 2.5 s long
+    spec = _spec(
+        tmp_path,
+        [
+            {"event": "segment", "start_ms": 0, "end_ms": 200, "text": "ahoj"},
+            {"event": "progress", "fraction": 0.1, "transcribed_ms": 200},
+            {"event": "progress", "fraction": 0.8, "transcribed_ms": 200},
+            {"event": "segment", "start_ms": 1000, "end_ms": 1500, "text": "konec"},
+            {"sleep": 30},
+            DONE,
+        ],
+    )
+    window = _open(qtbot, tmp_path, spec)
+    qtbot.waitUntil(lambda: len(window.recording.segments) == 2, timeout=10_000)
+    # 80 % of 2.5 s = 2000 ms, although the latest segment ends at 1500 ms.
+    assert window.timeline.transcription == ("transcribing", 2000)
+    assert window.recording.transcribed_ms == 1500  # a resume still starts there
+    window.transcription.shutdown()

@@ -47,7 +47,8 @@ class TranscriptionManager(QObject):
     """
 
     started = Signal(str)  # session id
-    progress = Signal(str, float, int)  # session id, fraction 0..1, transcribed_ms
+    # session id, fraction 0..1, position_ms: how far whisper got (for the arrow)
+    progress = Signal(str, float, int)
     segment = Signal(str, object)  # session id, Segment (already stored)
     finished = Signal(str, object)  # session id, the "done" event (dict); stored
     failed = Signal(str, str)  # session id, message
@@ -65,6 +66,7 @@ class TranscriptionManager(QObject):
         self._stderr: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         self._done: dict[str, Any] | None = None
         self._killed = False
+        self._start_ms = 0  # where the running worker started
 
     # State ------------------------------------------------------------------
 
@@ -163,6 +165,7 @@ class TranscriptionManager(QObject):
         self._stderr.clear()
         self._done = None
         self._killed = False
+        self._start_ms = start_ms
         log.info("transcribing %s from %d ms: %s", recording.session_id, start_ms, " ".join(args))
         process.start(args[0], args[1:])
         self.started.emit(recording.session_id)
@@ -243,9 +246,24 @@ class TranscriptionManager(QObject):
                 reached = int(event.get("transcribed_ms", 0))
             except (TypeError, ValueError):
                 return
-            self.progress.emit(session_id, max(0.0, min(1.0, fraction)), reached)
+            fraction = max(0.0, min(1.0, fraction))
+            self.progress.emit(session_id, fraction, self.position_ms(fraction, reached))
         elif kind == "done":
             self._done = event
+
+    def position_ms(self, fraction: float, reached: int) -> int:
+        """How far the running worker got: ``fraction`` of the audio from where it
+        started, never behind the end of the latest segment (``reached``).
+
+        ``reached`` alone stands still through long silence (no segment comes while
+        nothing is said, e.g. a microphone track whose sound was all on the computer
+        track), while whisper - and ``fraction`` - moves on. Only the arrow uses this;
+        a resumed transcription still starts at the end of the latest stored segment.
+        """
+        recording = self._recording
+        total = recording.duration_ms if recording is not None else 0
+        start = min(self._start_ms, total)
+        return max(int(reached), start + int(fraction * max(0, total - start)))
 
     def _on_error(self, error: QProcess.ProcessError) -> None:
         if error != QProcess.ProcessError.FailedToStart:

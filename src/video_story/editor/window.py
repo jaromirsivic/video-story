@@ -405,6 +405,8 @@ class EditorWindow(QMainWindow):
         # is extrapolated from the progress made since then.
         self._transcription_origin: dict[str, tuple[float, float]] = {}
         self._transcription_eta: dict[str, float] = {}  # session id -> seconds to go
+        # session id -> how far whisper got (the green arrow; it never moves back)
+        self._transcription_position: dict[str, int] = {}
         self._session_progress_at = 0.0  # monotonic time of the last state.json update
         self._countdown: int | None = None  # Auto process: seconds left, None when idle
         self._auto_cancelled = False  # the user acted during the countdown
@@ -1767,6 +1769,7 @@ class EditorWindow(QMainWindow):
         self._transcription_fraction.pop(session_id, None)
         self._transcription_origin.pop(session_id, None)
         self._transcription_eta.pop(session_id, None)
+        self._transcription_position.pop(session_id, None)
         self.transcription.restart(recording)
         self._show_status_message("Transcribing again.")
         self.timeline.update()  # the narration track is empty now
@@ -1834,7 +1837,9 @@ class EditorWindow(QMainWindow):
                 "transcribing" if self.transcription.is_running(recording.session_id) else "pending"
             )
             self.timeline.set_transcription(
-                state, recording.transcribed_ms, self._transcription_eta.get(recording.session_id)
+                state,
+                self._arrow_ms(recording),
+                self._transcription_eta.get(recording.session_id),
             )
         self._update_buttons()
         self._update_status()
@@ -1847,9 +1852,10 @@ class EditorWindow(QMainWindow):
     def _on_transcription_started(self, session_id: str) -> None:
         self._transcription_origin.pop(session_id, None)
         self._transcription_eta.pop(session_id, None)
+        self._transcription_position.pop(session_id, None)
         recording = self._shown(session_id)
         if recording is not None:
-            self.timeline.set_transcription("transcribing", recording.transcribed_ms)
+            self.timeline.set_transcription("transcribing", self._arrow_ms(recording))
             self._update_status()
 
     def _on_transcription_segment(self, session_id: str, _segment: object) -> None:
@@ -1857,7 +1863,7 @@ class EditorWindow(QMainWindow):
         if recording is None:
             return
         self.timeline.set_transcription(
-            "transcribing", recording.transcribed_ms, self._transcription_eta.get(session_id)
+            "transcribing", self._arrow_ms(recording), self._transcription_eta.get(session_id)
         )
         self.preview.set_subtitle(recording.subtitle_at(self.model.playhead_ms))
         self._update_current_search_match()
@@ -1881,8 +1887,17 @@ class EditorWindow(QMainWindow):
             return None
         return max(0.0, elapsed * (1.0 - fraction) / progressed)
 
+    def _arrow_ms(self, recording: LoadedRecording) -> int:
+        """Where the green arrow stands: the latest segment or, through silence, how far
+        whisper got (whichever is further)."""
+        return max(
+            recording.transcribed_ms, self._transcription_position.get(recording.session_id, 0)
+        )
+
     def _on_transcription_progress(self, session_id: str, fraction: float, reached: int) -> None:
         self._transcription_fraction[session_id] = fraction
+        known = self._transcription_position.get(session_id, 0)
+        self._transcription_position[session_id] = max(known, int(reached))
         self.list_view.set_activity(session_id, "transcribing", fraction)
         now = time.monotonic()
         eta = self._estimate_eta(session_id, fraction, now)
@@ -1892,9 +1907,7 @@ class EditorWindow(QMainWindow):
             self._transcription_eta[session_id] = eta
         recording = self._shown(session_id)
         if recording is not None:
-            self.timeline.set_transcription(
-                "transcribing", max(reached, recording.transcribed_ms), eta
-            )
+            self.timeline.set_transcription("transcribing", self._arrow_ms(recording), eta)
             self._update_status()
         if self.recording_session == session_id:
             if now - self._session_progress_at >= SESSION_PROGRESS_INTERVAL_S:
@@ -1915,6 +1928,7 @@ class EditorWindow(QMainWindow):
         self._transcription_fraction.pop(session_id, None)
         self._transcription_origin.pop(session_id, None)
         self._transcription_eta.pop(session_id, None)
+        self._transcription_position.pop(session_id, None)
         recording = self._shown(session_id)
         if recording is None:
             return
@@ -1938,6 +1952,7 @@ class EditorWindow(QMainWindow):
         self._transcription_fraction.pop(session_id, None)
         self._transcription_origin.pop(session_id, None)
         self._transcription_eta.pop(session_id, None)
+        self._transcription_position.pop(session_id, None)
         if self._shown(session_id) is not None:
             self._show_status_message(f"Transcription failed: {message}")
             self._update_transcription_ui()
