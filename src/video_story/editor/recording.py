@@ -304,6 +304,22 @@ class LoadedRecording:
             return
         self.manifest = manifest
 
+    @property
+    def segments(self) -> list[Segment]:
+        """The transcript segments sorted by start (the narration track's boxes)."""
+        return list(self._segments)
+
+    def segments_between(self, start_ms: float, end_ms: float) -> list[Segment]:
+        """Segments that overlap ``[start_ms, end_ms]`` (the visible part of the timeline)."""
+        index = max(0, bisect.bisect_right(self._segment_starts, start_ms) - 1)
+        found: list[Segment] = []
+        for segment in self._segments[index:]:
+            if segment.start_ms > end_ms:
+                break
+            if segment.end_ms >= start_ms:
+                found.append(segment)
+        return found
+
     def segment_at(self, time_ms: int) -> Segment | None:
         """The single segment containing ``time_ms`` (the one shown as the subtitle).
 

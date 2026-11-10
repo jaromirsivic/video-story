@@ -488,6 +488,66 @@ def moon_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+def refresh_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A circular arrow (the usual Refresh / reload sign)."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        import math
+
+        center = QPointF(s / 2, s / 2)
+        radius = s * 0.30
+        pen = _transport_pen(ink, s)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        box = QRectF(center.x() - radius, center.y() - radius, 2 * radius, 2 * radius)
+        start_deg, span_deg = 60, 285  # open at the top right, where the head sits
+        p.drawArc(box, start_deg * 16, span_deg * 16)
+        end = math.radians(start_deg + span_deg)
+        tip = QPointF(center.x() + radius * math.cos(end), center.y() - radius * math.sin(end))
+        # Arrow head pointing along the arc: Qt's arc runs counter-clockwise, which in
+        # screen coordinates (y down) is the direction (-sin, -cos).
+        tx, ty = -math.sin(end), -math.cos(end)
+        nx, ny = -ty, tx
+        head = s * 0.18
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(tip.x() + tx * head * 0.8, tip.y() + ty * head * 0.8),
+                    QPointF(tip.x() + nx * head * 0.6, tip.y() + ny * head * 0.6),
+                    QPointF(tip.x() - nx * head * 0.6, tip.y() - ny * head * 0.6),
+                ]
+            )
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
+def search_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A magnifying glass (lens and handle)."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = _transport_pen(ink, s)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        lens = QPointF(s * 0.43, s * 0.43)
+        radius = s * 0.22
+        p.drawEllipse(lens, radius, radius)
+        handle = QPen(pen)
+        handle.setWidthF(pen.widthF() * 1.5)
+        p.setPen(handle)
+        offset = radius * 0.7071
+        p.drawLine(
+            QPointF(lens.x() + offset + s * 0.02, lens.y() + offset + s * 0.02),
+            QPointF(s * 0.82, s * 0.82),
+        )
+
+    return QIcon(_pixmap(size, draw))
+
+
 __all__ = [
     "KEYPOINT_GREEN",
     "app_icon",
@@ -504,6 +564,8 @@ __all__ = [
     "process_icon",
     "record_icon",
     "rectangle_icon",
+    "refresh_icon",
+    "search_icon",
     "settings_icon",
     "skip_end_icon",
     "skip_start_icon",

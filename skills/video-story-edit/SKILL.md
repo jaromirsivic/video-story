@@ -106,5 +106,5 @@ When the user asks you directly for a video file ("make an MP4 of my last record
 FFmpeg with `libx264` and `aac` is needed (`doctor` reports it; `doctor --fix` or
 `setup` downloads a build). The source frames change only every capture interval
 (500 ms by default), so the video looks like a smooth slideshow at 24 fps. Only the
-start and the end can be cut; there is one audio track and no effects. Verified on
+start and the end can be cut; there is one audio track, a locked narration track showing where subtitles are, a search over the subtitles of all recordings, and no effects. Verified on
 Windows; Linux and macOS support of the editor window is planned.

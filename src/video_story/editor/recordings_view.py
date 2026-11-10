@@ -62,6 +62,7 @@ from video_story.host.runner import FrameIndex
 from .recording import StillFrames
 from .recordings_model import ItemRole, RecordingItem
 from .timeline.thumbnails import ThumbnailCache
+from .timeline.view import COLOR_MATCH
 
 PAD = 6
 THUMB_W = 112  # thumbnail box (16:10); the frame is fitted into it
@@ -81,6 +82,7 @@ BADGE_PAD = 4
 BADGE_TRANSCRIBING = "TRANSCRIBING..."
 BADGE_ARCHIVING = "ARCHIVING..."
 BADGE_ARCHIVED = "ARCHIVED"
+MATCH_FRAME_W = 3  # the yellow frame of a recording whose transcript has the searched text
 
 
 def format_percent(fraction: float) -> str:
@@ -248,6 +250,13 @@ class RecordingDelegate(QStyledItemDelegate):
         self._paint_dots(painter, dots, item, screen_id, text_color)
         if time_ms is not None and self.view.hover_row == index.row():
             self._paint_scrub_line(painter, rect)
+        if self.view.is_search_match(item.session_id):
+            pen = QPen(COLOR_MATCH, MATCH_FRAME_W)
+            pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            half = MATCH_FRAME_W / 2
+            painter.drawRect(QRectF(rect).adjusted(half, half, -half - 1, -half - 1))
         painter.setPen(QPen(separator_color(palette), 1))
         painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
         painter.restore()
@@ -356,6 +365,7 @@ class RecordingsListView(QListView):
         self._last_image: dict[str, QImage] = {}  # session id -> thumbnail drawn last
         # session id -> ("transcribing" | "archiving", fraction): work running right now
         self._activity: dict[str, tuple[str, float]] = {}
+        self._matches: set[str] = set()  # session ids with the searched text (yellow frame)
 
     # Model --------------------------------------------------------------------
 
@@ -389,6 +399,27 @@ class RecordingsListView(QListView):
 
     def activity(self, session_id: str) -> tuple[str, float] | None:
         return self._activity.get(session_id)
+
+    # Search ---------------------------------------------------------------------
+
+    def set_search_matches(self, session_ids) -> None:
+        """The recordings framed yellow (their transcript contains the searched text)."""
+        matches = set(session_ids)
+        if matches != self._matches:
+            self._matches = matches
+            self.viewport().update()
+
+    def add_search_match(self, session_id: str) -> None:
+        if session_id not in self._matches:
+            self._matches.add(session_id)
+            self.viewport().update()
+
+    def is_search_match(self, session_id: str) -> bool:
+        return session_id in self._matches
+
+    @property
+    def search_matches(self) -> set[str]:
+        return set(self._matches)
 
     def badge_of(self, item: RecordingItem) -> tuple[str, str | None] | None:
         """The label of the thumbnail: ``(text, percent or None)``, ``None`` for none."""

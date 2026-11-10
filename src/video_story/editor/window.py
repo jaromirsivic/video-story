@@ -48,7 +48,13 @@ earlier editor left unfinished. A recording in the queue cannot be edited: the p
 says "This video is being archived." with the percentage. An archived recording shows
 the still of every screen (``archive/<screenId>.jpg``), a flat audio line and the
 subtitles; the playhead moves and subtitles can be edited, but Auto process, Process,
-Instructions and Render are disabled.
+Instructions and Render are disabled; `ARCHIVED` blinks in the middle of the preview.
+
+Under the list sit the search box, the magnifier button and the Refresh button (a
+circular arrow). Enter or the magnifier searches the subtitles (see
+:mod:ideo_story.editor.search): the shown recording at once, the others in the
+background; matching recordings get a yellow frame, matching narration boxes turn
+yellow.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -67,6 +74,7 @@ from PySide6.QtCore import (
     QRegularExpression,
     QRunnable,
     QSettings,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -103,6 +111,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSplitterHandle,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -130,6 +139,7 @@ from video_story.host.retention import (
     recording_in_use,
     recordings_due_for_archive,
 )
+from video_story.ui.icons import refresh_icon, search_icon
 
 from .archiving import PHASE_TRANSCRIBING, ArchiveManager
 from .instructions_dialog import InstructionsDialog
@@ -137,8 +147,9 @@ from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import ItemRole, RecordingItem, RecordingsModel
-from .recordings_view import MIN_LIST_WIDTH, RecordingsListView, format_percent
+from .recordings_view import BADGE_ARCHIVED, MIN_LIST_WIDTH, RecordingsListView, format_percent
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
+from .search import SearchJob, SearchSignals, normalize_query, text_matches
 from .subtitle_dialog import SubtitleDialog
 from .theme import apply_theme, system_prefers_dark
 from .timeline.model import TimelineModel
@@ -190,6 +201,13 @@ ARCHIVING_MESSAGE = "This video is being archived."
 ARCHIVED_NOTE = "Not available for an archived video"
 BEING_ARCHIVED_REASON = "it is being archived"
 TRANSCRIBING_NOTE = "Available once the transcription is complete"
+SEARCH_PLACEHOLDER = "Search the spoken text"
+SEARCH_TOOLTIP = (
+    "Find a word or phrase in the subtitles of every recording; upper and lower case and "
+    "diacritics do not matter"
+)
+SEARCH_ICON_SIZE = 18
+SEARCH_BUTTON_MIN = 26  # px: the search and refresh buttons are at least this tall
 
 
 def delete_label(count: int) -> str:
@@ -392,6 +410,15 @@ class EditorWindow(QMainWindow):
         self._instructions = ""  # master instructions of the shown recording
         self._dark = system_prefers_dark()
         self._theme_chosen = False  # the user (or the settings) picked a theme
+        self._search_query = ""  # the phrase searched last ("" = no search)
+        self._search_generation = 0  # results of an older search are ignored
+        self._search_cancel: threading.Event | None = None
+        self._search_current_hits = 0  # matching subtitles of the shown recording
+        self._search_pool = QThreadPool(self)
+        self._search_pool.setMaxThreadCount(1)
+        self._search_signals = SearchSignals(self)
+        self._search_signals.match.connect(self._on_search_match)
+        self._search_signals.finished.connect(self._on_search_finished)
 
         self.setWindowTitle(WINDOW_TITLE)
         self._build_ui()
@@ -450,10 +477,24 @@ class EditorWindow(QMainWindow):
         self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_view.customContextMenuRequested.connect(self._show_list_menu)
         left_layout.addWidget(self.list_view, 1)
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setToolTip("Rescan the recording folder (F5)")
+        # Under the list: the search box, the magnifier (search) and Refresh (icon only).
+        search_row = QHBoxLayout()
+        search_row.setSpacing(4)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(SEARCH_PLACEHOLDER)
+        self.search_edit.setToolTip(SEARCH_TOOLTIP)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.returnPressed.connect(self.search_recordings)
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_button = self._icon_button("Search", f"{SEARCH_TOOLTIP} (Enter)")
+        self.search_button.clicked.connect(self.search_recordings)
+        search_row.addWidget(self.search_button)
+        self.refresh_button = self._icon_button("Refresh", "Rescan the recording folder (F5)")
         self.refresh_button.clicked.connect(self.refresh_recordings)
-        left_layout.addWidget(self.refresh_button)
+        search_row.addWidget(self.refresh_button)
+        left_layout.addLayout(search_row)
+        self._apply_icons()
         # Dragged narrower than the rows need, the list snaps away completely.
         left.setMinimumWidth(MIN_LIST_WIDTH)
         self.main_splitter.addWidget(left)
@@ -598,6 +639,24 @@ class EditorWindow(QMainWindow):
         status.addPermanentWidget(self.status_label, 1)
         self.setStatusBar(status)
 
+    def _icon_button(self, name: str, tooltip: str) -> QToolButton:
+        """A square icon-only button as tall as the search box; ``name`` stays its text
+        (tests, accessibility) without being shown."""
+        button = QToolButton()
+        button.setText(name)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setToolTip(tooltip)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        side = max(SEARCH_BUTTON_MIN, self.search_edit.sizeHint().height())
+        button.setFixedSize(side + 6, side)
+        button.setIconSize(QSize(SEARCH_ICON_SIZE, SEARCH_ICON_SIZE))
+        return button
+
+    def _apply_icons(self) -> None:
+        """(Re)draw the list's icons in the button text colour of the theme."""
+        self.search_button.setIcon(search_icon(SEARCH_ICON_SIZE * 2))
+        self.refresh_button.setIcon(refresh_icon(SEARCH_ICON_SIZE * 2))
+
     def _build_actions(self) -> None:
         def action(text: str, keys: list[str] | str, slot) -> QAction:
             act = QAction(text, self)
@@ -639,6 +698,91 @@ class EditorWindow(QMainWindow):
             self.list_view.setCurrentIndex(self.recordings.index(row))
             return
         self._select_row(row)
+
+    # Search -----------------------------------------------------------------
+
+    @property
+    def search_query(self) -> str:
+        """The phrase searched last (``""`` without a search)."""
+        return self._search_query
+
+    @property
+    def search_running(self) -> bool:
+        return self._search_pool.activeThreadCount() > 0
+
+    def search_recordings(self) -> None:
+        """Enter in the search box or the magnifier button: find the phrase in the
+        subtitles, without regard to case and diacritics. The shown recording is
+        searched first (its matching narration boxes turn yellow at once), the others
+        in the background; every recording with a match gets a yellow frame in the list.
+        An empty box clears the search."""
+        query = " ".join(self.search_edit.text().split())
+        self._cancel_search()
+        self._search_generation += 1
+        self._search_query = query
+        self.timeline.set_search(query)
+        self.list_view.set_search_matches(())
+        self._search_current_hits = 0
+        folded = normalize_query(query)
+        if not folded:
+            return
+        recording = self.recording
+        if recording is not None:
+            self._search_current_hits = self._count_hits(recording, folded)
+            if self._search_current_hits:
+                self.list_view.add_search_match(recording.session_id)
+        shown = recording.session_id if recording is not None else None
+        others = [item.paths for item in self.recordings.items if item.session_id != shown]
+        self._show_status_message(f"Searching for “{query}”...")
+        cancel = threading.Event()
+        self._search_cancel = cancel
+        self._search_pool.start(
+            SearchJob(self._search_generation, folded, others, self._search_signals, cancel)
+        )
+
+    @staticmethod
+    def _count_hits(recording: LoadedRecording, folded: str) -> int:
+        return sum(1 for s in recording.segments if text_matches(s.text, folded))
+
+    def _cancel_search(self) -> None:
+        if self._search_cancel is not None:
+            self._search_cancel.set()
+            self._search_cancel = None
+
+    def _on_search_text_changed(self, text: str) -> None:
+        """Emptying the box (also with its clear button) ends the search at once."""
+        if not text.strip() and self._search_query:
+            self.search_recordings()
+
+    def _on_search_match(self, generation: int, session_id: str) -> None:
+        if generation == self._search_generation:
+            self.list_view.add_search_match(session_id)
+
+    def _on_search_finished(self, generation: int, _searched: int) -> None:
+        if generation != self._search_generation:
+            return
+        self._search_cancel = None
+        found = len(self.list_view.search_matches)
+        hits = self._search_current_hits
+        here = f"; {hits} subtitle{'s' if hits != 1 else ''} in this one" if hits else ""
+        self._show_status_message(
+            f"“{self._search_query}”: found in {found} recording{'s' if found != 1 else ''}{here}"
+        )
+
+    def _update_current_search_match(self) -> None:
+        """The shown recording's subtitles changed (transcription, Edit): keep its frame
+        in the list and the hit count in step with the search."""
+        recording = self.recording
+        folded = normalize_query(self._search_query)
+        if recording is None or not folded:
+            return
+        self._search_current_hits = self._count_hits(recording, folded)
+        matches = self.list_view.search_matches
+        if self._search_current_hits:
+            matches.add(recording.session_id)
+        else:
+            matches.discard(recording.session_id)
+        self.list_view.set_search_matches(matches)
 
     def _select_row(self, row: int) -> None:
         if row < 0:
@@ -963,6 +1107,8 @@ class EditorWindow(QMainWindow):
         self._auto_cancelled = False  # a cancelled countdown belongs to the previous recording
         self.recording = recording
         self.preview.view.clear()
+        archived = recording is not None and recording.archived
+        self.preview.view.set_badge(BADGE_ARCHIVED if archived else None)  # blinks
         self.timeline.set_recording(recording)
         if recording is not None:
             self._restore_crop(recording)
@@ -983,6 +1129,7 @@ class EditorWindow(QMainWindow):
             self.timeline.setFocus()
         self._sync_playhead()
         self._update_transcription_ui()
+        self._update_current_search_match()
         self._update_status()
 
     @property
@@ -1363,6 +1510,7 @@ class EditorWindow(QMainWindow):
         apply_theme(dark)
         self.timeline.set_theme(dark)
         self.preview.set_dark(dark)  # after the palette: the icons take its text colour
+        self._apply_icons()
 
     def toggle_theme(self) -> None:
         self.set_theme(not self._dark)
@@ -1401,6 +1549,7 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Cannot save the subtitle: {exc}")
             return False
         self._sync_playhead()
+        self._update_current_search_match()
         self._show_status_message(
             f"Subtitle saved: {format_timestamp(edited.start_ms)}-{format_timestamp(edited.end_ms)}"
         )
@@ -1609,6 +1758,7 @@ class EditorWindow(QMainWindow):
             "transcribing", recording.transcribed_ms, self._transcription_eta.get(session_id)
         )
         self.preview.set_subtitle(recording.subtitle_at(self.model.playhead_ms))
+        self._update_current_search_match()
         self.transcription_changed.emit(session_id)
 
     def transcription_eta(self, session_id: str) -> float | None:
@@ -1975,6 +2125,8 @@ class EditorWindow(QMainWindow):
         self._attach_timer.stop()
         self._process_feedback_timer.stop()
         self._auto_timer.stop()
+        self._cancel_search()
+        self._search_pool.waitForDone(5000)
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)

@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QThreadPool,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
@@ -95,11 +96,19 @@ WATERMARK_LIGHT = (
 )
 WATERMARK_DARK = (
     (QColor("#101010"), QColor("#262626")),
-    (QColor("#0d1520"), QColor("#1c2d45")),
+    (QColor("#1a2b44"), QColor("#2f4a72")),  # lighter than the others: navy read as black
     (QColor("#0e190f"), QColor("#1e3720")),
     (QColor("#1d0e0e"), QColor("#3c2020")),
 )
 WATERMARK_GAP = "      "  # between the repeats of "screen1 2560x1600" on a line
+BADGE_BLINK_MS = 1000  # the ARCHIVED label: one second on, one second off
+BADGE_BG = QColor("#ffffff")  # as the list thumbnail's label: black capitals on white
+BADGE_FG = QColor("#000000")
+
+
+def badge_pixel_size(width: int, height: int) -> int:
+    """Font size of the blinking label: readable at a glance, never huge."""
+    return int(max(14, min(48, round(min(width, height) / 9))))
 
 
 def screen_number(screen_id: str | None) -> int:
@@ -179,6 +188,11 @@ class PreviewWidget(QWidget):
         self._background = PREVIEW_BG_DARK
         self._dark = True
         self._watermark: tuple[tuple, QPixmap] | None = None  # (key, pixmap) cache
+        self._badge: str | None = None  # blinking label in the middle (ARCHIVED)
+        self._badge_on = True
+        self._badge_timer = QTimer(self)
+        self._badge_timer.setInterval(BADGE_BLINK_MS)
+        self._badge_timer.timeout.connect(self._blink_badge)
         self.setMinimumSize(160, 100)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -203,6 +217,33 @@ class PreviewWidget(QWidget):
     @property
     def message(self) -> str | None:
         return self._message
+
+    def set_badge(self, text: str | None) -> None:
+        """A label in the middle of the preview, black capitals on white like the one on
+        the list's thumbnail, blinking: one second visible, one second hidden
+        (``ARCHIVED`` for an archived recording); ``None`` removes it."""
+        if text == self._badge:
+            return
+        self._badge = text
+        self._badge_on = True
+        if text:
+            self._badge_timer.start()
+        else:
+            self._badge_timer.stop()
+        self.update()
+
+    @property
+    def badge(self) -> str | None:
+        return self._badge
+
+    @property
+    def badge_visible(self) -> bool:
+        """True while the blinking label is in its visible second."""
+        return bool(self._badge) and self._badge_on
+
+    def _blink_badge(self) -> None:
+        self._badge_on = not self._badge_on
+        self.update()
 
     def clear(self) -> None:
         """Another recording: forget every frame and the zoom state."""
@@ -485,6 +526,8 @@ class PreviewWidget(QWidget):
                         font.setPointSizeF(size * 2.2)
                     painter.setFont(font)
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+            else:
+                self._paint_badge(painter)
             painter.end()
             return
         if self._image_size != image.size():
@@ -506,7 +549,27 @@ class PreviewWidget(QWidget):
         ):
             at = self.map_from_image(QPointF(cursor.x, cursor.y))
             self._paint_cursor(painter, at.x(), at.y())
+        self._paint_badge(painter)
         painter.end()
+
+    def _paint_badge(self, painter: QPainter) -> None:
+        if not self.badge_visible:
+            return
+        assert self._badge is not None
+        font = QFont(painter.font())
+        font.setBold(True)
+        font.setPixelSize(badge_pixel_size(self.width(), self.height()))
+        painter.save()
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        pad = max(6, metrics.height() // 3)
+        width = metrics.horizontalAdvance(self._badge) + 2 * pad
+        height = metrics.height() + pad
+        area = QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
+        painter.fillRect(area, BADGE_BG)
+        painter.setPen(QPen(BADGE_FG))
+        painter.drawText(area, int(Qt.AlignmentFlag.AlignCenter), self._badge)
+        painter.restore()
 
     def _watermark_pixmap(self, image_width: int, image_height: int) -> QPixmap:
         """The widget-sized background with the diagonal ``screenN WxH`` text (cached)."""

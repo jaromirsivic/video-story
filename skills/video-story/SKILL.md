@@ -58,7 +58,7 @@ While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks
 current moment as important (the button counts down 3, 2, 1 before the next one), and
 **Draw** (`Ctrl+Alt+D`) switches the drawing layer on and off. The user can press
 **Stop** (`Ctrl+Alt+S`), then choose **Video Editor** (the default: the editor opens at once and
-transcribes while the user crops - the green arrow under the audio track says
+transcribes while the user crops - the green arrow under the narration track says
 `transcribing (ETA: m:ss)` -, optionally corrects subtitles with **Edit**, types master
 **Instructions** for you, and presses its green **Process** button, which closes the
 editor; Render and Process are available only once the transcript is complete, and

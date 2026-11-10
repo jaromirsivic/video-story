@@ -1,7 +1,15 @@
-"""Custom-painted timeline: ruler, one video track per screen, audio track, crop handles.
+"""Custom-painted timeline: ruler, one video track per screen, audio track, narration
+track, crop handles.
 
-Below the audio track there is a narrow lane for the background transcription: while
-the recording is still being transcribed, a green arrow under the waveform marks how
+The narration track under the audio track (half its height, a padlock in its header:
+it cannot be edited or moved) shows a box wherever a subtitle has words and nothing in
+the pauses. Zoomed in to :data:`NARRATION_TEXT_MIN_ZOOM` px/s or more, each box shows
+its words, cut with an ellipsis; hovering a box shows the whole text. Boxes that
+contain the phrase of the recordings search (:mod:`video_story.editor.search`) are
+yellow.
+
+Below the narration track there is a narrow lane for the background transcription: while
+the recording is still being transcribed, a green arrow under the tracks marks how
 far the transcription got (the audio beyond it is shaded) with "transcribing" and the
 estimated time to the end written under the arrow; the lane stays empty once the
 transcript is complete.
@@ -37,15 +45,23 @@ from PySide6.QtWidgets import QScrollBar, QToolTip, QWidget
 from video_story.core.timeline import format_timestamp
 from video_story.editor.recording import LoadedRecording
 
+from ..search import normalize_query, text_matches
 from .model import TimelineModel
 from .thumbnails import ThumbnailCache
 from .waveform import BLOCK_MS, WaveformLoader, column_peaks
 
 RULER_H = 26
-HEADER_W = 70
+HEADER_W = 80  # wide enough for "narration" and its padlock
 TRACK_H = 60
 AUDIO_H = TRACK_H  # the audio track is as tall as each screen track
-PROGRESS_H = 30  # lane under the audio track: transcription arrow and its label
+NARRATION_H = AUDIO_H // 2  # the narration track is half as tall as the audio track
+NARRATION_TITLE = "narration"
+NARRATION_TOOLTIP = "Spoken text (locked): one box per subtitle"
+NARRATION_TEXT_MIN_ZOOM = 40.0  # px per second from which the boxes show their words
+NARRATION_TEXT_MIN_W = 24  # px: narrower boxes stay plain even zoomed in
+LOCK_W = 10  # the padlock in the narration header
+LOCK_H = 12
+PROGRESS_H = 30  # lane under the narration track: transcription arrow and its label
 ARROW_H = 10
 ARROW_HALF_W = 7
 GAP = 3
@@ -81,7 +97,13 @@ COLOR_PLAYHEAD = QColor("#ff4a4a")
 COLOR_PLAY_MARKER = QColor("#ffffff")
 COLOR_KEYPOINT = QColor("#2fd36f")
 COLOR_TRANSCRIBING = QColor("#3ddc84")
+COLOR_TRANSCRIBING_LIGHT = QColor("#178a45")  # the bright green fades on the light lane
 COLOR_UNTRANSCRIBED = QColor(0, 0, 0, 90)  # audio whisper has not reached yet
+COLOR_NARRATION = QColor("#4d5966")  # a box of the narration track (one per subtitle)
+COLOR_NARRATION_EDGE = QColor("#6c7a88")
+COLOR_MATCH = QColor("#f5cf1d")  # search hit: narration box, recordings list frame
+COLOR_MATCH_EDGE = QColor("#b89600")
+COLOR_MATCH_TEXT = QColor("#000000")
 
 # Theme dependent colours (the dark set equals the module constants above).
 DARK_COLORS = {
@@ -95,6 +117,9 @@ DARK_COLORS = {
     "shade": COLOR_SHADE,
     "untranscribed": COLOR_UNTRANSCRIBED,
     "play_marker": COLOR_PLAY_MARKER,
+    "transcribing": COLOR_TRANSCRIBING,
+    "narration": COLOR_NARRATION,
+    "narration_edge": COLOR_NARRATION_EDGE,
 }
 LIGHT_COLORS = {
     "bg": QColor("#e4e4e4"),
@@ -107,6 +132,9 @@ LIGHT_COLORS = {
     "shade": QColor(0, 0, 0, 70),
     "untranscribed": QColor(0, 0, 0, 50),
     "play_marker": QColor("#505050"),  # a white arrow would vanish on the light ruler
+    "transcribing": COLOR_TRANSCRIBING_LIGHT,
+    "narration": QColor("#c3ccd5"),
+    "narration_edge": QColor("#98a5b2"),
 }
 
 TRANSCRIBING_LABEL = "transcribing"
@@ -183,10 +211,12 @@ class TimelineView(QWidget):
         self._hover_keypoint: int | None = None  # keypoint under the mouse (tooltip shown)
         self._audio_fit = False  # the waveform is stretched to the loudest sound
         self._audio_peak: float | None = None  # loudest sample of the loaded audio (0..1)
+        self._search = ""  # folded search phrase: matching narration boxes are yellow
+        self._hover_segment: tuple[int, int] | None = None  # narration box under the mouse
         self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumHeight(RULER_H + TRACK_H + AUDIO_H + PROGRESS_H + 4 * GAP + 20)
+        self.setMinimumHeight(RULER_H + TRACK_H + AUDIO_H + NARRATION_H + PROGRESS_H + 5 * GAP + 20)
         self.setMinimumWidth(HEADER_W + 200)
 
     # Public API -------------------------------------------------------------
@@ -196,6 +226,7 @@ class TimelineView(QWidget):
         self._transcription = None
         self._eta_s = None
         self._hover_keypoint = None
+        self._hover_segment = None
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
@@ -226,6 +257,23 @@ class TimelineView(QWidget):
     @property
     def transcription(self) -> tuple[str, int] | None:
         return self._transcription
+
+    def set_search(self, query: str | None) -> None:
+        """The search phrase: narration boxes whose text contains it are drawn yellow
+        (case and diacritics do not matter); ``None`` or ``""`` clears it."""
+        folded = normalize_query(query)
+        if folded != self._search:
+            self._search = folded
+            self.update()
+
+    @property
+    def search(self) -> str:
+        """The folded search phrase (``""`` without a search)."""
+        return self._search
+
+    def segment_matches(self, text: str) -> bool:
+        """True when a narration box with ``text`` is highlighted by the search."""
+        return text_matches(text, self._search)
 
     @property
     def eta_s(self) -> float | None:
@@ -276,7 +324,10 @@ class TimelineView(QWidget):
 
     def sizeHint(self) -> QSize:  # noqa: N802
         tracks = max(1, len(self.model.screens))
-        height = RULER_H + GAP + tracks * (TRACK_H + GAP) + AUDIO_H + GAP + PROGRESS_H + GAP
+        height = (
+            RULER_H + GAP + tracks * (TRACK_H + GAP) + AUDIO_H + GAP + NARRATION_H + GAP
+            + PROGRESS_H + GAP
+        )  # fmt: skip
         return QSize(900, height + self.scrollbar.sizeHint().height())
 
     def zoom_in(self) -> None:
@@ -333,10 +384,58 @@ class TimelineView(QWidget):
         y = self._tracks_top() + len(self.model.screens) * (TRACK_H + GAP)
         return QRect(0, y, self.width(), AUDIO_H)
 
-    def progress_rect(self) -> QRect:
-        """The lane under the audio track that holds the transcription arrow."""
+    def narration_rect(self) -> QRect:
+        """The locked narration track under the audio track (half its height)."""
         audio = self.audio_rect()
-        return QRect(0, audio.bottom() + 1 + GAP, self.width(), PROGRESS_H)
+        return QRect(0, audio.bottom() + 1 + GAP, self.width(), NARRATION_H)
+
+    def tracks_bottom(self) -> int:
+        """Last pixel row of the tracks (the narration track): playhead, keypoints and
+        the crop reach down to here."""
+        return self.narration_rect().bottom()
+
+    def progress_rect(self) -> QRect:
+        """The lane under the narration track that holds the transcription arrow."""
+        narration = self.narration_rect()
+        return QRect(0, narration.bottom() + 1 + GAP, self.width(), PROGRESS_H)
+
+    def lock_rect(self) -> QRect:
+        """The padlock in the narration header (right edge, vertically centred)."""
+        lane = self.narration_rect()
+        return QRect(HEADER_W - 6 - LOCK_W, lane.y() + (lane.height() - LOCK_H) // 2, LOCK_W,
+                     LOCK_H)  # fmt: skip
+
+    def narration_boxes(self) -> list[tuple[QRectF, object]]:
+        """The visible narration boxes: ``(rect, segment)`` for every subtitle with text."""
+        if self.recording is None:
+            return []
+        lane = self.narration_rect()
+        top = lane.y() + 3
+        height = lane.height() - 6
+        start = self.model.scroll_ms
+        end = self.model.x_to_time(self._body_width())
+        boxes: list[tuple[QRectF, object]] = []
+        for segment in self.recording.segments_between(start, end):
+            if not segment.text.strip():
+                continue  # no words, no box
+            left = self._x(segment.start_ms)
+            right = self._x(segment.end_ms)
+            width = max(2.0, right - left - 1)  # a 1 px gap separates touching boxes
+            boxes.append((QRectF(left, top, width, height), segment))
+        return boxes
+
+    def narration_segment_at(self, pos: QPoint):
+        """The narration segment whose box is under ``pos`` (``None`` elsewhere)."""
+        if pos.x() < HEADER_W or not self.narration_rect().contains(pos):
+            return None
+        for rect, segment in self.narration_boxes():
+            if rect.left() - 1 <= pos.x() <= rect.right() + 1:
+                return segment
+        return None
+
+    def narration_shows_text(self) -> bool:
+        """Zoomed in far enough for the boxes to show their words."""
+        return self.model.zoom >= NARRATION_TEXT_MIN_ZOOM
 
     def transcription_arrow_x(self) -> float | None:
         """Where the transcription arrow is drawn (``None`` when nothing is shown)."""
@@ -388,7 +487,7 @@ class TimelineView(QWidget):
 
     def keypoint_at(self, pos: QPoint) -> int | None:
         """The keypoint whose line is under ``pos`` (within ``KEYPOINT_HIT_PX``)."""
-        inside = 0 <= pos.y() <= self.audio_rect().bottom()  # its arrow on the ruler too
+        inside = 0 <= pos.y() <= self.tracks_bottom()  # its arrow on the ruler too
         if pos.x() < HEADER_W or not inside:
             return None
         best: int | None = None
@@ -490,17 +589,40 @@ class TimelineView(QWidget):
     def _update_keypoint_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
         keypoint = self.keypoint_at(pos)
         if keypoint == self._hover_keypoint:
+            if keypoint is None:
+                self._update_narration_tooltip(pos, global_pos)
             return
         self._hover_keypoint = keypoint
         if keypoint is None:
             QToolTip.hideText()
+            self._update_narration_tooltip(pos, global_pos)
             return
+        self._hover_segment = None
         index = self.model.keypoints.index(keypoint) + 1
         QToolTip.showText(global_pos, self.keypoint_tooltip(index, keypoint), self)
 
+    def _update_narration_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
+        """Hovering a narration box shows its words; the header explains the track."""
+        segment = self.narration_segment_at(pos)
+        on_header = pos.x() < HEADER_W and self.narration_rect().contains(pos)
+        key = (segment.start_ms, segment.end_ms) if segment is not None else None
+        if on_header:
+            key = (-1, -1)
+        if key == self._hover_segment:
+            return
+        self._hover_segment = key
+        if on_header:
+            QToolTip.showText(global_pos, NARRATION_TOOLTIP, self)
+        elif segment is not None:
+            text = f"{format_timestamp(segment.start_ms)}  {segment.text.strip()}"
+            QToolTip.showText(global_pos, text, self)
+        else:
+            QToolTip.hideText()
+
     def leaveEvent(self, event) -> None:  # noqa: N802
-        if self._hover_keypoint is not None:
+        if self._hover_keypoint is not None or self._hover_segment is not None:
             self._hover_keypoint = None
+            self._hover_segment = None
             QToolTip.hideText()
         super().leaveEvent(event)
 
@@ -540,6 +662,7 @@ class TimelineView(QWidget):
         for screen_id, rect in self.track_rects():
             self._paint_video_track(painter, screen_id, rect)
         self._paint_audio_track(painter, self.audio_rect())
+        self._paint_narration_track(painter, self.narration_rect())
         self._paint_crop(painter, canvas)
         self._paint_keypoints(painter)
         self._paint_transcription(painter)
@@ -658,6 +781,73 @@ class TimelineView(QWidget):
         painter.drawLine(body.x(), int(mid), body.right(), int(mid))
         self._paint_fit_button(painter)
 
+    def _paint_narration_track(self, painter: QPainter, rect: QRect) -> None:
+        """The locked narration track: a box wherever a subtitle has words (none in the
+        pauses), yellow when it contains the search phrase; zoomed in far enough, each
+        box shows its words, cut with an ellipsis where they do not fit."""
+        body = QRect(HEADER_W, rect.y(), self._body_width(), rect.height())
+        painter.fillRect(body, self.colors["track"])
+        header = QRect(rect.x(), rect.y(), HEADER_W, rect.height())
+        painter.fillRect(header, self.colors["header"])
+        painter.setPen(QPen(self.colors["text"]))
+        title_rect = header.adjusted(6, 0, -(LOCK_W + 10), 0)
+        title = painter.fontMetrics().elidedText(
+            NARRATION_TITLE, Qt.TextElideMode.ElideRight, title_rect.width()
+        )
+        painter.drawText(
+            title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title
+        )
+        self._paint_lock(painter, self.lock_rect())
+        boxes = self.narration_boxes()
+        if not boxes:
+            return
+        painter.save()
+        painter.setClipRect(body)
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        show_text = self.narration_shows_text()
+        for box, segment in boxes:
+            hit = self.segment_matches(segment.text)
+            fill = COLOR_MATCH if hit else self.colors["narration"]
+            edge = COLOR_MATCH_EDGE if hit else self.colors["narration_edge"]
+            painter.setPen(QPen(edge, 1))
+            painter.setBrush(QBrush(fill))
+            painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
+            if show_text and box.width() >= NARRATION_TEXT_MIN_W:
+                inner = box.adjusted(4, 0, -4, 0)
+                text = metrics.elidedText(
+                    " ".join(segment.text.split()), Qt.TextElideMode.ElideRight, int(inner.width())
+                )
+                painter.setPen(QPen(COLOR_MATCH_TEXT if hit else self.colors["text"]))
+                painter.drawText(
+                    inner, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text
+                )
+        painter.restore()
+
+    def _paint_lock(self, painter: QPainter, rect: QRect) -> None:
+        """A closed padlock: the track cannot be edited or moved."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        color = self.colors["text_dim"]
+        body = QRectF(rect.x(), rect.y() + rect.height() * 0.45, rect.width(),
+                      rect.height() * 0.55)  # fmt: skip
+        shackle = QRectF(rect.x() + rect.width() * 0.2, rect.y() + 0.75, rect.width() * 0.6,
+                         rect.height() * 0.8)  # fmt: skip
+        pen = QPen(color, 1.5)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(shackle, 0, 180 * 16)
+        painter.drawLine(QPointF(shackle.left(), shackle.center().y()),
+                         QPointF(shackle.left(), body.top()))  # fmt: skip
+        painter.drawLine(QPointF(shackle.right(), shackle.center().y()),
+                         QPointF(shackle.right(), body.top()))  # fmt: skip
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawRoundedRect(body, 1.5, 1.5)
+        painter.restore()
+
     def _paint_fit_button(self, painter: QPainter) -> None:
         """Four corner brackets: pointing out (full screen) while the waveform shows its
         real level, pointing in (back to normal) while it is stretched."""
@@ -694,7 +884,7 @@ class TimelineView(QWidget):
 
     def _paint_crop(self, painter: QPainter, canvas: QRect) -> None:
         top = self._tracks_top()
-        bottom = self.audio_rect().bottom() + 1
+        bottom = self.tracks_bottom() + 1
         x_in = self._x(self.model.in_ms)
         x_out = self._x(self.model.out_ms)
         shade = self.colors["shade"]
@@ -732,7 +922,7 @@ class TimelineView(QWidget):
         red one (no handle, not movable). The hovered keypoint is drawn a little bolder."""
         if not self.model.keypoints:
             return
-        bottom = self.audio_rect().bottom() + 1
+        bottom = self.tracks_bottom() + 1
         painter.setClipRect(QRect(HEADER_W, 0, self._body_width(), bottom))
         pen = QPen(COLOR_KEYPOINT, KEYPOINT_W)
         painter.setBrush(QBrush(COLOR_KEYPOINT))
@@ -807,8 +997,9 @@ class TimelineView(QWidget):
             x = self.transcription_arrow_x()
             assert x is not None
             top = lane.y() + 1
-            painter.setPen(QPen(COLOR_TRANSCRIBING, 2))
-            painter.setBrush(QBrush(COLOR_TRANSCRIBING))
+            green = self.colors["transcribing"]
+            painter.setPen(QPen(green, 2))
+            painter.setBrush(QBrush(green))
             painter.drawPolygon(
                 QPolygonF(
                     [
@@ -824,7 +1015,7 @@ class TimelineView(QWidget):
             width = metrics.horizontalAdvance(label) + 8
             left = min(max(x - width / 2, float(body_left)), float(body_right - width))
             text_rect = QRectF(left, top + ARROW_H + 4, width, lane.height() - ARROW_H - 5)
-            painter.setPen(QPen(COLOR_TRANSCRIBING))
+            painter.setPen(QPen(green))
             painter.drawText(
                 text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label
             )
@@ -843,7 +1034,7 @@ class TimelineView(QWidget):
             return
         x = min(x, self.width() - 1)  # the end of the recording lands on the last column
         painter.setPen(QPen(COLOR_PLAYHEAD, 1))
-        painter.drawLine(QPointF(x, 0), QPointF(x, self.audio_rect().bottom() + 1))
+        painter.drawLine(QPointF(x, 0), QPointF(x, self.tracks_bottom() + 1))
         painter.setBrush(QBrush(COLOR_PLAYHEAD))
         painter.drawPolygon(QPolygonF([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 9)]))
 
@@ -851,8 +1042,11 @@ class TimelineView(QWidget):
 __all__ = [
     "AUDIO_H",
     "COLOR_KEYPOINT",
+    "COLOR_MATCH",
+    "COLOR_NARRATION",
     "COLOR_PLAY_MARKER",
     "COLOR_TRANSCRIBING",
+    "COLOR_TRANSCRIBING_LIGHT",
     "DARK_COLORS",
     "HEADER_W",
     "KEYPOINT_ARROW_H",
@@ -860,6 +1054,8 @@ __all__ = [
     "KEYPOINT_HIT_PX",
     "KEYPOINT_W",
     "LIGHT_COLORS",
+    "NARRATION_H",
+    "NARRATION_TEXT_MIN_ZOOM",
     "PLAYHEAD_HIT_PX",
     "PROGRESS_H",
     "RULER_H",
