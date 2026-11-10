@@ -57,7 +57,9 @@ What the user can do in the window: select a recording on the left; press Space 
 play (icon transport buttons under the preview: go to In, step back, play/pause, stop,
 step forward, go to Out; **Stop** returns to where Play was last pressed, marked by a
 white arrow on the ruler; subtitles always shown under the preview, up to five lines and
-then scrolling; the mouse wheel zooms the preview up to 800 %); switch between the light
+then scrolling; the mouse wheel zooms the preview up to 800 %; a click on the mouse left
+of the transport opens the **Mouse** window with everything recorded about the mouse
+and the clipboard at the playhead); switch between the light
 and the dark theme with the button in the right corner above **Edit** (Ctrl+T); correct
 the words of a subtitle with the **Edit** button next to it (the From/To times are
 read-only; Save rewrites `transcript.json` and `transcript.txt`, so the transcript you

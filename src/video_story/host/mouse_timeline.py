@@ -178,6 +178,10 @@ class _Formatter:
             excerpt += f" ({more} chars, `mouse --at {time_ms}`)"
         return f" {label} {excerpt}"
 
+    def frames_part(self, a: MouseAction) -> str:
+        frames = self.frames(a.t, a.until)
+        return f" ({frames})" if frames else ""
+
     def flags(self, a: MouseAction) -> str:
         notes = []
         if a.held_ms:
@@ -204,7 +208,7 @@ class _Formatter:
             text += self.content(el, a.t)
             if a.clicks > 1 and end_el is not None and end_el.content_kind == "selection":
                 text += self.content(end_el, a.t)
-            return text + self.flags(a) + f" ({self.frames(a.t, a.until)})"
+            return text + self.flags(a) + self.frames_part(a)
         if a.kind == "drag":
             end = a.end or a.at
             button = BUTTON_NAMES.get(a.button or "", a.button or "?")
@@ -216,7 +220,7 @@ class _Formatter:
                 text += f" to{_element_text(end_el).removeprefix(' on')}"
             if end_el is not None and end_el.content_kind == "selection":
                 text += self.content(end_el, a.t)
-            return text + self.flags(a) + f" ({self.frames(a.t, a.until)})"
+            return text + self.flags(a) + self.frames_part(a)
         if a.kind in ("scroll", "zoom"):
             name = "ZOOM-SCROLL" if a.kind == "zoom" else "SCROLL"
             how = " (Ctrl+wheel)" if a.kind == "zoom" else ""
@@ -231,6 +235,15 @@ class _Formatter:
             f"{a.t}-{a.until} GESTURE {a.gesture} {a.direction or ''} 2 fingers {detail} "
             f"{_where(a.at)}{win} (touchpad)"
         ).replace("  ", " ")
+
+
+def action_lines(log: MouseLog, actions: list[MouseAction]) -> list[str]:
+    """Timeline lines of ``actions`` (in this order) without the frame times, e.g. for
+    the editor's mouse window; the window and repeated content are named as in the
+    timeline (only when they changed, ``same as <ms>``)."""
+    loaded = _Loaded(log=log, params=MouseSystemParams(), screens=[], duration_ms=0)
+    formatter = _Formatter(loaded, lambda _t, _u: "")
+    return [formatter.line(a) for a in actions]
 
 
 def _summarize(actions: list[MouseAction], formatter: _Formatter) -> list[MouseLine]:
@@ -470,6 +483,8 @@ def mouse_detail(
 __all__ = [
     "LEGEND",
     "MOUSE_MODES",
+    "BUTTON_NAMES",
+    "action_lines",
     "MouseTimeline",
     "mouse_detail",
     "mouse_events",

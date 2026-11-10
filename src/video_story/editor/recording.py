@@ -28,6 +28,7 @@ from video_story.core.audio_mix import (
     write_selection,
 )
 from video_story.core.cursor import CursorPosition, cursor_from_json
+from video_story.core.input_events import MouseLog, read_mouse_log
 from video_story.core.manifest import Manifest, TranscriptInfo, read_manifest, write_manifest
 from video_story.core.naming import FrameName
 from video_story.core.screens import Screen
@@ -41,6 +42,9 @@ from video_story.core.transcript import (
     write_transcript,
 )
 from video_story.host.runner import FrameIndex, FrameRef
+
+from .mouse_activity import MouseActivity
+from .mouse_details import MouseDetails, load_mouse_details
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +108,18 @@ def _load_frame_index(paths: SessionPaths, base: Path) -> FrameIndex:
     return FrameIndex.of(paths, base)
 
 
+def _load_mouse(paths: SessionPaths, base: Path) -> MouseLog | None:
+    """``input/mouse.jsonl``; ``None`` when the mouse was not recorded (or unreadable)."""
+    path = paths.mouse_log_path(base)
+    if not path.is_file():
+        return None
+    try:
+        return read_mouse_log(path)
+    except OSError as exc:
+        log.warning("cannot read mouse log %s: %s", path, exc)
+        return None
+
+
 class LoadedRecording:
     """Everything the editor needs about one recording, loaded once (in a worker)."""
 
@@ -125,6 +141,11 @@ class LoadedRecording:
         # The audio tracks on disk (microphone, computer) and which are switched on.
         self.tracks: dict[str, Path] = {}
         self.selection = TrackSelection()
+        # Buttons and wheels in use over time (``input/mouse.jsonl``); None: not recorded.
+        self.mouse: MouseActivity | None = None
+        self.mouse_log: MouseLog | None = None
+        # Built on demand for the Mouse window (reads every sidecar): mouse_details().
+        self._mouse_details: MouseDetails | None = None
         self._times: dict[str, list[int]] = {
             sid: [n.time_ms for n in names] for sid, names in frames.by_screen.items()
         }
@@ -146,14 +167,18 @@ class LoadedRecording:
                 transcript = read_transcript(transcript_path)
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("cannot read transcript %s: %s", transcript_path, exc)
+        mouse_log = _load_mouse(paths, base)
         if archive is not None and archive.archived:
             screen_ids = [s.id for s in manifest.screens] or archive.screens
             frames: FrameIndex = StillFrames(
                 paths.archive_dir(base), paths.frames_info_dir(base), screen_ids
             )
-            return cls(paths, manifest, frames, transcript, None, archive)
+            archived = cls(paths, manifest, frames, transcript, None, archive)
+            archived.set_mouse_log(mouse_log)  # input/ is kept by the archiving
+            return archived
         frames = _load_frame_index(paths, base)
         recording = cls(paths, manifest, frames, transcript, None, archive)
+        recording.set_mouse_log(mouse_log)
         recording.tracks = existing_tracks(paths, base)
         recording.selection = read_selection(paths, base)
         recording.audio = audio_mix(recording.tracks, recording.selection)
@@ -236,6 +261,33 @@ class LoadedRecording:
         if index >= len(times):
             return None
         return self.frames._ref(self.frames.by_screen[screen_id][index])
+
+    # Mouse ------------------------------------------------------------------
+
+    def set_mouse_log(self, mouse_log: MouseLog | None) -> None:
+        self.mouse_log = mouse_log
+        self.mouse = MouseActivity.from_log(mouse_log) if mouse_log is not None else None
+        self._mouse_details = None
+
+    @property
+    def mouse_details_ready(self) -> MouseDetails | None:
+        return self._mouse_details
+
+    def mouse_details(self) -> MouseDetails:
+        """Mouse and clipboard by time for the Mouse window; the first call reads every
+        frame sidecar (call it from a worker), later calls return the same object."""
+        if self._mouse_details is None:
+            base = self.paths.final_dir
+            mouse = self.manifest.mouse
+            self._mouse_details = load_mouse_details(
+                self.mouse_log,
+                mouse.params if mouse is not None else None,
+                self.duration_ms,
+                self.manifest.screens,
+                self.paths.frames_dir(base),
+                self.paths.frames_info_dir(base),
+            )
+        return self._mouse_details
 
     def cursor_at(self, screen_id: str, time_ms: int) -> CursorPosition | None:
         """Cursor from the sidecar of the frame valid at ``time_ms`` (any screen); none

@@ -144,6 +144,7 @@ from video_story.ui.icons import refresh_icon, search_icon
 
 from .archiving import PHASE_TRANSCRIBING, ArchiveManager
 from .instructions_dialog import InstructionsDialog
+from .mouse_details_dialog import LOADING, MouseDetailsDialog
 from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
@@ -242,6 +243,30 @@ class _LoadJob(QRunnable):
                 self._signals.done.emit(self._generation, None, str(exc))
                 return
             self._signals.done.emit(self._generation, recording, "")
+
+
+class _MouseDetailsSignals(QObject):
+    done = Signal(object, str)  # LoadedRecording, error ("" when its details are ready)
+
+
+class _MouseDetailsJob(QRunnable):
+    """Builds the Mouse window's data of a recording (reads every frame sidecar)."""
+
+    def __init__(self, recording: LoadedRecording, signals: _MouseDetailsSignals) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._recording = recording
+        self._signals = signals
+
+    def run(self) -> None:
+        with automatic_gc_paused():
+            try:
+                self._recording.mouse_details()
+            except Exception as exc:  # noqa: BLE001 - reported in the Mouse window
+                log.exception("mouse details of %s failed", self._recording.paths.session_id)
+                self._signals.done.emit(self._recording, str(exc) or type(exc).__name__)
+                return
+            self._signals.done.emit(self._recording, "")
 
 
 def format_crop_time(ms: int) -> str:
@@ -383,6 +408,14 @@ class EditorWindow(QMainWindow):
         self._load_pool.setMaxThreadCount(1)
         self._load_signals = _LoadSignals(self)
         self._load_signals.done.connect(self._on_loaded)
+        # The Mouse window (a click on the mouse left of the transport) and its data.
+        self._mouse_dialog: MouseDetailsDialog | None = None
+        self._mouse_pool = QThreadPool(self)
+        self._mouse_pool.setMaxThreadCount(1)
+        self._mouse_signals = _MouseDetailsSignals(self)
+        self._mouse_signals.done.connect(self._on_mouse_details)
+        self._mouse_loading: LoadedRecording | None = None
+        self._mouse_failed: tuple[LoadedRecording, str] | None = None
         self._syncing_zoom = False
         self._resume_after_scrub = False  # playback was paused for a playhead drag
         self._paused_at: int | None = None  # playhead when Pause was pressed (resume keeps
@@ -512,6 +545,7 @@ class EditorWindow(QMainWindow):
         self.preview.step.connect(self.step_frames)
         self.preview.edit_subtitle.connect(self.edit_subtitle)
         self.preview.theme_toggled.connect(self.toggle_theme)
+        self.preview.mouse_view.clicked.connect(self.show_mouse_details)
         self.preview.set_dark(self._dark)
         self.right_splitter.addWidget(self.preview)
 
@@ -1116,6 +1150,7 @@ class EditorWindow(QMainWindow):
         self.preview.view.clear()
         archived = recording is not None and recording.archived
         self.preview.view.set_badge(BADGE_ARCHIVED if archived else None)  # blinks
+        self.preview.mouse_view.set_recorded(recording is not None and recording.mouse is not None)
         self.timeline.set_recording(recording)
         if recording is not None:
             self._restore_crop(recording)
@@ -1135,6 +1170,7 @@ class EditorWindow(QMainWindow):
                 )
             self.timeline.setFocus()
         self._sync_playhead()
+        self._update_mouse_details()
         self._update_transcription_ui()
         self._update_current_search_match()
         self._update_status()
@@ -1158,7 +1194,70 @@ class EditorWindow(QMainWindow):
         if self.player.playing and ref is not None:
             self.preview.view.prefetch(recording.next_frame_after(screen_id, ref.time_ms))
         self.preview.set_subtitle(recording.subtitle_at(position))
+        if recording.mouse is not None:
+            self.preview.mouse_view.set_lit(recording.mouse.lit_at(position))
+        self._update_mouse_details()
         self.timeline.update()
+
+    # Mouse window -----------------------------------------------------------
+
+    @property
+    def mouse_dialog(self) -> MouseDetailsDialog | None:
+        return self._mouse_dialog
+
+    def show_mouse_details(self) -> None:
+        """Open (or raise) the Mouse window; it follows the playhead from now on."""
+        dialog = self._mouse_dialog
+        if dialog is None:
+            dialog = self._mouse_dialog = MouseDetailsDialog(self)
+            dialog.fit_to(self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._update_mouse_details()
+
+    def _update_mouse_details(self) -> None:
+        dialog = self._mouse_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        recording = self.recording
+        if recording is None:
+            dialog.show_message("No recording")
+            return
+        details = recording.mouse_details_ready
+        if details is None:
+            failed = self._mouse_failed
+            if failed is not None and failed[0] is recording:
+                dialog.show_message(f"Cannot read the mouse data: {failed[1]}")
+                return
+            dialog.show_message(LOADING)
+            if self._mouse_loading is not recording:
+                self._mouse_loading = recording
+                collect_garbage()  # see workers.py
+                self._mouse_pool.start(_MouseDetailsJob(recording, self._mouse_signals))
+            return
+        position = self.model.playhead_ms
+        dialog.show_moment(details.at(position), self._mouse_where(recording, position))
+
+    def _mouse_where(self, recording: LoadedRecording, position: int) -> str:
+        """``screen1 2560x1440 · cursor 512,214`` for the header of the Mouse window."""
+        cursor = recording.cursor_at(self.model.selected_screen, position)
+        screen_id = cursor.screen_id if cursor is not None else self.model.selected_screen
+        screen = next((s for s in recording.manifest.screens if s.id == screen_id), None)
+        text = screen_id or ""
+        if screen is not None:
+            text += f" {screen.image_width}x{screen.image_height}"
+        if cursor is not None:
+            text += f" · cursor {cursor.x},{cursor.y}"
+        return text.strip()
+
+    def _on_mouse_details(self, recording: object, error: str) -> None:
+        if recording is self._mouse_loading:
+            self._mouse_loading = None
+        if error and isinstance(recording, LoadedRecording):
+            self._mouse_failed = (recording, error)
+        if recording is self.recording:
+            self._update_mouse_details()
 
     def _seek(self, time_ms: float) -> None:
         was_playing = self.player.playing
@@ -2252,6 +2351,9 @@ class EditorWindow(QMainWindow):
         self.archiver.shutdown()  # stops cleanly; the next editor resumes the queue
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
+        self._mouse_pool.waitForDone(10_000)
+        if self._mouse_dialog is not None:
+            self._mouse_dialog.close()
         self.timeline.shutdown()
         self.list_view.shutdown()
         self.preview.view.wait()

@@ -49,6 +49,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -74,6 +75,7 @@ from video_story.ui.icons import (
     sun_icon,
 )
 
+from .mouse_view import MOUSE_WIDGET_SIZE, MouseWidget
 from .search import match_spans, normalize_query
 from .workers import automatic_gc_paused
 
@@ -776,12 +778,24 @@ class PreviewPanel(QWidget):
         self.view = PreviewWidget(self)
         layout.addWidget(self.view, 1)
 
-        # Icon transport buttons centred under the picture, the time centred below
-        # them; the theme toggle sits in the right corner of the row (above Edit), with
-        # an equal blank on the left so that the transport stays centred.
+        # Below the picture a grid of three columns: the mouse on the left (across the
+        # transport, time and subtitle rows), the transport buttons centred with the time
+        # and the subtitle below them, and on the right a column as wide as the mouse
+        # with the theme toggle above Edit, so that the transport stays centred.
+        controls = QGridLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setHorizontalSpacing(6)
+        controls.setVerticalSpacing(4)
+        side = MOUSE_WIDGET_SIZE.width()
+        controls.setColumnMinimumWidth(0, side)
+        controls.setColumnMinimumWidth(2, side)
+        controls.setColumnStretch(1, 1)
+        self.mouse_view = MouseWidget(self)
+        controls.addWidget(
+            self.mouse_view, 0, 0, 3, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
         row = QHBoxLayout()
         row.setSpacing(4)
-        row.addSpacing(TRANSPORT_BUTTON_SIZE.width())
         row.addStretch(1)
         self.in_button = self._button("|<", "Go to In (Home)", self.go_in.emit, row)
         self.back_button = self._button(
@@ -796,8 +810,9 @@ class PreviewPanel(QWidget):
         )
         self.out_button = self._button(">|", "Go to Out (End)", self.go_out.emit, row)
         row.addStretch(1)
-        self.theme_button = self._button("Theme", "", self.theme_toggled.emit, row)
-        layout.addLayout(row)
+        controls.addLayout(row, 0, 1)
+        self.theme_button = self._button("Theme", "", self.theme_toggled.emit, None)
+        controls.addWidget(self.theme_button, 0, 2, Qt.AlignmentFlag.AlignRight)
         self._apply_icons()
 
         self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
@@ -806,7 +821,7 @@ class PreviewPanel(QWidget):
         font.setFamily("Consolas")
         font.setStyleHint(font.StyleHint.Monospace)
         self.time_label.setFont(font)
-        layout.addWidget(self.time_label)
+        controls.addWidget(self.time_label, 1, 1)
 
         self.subtitle_label = SubtitleBox(self)
         sub_font = self.subtitle_label.font()
@@ -822,15 +837,18 @@ class PreviewPanel(QWidget):
         self.edit_subtitle_button.setEnabled(False)
         self.edit_subtitle_button.clicked.connect(self.edit_subtitle.emit)
         self.edit_subtitle_button.setIcon(pencil_icon(20))
-        subtitle_row = QHBoxLayout()
-        subtitle_row.setSpacing(6)
-        subtitle_row.addWidget(self.subtitle_label, 1)
-        subtitle_row.addWidget(self.edit_subtitle_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(subtitle_row)
+        controls.addWidget(self.subtitle_label, 2, 1)
+        controls.addWidget(
+            self.edit_subtitle_button,
+            2,
+            2,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        layout.addLayout(controls)
         self._subtitle_text = ""
 
     @staticmethod
-    def _button(text: str, tooltip: str, slot, row: QHBoxLayout) -> QToolButton:
+    def _button(text: str, tooltip: str, slot, row: QHBoxLayout | None) -> QToolButton:
         """An icon-only button; ``text`` names it (tests, accessibility) without showing."""
         button = QToolButton()
         button.setText(text)
@@ -841,7 +859,8 @@ class PreviewPanel(QWidget):
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setAutoRaise(False)
         button.clicked.connect(slot)
-        row.addWidget(button)
+        if row is not None:
+            row.addWidget(button)
         return button
 
     def _apply_icons(self) -> None:
@@ -869,6 +888,7 @@ class PreviewPanel(QWidget):
         self._dark = dark
         self.view.set_dark(dark)
         self.subtitle_label.set_dark(dark)
+        self.mouse_view.set_dark(dark)
         self._apply_icons()
 
     def set_playing(self, playing: bool) -> None:
