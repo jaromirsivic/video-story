@@ -147,6 +147,30 @@ def test_clicking_a_dot_switches_the_screen_without_opening_the_recording(editor
     assert editor.recording.session_id == NEWEST, "the dot does not select the row"
 
 
+def test_a_dot_switches_every_row_to_the_screen_at_its_position(editor, qtbot):
+    from dataclasses import replace
+
+    view = editor.list_view
+    item = view.model().item(1)
+    one = replace(item, screen_ids=("screen1",))
+    three = replace(item, screen_ids=("screen1", "screen2", "screen3"))
+    four = replace(item, screen_ids=("screen1", "screen2", "screen3", "screen4"))
+    other = view.model().item(0)
+    line = QFontMetrics(view.font()).lineSpacing()
+    second = view.delegate.dot_rects(view.visualRect(view.model().index(1, 0)), 2, line)[1]
+    qtbot.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=second.center())
+    assert view.screen_position == 1
+    assert view.screen_of(item) == view.screen_of(other) == "screen2"
+    assert view.screen_of(one) == "screen1"  # only one screen: stays on it
+    assert view.screen_of(three) == view.screen_of(four) == "screen2"
+    view.set_screen(four, "screen3")  # the third dot of a row with four screens
+    assert view.screen_of(four) == view.screen_of(three) == "screen3"
+    assert view.screen_of(item) == "screen2"  # two screens: the second (the last)
+    assert view.screen_of(one) == "screen1"
+    view.set_screen(three, "screen1")
+    assert {view.screen_of(i) for i in (one, item, three, four)} == {"screen1"}
+
+
 def test_hovering_the_text_scrubs_the_thumbnail_and_the_spoken_text(editor, qtbot):
     view = editor.list_view
     index = view.model().index(0, 0)

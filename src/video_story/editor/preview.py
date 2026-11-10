@@ -2,8 +2,11 @@
 
 The transport row holds icon buttons (go to In, step back, play/pause, stop, step
 forward, go to Out) centred under the picture and, in its right corner above the
-subtitle's **Edit** button, the light/dark theme toggle. The subtitle under the time
-grows up to :data:`SUBTITLE_MAX_LINES` lines and scrolls vertically beyond that.
+subtitle's **Edit** button, the light/dark theme toggle. The subtitle under the time is
+always at least :data:`SUBTITLE_MIN_LINES` lines tall (one line of text takes as much
+room as two, so the picture above does not jump), grows up to
+:data:`SUBTITLE_MAX_LINES` lines and scrolls vertically beyond that. The phrase of the
+search under the recordings list is drawn bold and red in it.
 """
 
 from __future__ import annotations
@@ -38,6 +41,9 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QResizeEvent,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
     QTextOption,
     QWheelEvent,
 )
@@ -68,6 +74,7 @@ from video_story.ui.icons import (
     sun_icon,
 )
 
+from .search import match_spans, normalize_query
 from .workers import automatic_gc_paused
 
 log = logging.getLogger(__name__)
@@ -83,6 +90,8 @@ SUBTITLE_MIN_LINES = 2
 SUBTITLE_MAX_LINES = 5  # taller subtitles get a vertical scrollbar
 SUBTITLE_TEXT_DARK = "#e6e6e6"  # the text colours of theme.dark_palette / light_palette
 SUBTITLE_TEXT_LIGHT = "#1e1e1e"
+SUBTITLE_MATCH_DARK = "#ff5c5c"  # the searched phrase in the subtitle (bold), per theme
+SUBTITLE_MATCH_LIGHT = "#d40000"
 PREVIEW_BG_DARK = QColor("#101010")
 PREVIEW_BG_LIGHT = QColor("#d6d6d6")
 PAN_BUTTONS = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
@@ -634,8 +643,10 @@ class PreviewWidget(QWidget):
 
 
 class SubtitleBox(QTextEdit):
-    """The subtitle under the preview: centred text, read only, at most
-    :data:`SUBTITLE_MAX_LINES` lines tall (then a vertical scrollbar appears)."""
+    """The subtitle under the preview: centred text, read only, always as tall as
+    :data:`SUBTITLE_MIN_LINES` lines and at most :data:`SUBTITLE_MAX_LINES` lines tall
+    (then a vertical scrollbar appears). :meth:`set_highlight` draws the occurrences of
+    the searched phrase bold and red."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -651,6 +662,9 @@ class SubtitleBox(QTextEdit):
         self.set_dark(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._text = ""
+        self._query = ""  # folded search phrase ("" = nothing highlighted)
+        self._spans: list[tuple[int, int]] = []
+        self._dark = True
         self.document().setDocumentMargin(2)
         self._fit_height()
 
@@ -658,15 +672,46 @@ class SubtitleBox(QTextEdit):
         """Text colour of the theme. A style sheet pins the palette the widget had when
         it was polished, so a later palette change of the application would leave the
         text white on the light background: the colour is part of the style sheet."""
+        self._dark = dark
         color = SUBTITLE_TEXT_DARK if dark else SUBTITLE_TEXT_LIGHT
         self.setStyleSheet(f"QTextEdit {{ background: transparent; color: {color}; }}")
+        if getattr(self, "_spans", None):
+            self._render()  # the red of the highlight follows the theme
 
     def text(self) -> str:
         return self._text
 
+    @property
+    def highlights(self) -> list[tuple[int, int]]:
+        """``(start, end)`` of the highlighted occurrences in :meth:`text`."""
+        return list(self._spans)
+
     def setText(self, text: str) -> None:  # noqa: N802 - QLabel-like API
         self._text = text
-        self.setPlainText(text)
+        self._render()
+
+    def set_highlight(self, query: str | None) -> None:
+        """Draw the occurrences of ``query`` (as typed in the search box; case,
+        diacritics and runs of white space do not matter) bold and red; ``""`` or
+        ``None`` removes the highlight."""
+        folded = normalize_query(query)
+        if folded == self._query:
+            return
+        self._query = folded
+        self._render()
+
+    def _render(self) -> None:
+        self._spans = match_spans(self._text, self._query)
+        self.setPlainText(self._text)
+        if self._spans:
+            fmt = QTextCharFormat()
+            fmt.setFontWeight(QFont.Weight.Bold)
+            fmt.setForeground(QColor(SUBTITLE_MATCH_DARK if self._dark else SUBTITLE_MATCH_LIGHT))
+            cursor = QTextCursor(self.document())
+            for start, end in self._spans:
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+                cursor.mergeCharFormat(fmt)
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.verticalScrollBar().setValue(0)
         self._fit_height()
@@ -686,14 +731,23 @@ class SubtitleBox(QTextEdit):
         """How many text lines fit into the current height."""
         return max(1, (self.height() - 8) // max(1, self.line_height()))
 
+    def min_height(self) -> int:
+        """The height of :data:`SUBTITLE_MIN_LINES` laid out lines, measured on a
+        document like the shown one (same font and margin): one line of text then takes
+        exactly as much room as two, so the preview above keeps its size."""
+        probe = QTextDocument()
+        probe.setDefaultFont(self.document().defaultFont())
+        probe.setDocumentMargin(self.document().documentMargin())
+        probe.setPlainText("\n".join("Xg" for _ in range(SUBTITLE_MIN_LINES)))
+        return int(math.ceil(probe.size().height())) + 6
+
     def _fit_height(self) -> None:
         """Grow with the text from two lines up to the maximum, then scroll."""
         doc = self.document()
         width = max(50, self.viewport().width())
         doc.setTextWidth(width)
-        needed = int(doc.size().height()) + 6
-        lower = self.line_height() * SUBTITLE_MIN_LINES + 8
-        self.setFixedHeight(max(lower, min(needed, self.max_height())))
+        needed = int(math.ceil(doc.size().height())) + 6
+        self.setFixedHeight(max(self.min_height(), min(needed, self.max_height())))
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -834,11 +888,18 @@ class PreviewPanel(QWidget):
             self.subtitle_label.setText(text)
         self.edit_subtitle_button.setEnabled(bool(text))
 
+    def set_search(self, query: str | None) -> None:
+        """The phrase searched under the recordings list: drawn bold and red wherever it
+        occurs in the subtitle (``""`` / ``None`` removes the highlight)."""
+        self.subtitle_label.set_highlight(query)
+
     def paint_rect(self) -> QRect:
         return self.view.rect()
 
 
 __all__ = [
+    "SUBTITLE_MATCH_DARK",
+    "SUBTITLE_MATCH_LIGHT",
     "SUBTITLE_MAX_LINES",
     "SUBTITLE_MIN_LINES",
     "SUBTITLE_TEXT_DARK",

@@ -6,7 +6,8 @@ but without regard to upper / lower case and to diacritics (``Prilis`` finds
 matches when its text contains the phrase. The recording shown in the editor is searched
 first (its matching boxes on the narration track turn yellow at once); the others are
 searched afterwards in a background thread, and every recording with a match gets a
-yellow frame in the list.
+yellow frame in the list. In the subtitle under the preview the found phrase is drawn
+bold and red (:func:`match_spans` finds it in the original text).
 
 Everything here is free of Qt except :class:`SearchJob`, the worker that reads the
 transcripts of the other recordings.
@@ -46,6 +47,36 @@ def normalize_query(query: str | None) -> str:
 def text_matches(text: str, folded_query: str) -> bool:
     """True when ``text`` contains the phrase (``folded_query`` from :func:`normalize_query`)."""
     return bool(folded_query) and folded_query in normalize(text)
+
+
+def match_spans(text: str, folded_query: str) -> list[tuple[int, int]]:
+    """Where the phrase occurs in ``text``: ``(start, end)`` character positions of the
+    original text (end exclusive), found the same way as :func:`text_matches` - case,
+    diacritics and runs of white space do not matter. Used to highlight the searched
+    phrase in the subtitle under the preview."""
+    if not folded_query or not text:
+        return []
+    folded: list[str] = []
+    origin: list[int] = []  # index in ``text`` of each folded character
+    for index, char in enumerate(text):
+        if char.isspace():
+            if folded and folded[-1] != " ":
+                folded.append(" ")
+                origin.append(index)
+            continue
+        decomposed = unicodedata.normalize("NFKD", char)
+        stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+        for ch in stripped.casefold():
+            folded.append(ch)
+            origin.append(index)
+    haystack = "".join(folded)
+    spans: list[tuple[int, int]] = []
+    start = haystack.find(folded_query)
+    while start >= 0:
+        end = start + len(folded_query)
+        spans.append((origin[start], origin[end - 1] + 1))
+        start = haystack.find(folded_query, end)
+    return spans
 
 
 def any_segment_matches(texts: Iterable[str], folded_query: str) -> bool:
@@ -109,6 +140,7 @@ __all__ = [
     "SearchJob",
     "SearchSignals",
     "any_segment_matches",
+    "match_spans",
     "normalize",
     "normalize_query",
     "recording_matches",

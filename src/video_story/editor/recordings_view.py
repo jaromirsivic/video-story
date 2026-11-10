@@ -2,9 +2,12 @@
 
 Each row shows, from the left, a thumbnail of one screen, then the start date and time,
 the length (minutes and seconds) and the words spoken, and in the top right corner one
-dot per screen (at most four; the filled dot is the screen in the thumbnail - click
-another dot to switch; hovering a dot names its screen and size, e.g. ``screen2
-1920x1080``). Rows are separated by a thin grey line.
+dot per screen (at most four; the filled dot is the screen in the thumbnail; hovering a
+dot names its screen and size, e.g. ``screen2 1920x1080``). Clicking a dot switches
+every row at once: the clicked row shows that screen, every other row the screen at the
+same position, or its last screen when it has fewer (click the third dot: rows with
+three or four screens show the third, rows with two the second, rows with one the
+first). Rows are separated by a thin grey line.
 
 Moving the mouse over the text part of a row scrubs through that recording, like the
 hover scrub of DaVinci Resolve's media pool: the horizontal position maps to a moment of
@@ -360,7 +363,9 @@ class RecordingsListView(QListView):
         self.thumbnails = ThumbnailCache(self, capacity=300)
         self.thumbnails.ready.connect(self.viewport().update)
         self._hover: _Hover | None = None
-        self._screen: dict[str, str] = {}  # session id -> screen shown in the thumbnail
+        # The dot clicked last, as a position (0 = first screen), shared by every row:
+        # a row with fewer screens shows its last one (see screen_of).
+        self._screen_position = 0
         self._frames: dict[str, _Frames] = {}  # session id -> frame index (lazy)
         self._last_image: dict[str, QImage] = {}  # session id -> thumbnail drawn last
         # session id -> ("transcribing" | "archiving", fraction): work running right now
@@ -457,17 +462,36 @@ class RecordingsListView(QListView):
             screens = sorted(frames.times, key=lambda s: int(s.removeprefix("screen") or 0))
         return screens[:MAX_DOTS]
 
-    def screen_of(self, item: RecordingItem) -> str | None:
-        screens = self.screens_of(item)
-        chosen = self._screen.get(item.session_id)
-        if chosen in screens:
-            return chosen
-        return screens[0] if screens else None
+    @property
+    def screen_position(self) -> int:
+        """The dot clicked last (0 = the first screen); every row follows it."""
+        return self._screen_position
 
-    def set_screen(self, session_id: str, screen_id: str) -> None:
-        self._screen[session_id] = screen_id
-        self._last_image.pop(session_id, None)
+    def screen_of(self, item: RecordingItem) -> str | None:
+        """The screen in the row's thumbnail: the one at :attr:`screen_position`, or the
+        row's last screen when it has fewer (two screens and the third dot clicked: the
+        second; one screen: always the first)."""
+        screens = self.screens_of(item)
+        if not screens:
+            return None
+        return screens[min(self._screen_position, len(screens) - 1)]
+
+    def set_screen_position(self, position: int) -> None:
+        """Show the screen at ``position`` (0-based) in every row that has it, the last
+        screen in the others."""
+        position = max(0, min(int(position), MAX_DOTS - 1))
+        if position == self._screen_position:
+            return
+        self._screen_position = position
+        self._last_image.clear()  # no row keeps the picture of the screen shown before
         self.viewport().update()
+
+    def set_screen(self, item: RecordingItem, screen_id: str) -> None:
+        """The dot of ``screen_id`` in ``item``'s row was clicked: that row shows the
+        screen, and every other row switches to the screen at the same position."""
+        screens = self.screens_of(item)
+        if screen_id in screens:
+            self.set_screen_position(screens.index(screen_id))
 
     def _frames_of(self, item: RecordingItem) -> _Frames:
         frames = self._frames.get(item.session_id)
@@ -553,7 +577,7 @@ class RecordingsListView(QListView):
         hit = self.dot_at(event.position().toPoint())
         if hit is not None and event.button() == Qt.MouseButton.LeftButton:
             item, screen_id = hit
-            self.set_screen(item.session_id, screen_id)
+            self.set_screen(item, screen_id)
             event.accept()
             return  # a dot only switches the thumbnail; it does not open the recording
         super().mousePressEvent(event)

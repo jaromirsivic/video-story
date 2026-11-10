@@ -357,9 +357,14 @@ def test_subtitle_box_grows_to_five_lines_then_scrolls(qtbot):
     panel.show()
     qtbot.waitExposed(panel)
     box: SubtitleBox = panel.subtitle_label
+    panel.set_subtitle("")
+    empty_height = box.height()
     panel.set_subtitle("one line")
     assert box.text() == "one line"
     one_line_height = box.height()
+    panel.set_subtitle("first\nsecond")
+    # One line of text takes the room of two: the preview above does not jump.
+    assert box.height() == one_line_height == empty_height == box.min_height()
     panel.set_subtitle("\n".join(f"line {i}" for i in range(4)))
     four_height = box.height()
     assert four_height > one_line_height

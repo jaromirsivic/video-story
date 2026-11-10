@@ -11,6 +11,7 @@ from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtGui import QFont, QTextCursor  # noqa: E402
 from test_editor import NEWEST, OLDER, _mouse_move, _wait_loaded, make_recording  # noqa: E402
 
 from video_story.core.archive_state import ArchiveState, ArchiveStatus  # noqa: E402
@@ -18,11 +19,14 @@ from video_story.core.config import Config  # noqa: E402
 from video_story.core.transcript import Segment  # noqa: E402
 from video_story.editor.preview import (  # noqa: E402
     BADGE_BLINK_MS,
+    SUBTITLE_MATCH_DARK,
+    SUBTITLE_MATCH_LIGHT,
     WATERMARK_DARK,
     watermark_colors,
 )
 from video_story.editor.recordings_view import BADGE_ARCHIVED  # noqa: E402
 from video_story.editor.search import (  # noqa: E402
+    match_spans,
     normalize,
     normalize_query,
     recording_matches,
@@ -88,6 +92,18 @@ def test_matching_ignores_case_diacritics_and_spacing():
     assert text_matches("PŘÍLIŠ ŽLUŤOUČKÝ", folded)
     assert not text_matches("příliš kůň", folded)  # the phrase as typed, not single words
     assert not text_matches("anything", normalize_query("   "))  # empty query: no match
+
+
+def test_match_spans_point_into_the_original_text():
+    text = "Byl to  PŘÍLIŠ   žluťoučký kůň, příliš!"
+    spans = match_spans(text, normalize_query("prilis zlutoucky"))
+    assert [text[a:b] for a, b in spans] == ["PŘÍLIŠ   žluťoučký"]
+    found = [text[a:b] for a, b in match_spans(text, normalize_query("prilis"))]
+    assert found == ["PŘÍLIŠ", "příliš"]
+    assert match_spans(text, normalize_query("")) == []
+    assert match_spans("", normalize_query("x")) == []
+    # A letter that folds to two (German sharp s) still maps back to whole characters.
+    assert [("Straße groß"[a:b]) for a, b in match_spans("Straße groß", "gross")] == ["groß"]
 
 
 def test_recording_matches_reads_the_transcript(tmp_path: Path):
@@ -158,6 +174,43 @@ def test_emptying_the_box_clears_the_search(editor, qtbot):
     assert editor.search_query == ""
     assert editor.list_view.search_matches == set()
     assert editor.timeline.search == ""
+
+
+def _char_format(box, position: int):
+    cursor = QTextCursor(box.document())
+    cursor.setPosition(position + 1)  # the format of the character before the cursor
+    return cursor.charFormat()
+
+
+def _show(window: EditorWindow, position_ms: int) -> None:
+    window.model.set_playhead(position_ms)
+    window._sync_playhead()
+
+
+def test_searched_phrase_is_bold_and_red_in_the_subtitle(editor, qtbot):
+    editor.set_theme(True)
+    box = editor.preview.subtitle_label
+    assert box.text() == "Tohle je příliš světlé" and box.highlights == []
+    _search(qtbot, editor, "PRILIS")
+    assert [box.text()[a:b] for a, b in box.highlights] == ["příliš"]
+    start, _ = box.highlights[0]
+    hit = _char_format(box, start)
+    assert hit.fontWeight() == QFont.Weight.Bold
+    assert hit.foreground().color().name() == SUBTITLE_MATCH_DARK
+    assert _char_format(box, 0).fontWeight() != QFont.Weight.Bold
+    editor.set_theme(False)
+    try:
+        assert _char_format(box, start).foreground().color().name() == SUBTITLE_MATCH_LIGHT
+    finally:
+        editor.set_theme(True)
+    # Another subtitle at the playhead is highlighted by the same search.
+    _show(editor, 1600)
+    assert box.text() == "Second line" and box.highlights == []
+    _show(editor, 100)
+    assert len(box.highlights) == 1
+    editor.search_edit.clear()
+    assert box.highlights == []
+    assert _char_format(box, start).fontWeight() != QFont.Weight.Bold
 
 
 # Narration track -----------------------------------------------------------------------

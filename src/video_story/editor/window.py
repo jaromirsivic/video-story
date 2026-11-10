@@ -714,13 +714,15 @@ class EditorWindow(QMainWindow):
         """Enter in the search box or the magnifier button: find the phrase in the
         subtitles, without regard to case and diacritics. The shown recording is
         searched first (its matching narration boxes turn yellow at once), the others
-        in the background; every recording with a match gets a yellow frame in the list.
+        in the background; every recording with a match gets a yellow frame in the list,
+        and the phrase is drawn bold and red in the subtitle under the preview.
         An empty box clears the search."""
         query = " ".join(self.search_edit.text().split())
         self._cancel_search()
         self._search_generation += 1
         self._search_query = query
         self.timeline.set_search(query)
+        self.preview.set_search(query)
         self.list_view.set_search_matches(())
         self._search_current_hits = 0
         folded = normalize_query(query)
