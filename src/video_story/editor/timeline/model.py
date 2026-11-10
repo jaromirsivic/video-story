@@ -30,7 +30,7 @@ class TimelineModel:
         self.out_ms = 0
         self.duration_ms = 0
         self.zoom = 1.0
-        self.keypoints: list[int] = []  # Insert keypoint moments (ms, ascending)
+        self.keypoints: list[int] = []  # Keypoint moments (ms, ascending)
         self.play_marker_ms: int | None = None  # where Play was last pressed (Stop returns)
         self.set_duration(duration_ms)
 

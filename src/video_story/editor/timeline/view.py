@@ -6,7 +6,7 @@ far the transcription got (the audio beyond it is shaded) with "transcribing" an
 estimated time to the end written under the arrow; the lane stays empty once the
 transcript is complete.
 
-Keypoints (Insert keypoint while recording) are thin green lines across the tracks
+Keypoints (the Keypoint button while recording) are thin green lines across the tracks
 with a green arrow at the top of the ruler, drawn like the red playhead: they cannot be
 moved, show "Keypoint N" on hover and act as a magnet for the crop handles and the
 playhead. A white arrow on the ruler marks where Play was last pressed

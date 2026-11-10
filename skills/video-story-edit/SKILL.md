@@ -99,7 +99,7 @@ When the user asks you directly for a video file ("make an MP4 of my last record
   the command blocks until it finishes, so run it in the background when your shell
   has a timeout and tell the user where the file will appear.
 - The cursor is drawn into the video as a small arrow at the recorded position
-  (`--no-cursor` disables it); drawings made with Draw on Screen are part of the frames.
+  (`--no-cursor` disables it); drawings made with Draw are part of the frames.
 
 ## 4. Requirements and limits
 

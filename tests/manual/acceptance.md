@@ -9,7 +9,7 @@ window on screen.
 
 | # | Criterion | Automated evidence | Manual check |
 | --- | --- | --- | --- |
-| 1 | English window above other windows; Record starts; drawing and Insert keypoint are available only while recording | `tests/unit/test_ui.py` (button states, keypoint countdown), `tests/integration/test_ui_e2e.py` (real window, Record, overlay) | Open with `video-story run`; the window stays above other apps; **Draw on Screen** is disabled until Record |
+| 1 | English window above other windows; Record starts; drawing and Keypoint are available only while recording; Stop / Keypoint / Draw have the shortcuts Ctrl+Alt+S / K / D, named on the buttons | `tests/unit/test_ui.py` (button states, keypoint countdown, shortcuts), `tests/integration/test_ui_e2e.py` (real window, Record, overlay) | Open with `video-story run`; the window stays above other apps; **Draw** is disabled until Record; while recording, with another program in front, Ctrl+Alt+K inserts a keypoint, Ctrl+Alt+D toggles drawing and Ctrl+Alt+S opens the Stop dialog in front |
 | 2 | Settings order; defaults 500 ms, JPEG 70 %, auto stop 120 min, keep 30 days; limits 1 and 1000 ms accepted; values persist after restart | `tests/unit/test_ui.py::test_settings_dialog_order_and_values`, `tests/unit/test_core.py` (bounds, round trip, defaults) | Change values, close and reopen the window, verify they are kept |
 | 3 | A new Recording Folder applies at once to the open window: the recording, the editor and the waiting agent use the new folder | `tests/unit/test_ui.py::test_new_recording_folder_applies_to_the_open_session`, `..._failed_settings_save_keeps_the_session_where_it_was` | Open the window, change the folder in Settings, record, Stop, Video Editor: the recording is in the new folder and the agent's `wait` still follows the session |
 | 4 | Two screens: frames of both, audio, JSON per frame; cursor on the second screen gives its id and pixel position; finished drawings are listed in every sidecar with their color, times and points in screen pixels; copied text lands once | `tests/integration/test_recording.py`, `tests/unit/test_core.py::test_cursor_mapping`, `tests/unit/test_overlay.py`, `tests/unit/test_recorder_sidecars.py`, `tests/integration/test_ui_e2e.py` | Move the cursor to the second screen while recording, draw a rectangle, copy a text, inspect a sidecar JSON |
@@ -44,8 +44,8 @@ Only **Process** in the editor hands a recording over.
 1. `uv run video-story doctor` - every check `ok`.
 2. In the agent: "Start Video Story". The window opens top-right of the primary screen.
 3. Press **Record**. Say: "Open the file I am pointing at on the second screen." Move the
-   cursor to the second screen. Press **Draw on Screen**, draw a rectangle, press Esc.
-   Press **Insert keypoint**.
+   cursor to the second screen. Press **Draw**, draw a rectangle, press Esc.
+   Press **Keypoint**.
 4. Press **Stop**, choose **Continue Recording**, say one more sentence.
 5. Press **Stop**, choose **Discard Recording**, then **Keep Recording** (files stay).
 6. Press **Stop**, choose **Video Editor**. The control window closes and the editor

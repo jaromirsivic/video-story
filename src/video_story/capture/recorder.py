@@ -215,7 +215,7 @@ class Recorder:
 
     @property
     def keypoints(self) -> list[int]:
-        """Moments marked with Insert keypoint (ms of the recording timeline, ascending)."""
+        """Moments marked with Keypoint (ms of the recording timeline, ascending)."""
         with self._lock:
             return list(self._keypoints)
 

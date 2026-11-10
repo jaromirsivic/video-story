@@ -1,11 +1,15 @@
-"""The small always-on-top control window: Record/Stop, Settings, Draw on Screen.
+"""The small always-on-top control window: Record/Stop, Settings, Draw.
 
-While recording, **Settings** gives its place to **Insert keypoint**: a click marks the
+While recording, **Settings** gives its place to **Keypoint**: a click marks the
 current moment in the recording (``manifest.json`` ``keypoints``; the editor shows them
 as green lines that the crop handles snap to) and the button counts down 3, 2, 1 before
 the next keypoint can be inserted. The text clipboard is tracked meanwhile
 (:mod:`video_story.ui.clipboard`): every new text copied during the recording lands in
 the frame sidecars of the next tick.
+
+Keyboard shortcuts while recording (shown in brackets on the buttons and in their
+tooltips; system-wide on Windows, see :mod:`video_story.ui.hotkeys`): Ctrl+Alt+S Stop,
+Ctrl+Alt+K Keypoint, Ctrl+Alt+D Draw.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from video_story.host.controller import SessionController
 from video_story.host.editor_launcher import launch_editor
 
 from .clipboard import ClipboardTracker
+from .hotkeys import Hotkey, RecordingHotkeys
 from .icons import draw_icon, keypoint_icon, record_icon, settings_icon, stop_icon
 from .settings_dialog import SettingsDialog
 from .stop_dialog import StopChoice, StopDialog, confirm_discard
@@ -39,7 +44,12 @@ from .stop_dialog import StopChoice, StopDialog, confirm_discard
 log = logging.getLogger(__name__)
 
 UI_TICK_MS = 200
-KEYPOINT_LABEL = "Insert keypoint"
+STOP_SHORTCUT = "Ctrl+Alt+S"
+KEYPOINT_SHORTCUT = "Ctrl+Alt+K"
+DRAW_SHORTCUT = "Ctrl+Alt+D"
+STOP_LABEL = "Stop"
+KEYPOINT_LABEL = "Keypoint"
+DRAW_LABEL = "Draw"
 KEYPOINT_COOLDOWN_S = 3  # the button counts 3, 2, 1 before the next keypoint
 SAVED_NOTE = "What was recorded so far is saved and opens in the Video Story Editor."
 
@@ -81,6 +91,7 @@ class ControlWindow(QWidget):
         overlay_factory: Callable[[], QObject] | None = None,
         config_file: Path | None = None,
         preflight: Callable[[], list[str]] | None = None,
+        system_wide_hotkeys: bool | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -94,6 +105,7 @@ class ControlWindow(QWidget):
         self._done = False
         self._thread: QThread | None = None
         self._worker: ProcessingWorker | None = None
+        self._stop_dialog: StopDialog | None = None
 
         self.setWindowTitle("Video Story")
         self.setWindowFlags(
@@ -122,10 +134,13 @@ class ControlWindow(QWidget):
         row.addWidget(self.settings_button)
 
         # Takes the place of Settings while recording (see the module docstring).
-        self.keypoint_button = QPushButton(keypoint_icon(), KEYPOINT_LABEL)
+        self.keypoint_button = QPushButton(
+            keypoint_icon(), _with_shortcut(KEYPOINT_LABEL, KEYPOINT_SHORTCUT)
+        )
         self.keypoint_button.setToolTip(
-            "Mark this moment of the recording as a keypoint (shown as a green line in the "
-            f"editor); the next one can follow after {KEYPOINT_COOLDOWN_S} s"
+            f"Mark this moment of the recording as a keypoint ({KEYPOINT_SHORTCUT}); the "
+            "editor shows it as a green line. The next one can follow after "
+            f"{KEYPOINT_COOLDOWN_S} s"
         )
         self.keypoint_button.clicked.connect(self.insert_keypoint)
         self.keypoint_button.hide()
@@ -136,8 +151,10 @@ class ControlWindow(QWidget):
         self._keypoint_timer.timeout.connect(self._on_keypoint_tick)
         self._clipboard = ClipboardTracker(parent=self)
 
-        self.draw_button = QPushButton(draw_icon(), "Draw on Screen")
-        self.draw_button.setToolTip("Draw annotations on the screen (available while recording)")
+        self.draw_button = QPushButton(draw_icon(), _with_shortcut(DRAW_LABEL, DRAW_SHORTCUT))
+        self.draw_button.setToolTip(
+            f"Draw annotations on the screen ({DRAW_SHORTCUT}; available while recording)"
+        )
         self.draw_button.setCheckable(True)
         self.draw_button.setEnabled(False)
         self.draw_button.toggled.connect(self._toggle_overlay)
@@ -151,6 +168,17 @@ class ControlWindow(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(UI_TICK_MS)
         self._timer.timeout.connect(self._tick)
+
+        # Active only while recording (registered on Record, released when it ends).
+        self.hotkeys = RecordingHotkeys(
+            self,
+            [
+                Hotkey(STOP_SHORTCUT, self._stop_by_shortcut),
+                Hotkey(KEYPOINT_SHORTCUT, self.insert_keypoint),
+                Hotkey(DRAW_SHORTCUT, self._draw_by_shortcut),
+            ],
+            system_wide=system_wide_hotkeys,
+        )
 
         self.setFixedHeight(self.sizeHint().height())
         self._place_window()
@@ -209,22 +237,34 @@ class ControlWindow(QWidget):
             log.exception("cannot start recording")
             QMessageBox.critical(self, "Cannot start recording", f"{exc}")
             return
+        right = self.geometry().right()  # before the longer labels widen the window
         self.record_button.setIcon(stop_icon())
-        self.record_button.setText("Stop")
-        self.record_button.setToolTip("Stop and decide what to do with the recording")
+        self.record_button.setText(_with_shortcut(STOP_LABEL, STOP_SHORTCUT))
+        self.record_button.setToolTip(
+            f"Stop and decide what to do with the recording ({STOP_SHORTCUT})"
+        )
         self._show_recording_controls(True)
         self.draw_button.setEnabled(True)
+        self.hotkeys.enable()
         self._start_clipboard_tracking()
         self._timer.start()
         self._tick()
+        self._fit_width(right)
 
     def _show_recording_controls(self, recording: bool) -> None:
-        """Settings while idle, Insert keypoint while recording (same slot of the row)."""
+        """Settings while idle, Keypoint while recording (same slot of the row)."""
         self.settings_button.setEnabled(not recording)
         self.settings_button.setVisible(not recording)
         self._reset_keypoint_button()
         self.keypoint_button.setVisible(recording)
+
+    def _fit_width(self, right: int) -> None:
+        """Resize to the contents with the right edge at ``right`` (the window sits at
+        the top right corner, and the labels differ in width between the states; Qt
+        widens a window to the right as soon as a label grows)."""
         self.adjustSize()
+        if self.isVisible():
+            self.move(right - self.width() + 1, self.y())
 
     # Keypoints --------------------------------------------------------------
 
@@ -266,7 +306,7 @@ class ControlWindow(QWidget):
     def _reset_keypoint_button(self) -> None:
         self._keypoint_timer.stop()
         self._keypoint_countdown = None
-        self.keypoint_button.setText(KEYPOINT_LABEL)
+        self.keypoint_button.setText(_with_shortcut(KEYPOINT_LABEL, KEYPOINT_SHORTCUT))
         self.keypoint_button.setEnabled(True)
 
     # Clipboard --------------------------------------------------------------
@@ -288,10 +328,41 @@ class ControlWindow(QWidget):
         if recorder is not None:
             recorder.clipboard_provider = None
 
+    # Shortcuts --------------------------------------------------------------
+
+    def _recording_controls_active(self) -> bool:
+        return self.controller.recording and not (self._processing or self._halting or self._done)
+
+    def _stop_by_shortcut(self) -> None:
+        if not self._recording_controls_active():
+            return
+        if self._stop_dialog is not None:
+            # Already asking: bring the question to the front again.
+            self._stop_dialog.raise_()
+            self._stop_dialog.activateWindow()
+            return
+        self._on_stop()
+
+    def _draw_by_shortcut(self) -> None:
+        if not self._recording_controls_active() or self._stop_dialog is not None:
+            return
+        if self.draw_button.isEnabled():
+            self.draw_button.toggle()
+
     def _on_stop(self) -> None:
         while True:
             dialog = StopDialog(self)
-            dialog.exec()
+            self._stop_dialog = dialog
+            try:
+                # Opened by the shortcut while another program is in front: the
+                # question must come to the front and take the keyboard.
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                dialog.exec()
+            finally:
+                dialog.hide()
+                self._stop_dialog = None
             if self._processing or self._halting or not self.controller.recording:
                 # The recording ended by itself while the dialog was open (auto stop,
                 # low disk space): saving it has taken over.
@@ -308,6 +379,7 @@ class ControlWindow(QWidget):
             # Not confirmed: back to the Stop dialog, recording still running.
 
     def _discard(self) -> None:
+        self.hotkeys.disable()
         self._close_overlay()
         self._stop_clipboard_tracking()
         try:
@@ -316,12 +388,14 @@ class ControlWindow(QWidget):
             log.exception("discard failed")
             QMessageBox.critical(self, "Discard failed", f"{exc}")
         self._timer.stop()
+        right = self.geometry().right()
         self.record_button.setIcon(record_icon())
         self.record_button.setText("Record")
         self.record_button.setToolTip("Start recording audio, screens and cursor")
         self._show_recording_controls(False)
         self.draw_button.setEnabled(False)
         self.status_label.setText("Recording discarded. Press Record to start again.")
+        self._fit_width(right)
 
     # Processing -------------------------------------------------------------
 
@@ -331,6 +405,7 @@ class ControlWindow(QWidget):
         if self._processing:
             return
         self._processing = True
+        self.hotkeys.disable()
         self._timer.stop()
         self._close_overlay()
         self._stop_clipboard_tracking()
@@ -354,6 +429,7 @@ class ControlWindow(QWidget):
         if self._processing or self._halting:
             return
         self._halting = True
+        self.hotkeys.disable()
         self._timer.stop()
         self._close_overlay()
         self._stop_clipboard_tracking()
@@ -412,6 +488,7 @@ class ControlWindow(QWidget):
         self._finish("failed")
 
     def _finish(self, status: str) -> None:
+        self.hotkeys.disable()
         self._timer.stop()
         self._close_overlay()
         self.hide()
@@ -456,7 +533,7 @@ class ControlWindow(QWidget):
                     self._connect_overlay_to_recorder()
                 except Exception as exc:
                     log.exception("cannot create overlay")
-                    QMessageBox.warning(self, "Draw on Screen", f"Drawing is not available: {exc}")
+                    QMessageBox.warning(self, DRAW_LABEL, f"Drawing is not available: {exc}")
                     self.draw_button.setChecked(False)
                     return
             if self._overlay is not None:
@@ -556,6 +633,7 @@ class ControlWindow(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._done:
+            self.hotkeys.disable()
             event.accept()
             return
         if self._processing or self._halting:
@@ -574,4 +652,19 @@ class ControlWindow(QWidget):
         self._on_finished("cancelled")
 
 
-__all__ = ["KEYPOINT_COOLDOWN_S", "KEYPOINT_LABEL", "ControlWindow", "ProcessingWorker"]
+def _with_shortcut(label: str, shortcut: str) -> str:
+    """Button text naming its keyboard shortcut in brackets."""
+    return f"{label} ({shortcut})"
+
+
+__all__ = [
+    "DRAW_LABEL",
+    "DRAW_SHORTCUT",
+    "KEYPOINT_COOLDOWN_S",
+    "KEYPOINT_LABEL",
+    "KEYPOINT_SHORTCUT",
+    "STOP_LABEL",
+    "STOP_SHORTCUT",
+    "ControlWindow",
+    "ProcessingWorker",
+]

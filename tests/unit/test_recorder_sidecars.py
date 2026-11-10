@@ -95,7 +95,7 @@ def test_sidecars_store_the_clipboard_once_and_the_manifest_the_keypoints(tmp_pa
         {"index": 1, "time_ms": manifest.keypoints[0]},
         {"index": 2, "time_ms": manifest.keypoints[1]},
     ]
-    assert "Insert keypoint" in raw["keypoints_note"]
+    assert "Keypoint button" in raw["keypoints_note"]
 
 
 def test_add_keypoint_needs_a_running_recorder(tmp_path):

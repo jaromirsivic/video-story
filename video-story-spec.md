@@ -32,10 +32,12 @@ Po pokynu „Start Video Story“ agent spustí `run --detach` a otevře se mal�
 | Prvek | Chování |
 | --- | --- |
 | **Record** | Spustí nahrávání. Nespustí ho, když je na disku složky nahrávek méně než 1 GB. Když chybí model Whisper nebo FFmpeg, hned to oznámí a zeptá se, zda nahrávat i tak. |
-| **Stop** | Během nahrávání otevře dialog s volbou dalšího postupu (kap. 7). Zavření okna křížkem během nahrávání dělá totéž. |
+| **Stop** (`Ctrl+Alt+S`) | Během nahrávání otevře dialog s volbou dalšího postupu (kap. 7). Zavření okna křížkem během nahrávání dělá totéž. |
 | **Settings** | Otevře nastavení. Je vidět jen mimo nahrávání. |
-| **Insert keypoint** | Během nahrávání stojí na místě Settings. Označí aktuální okamžik jako důležitý; další lze vložit po 3 s (tlačítko odpočítává). |
-| **Draw on Screen** | Zapne kreslení (kap. 6). Jen během nahrávání. |
+| **Keypoint** (`Ctrl+Alt+K`) | Během nahrávání stojí na místě Settings. Označí aktuální okamžik jako důležitý; další lze vložit po 3 s (tlačítko odpočítává). |
+| **Draw** (`Ctrl+Alt+D`) | Zapne kreslení (kap. 6), opětovným stiskem ho vypne. Jen během nahrávání. |
+
+Klávesové zkratky Stop, Keypoint a Draw platí jen během nahrávání; tlačítka je ukazují v závorce za názvem i v tooltipu. Na Windows fungují v celém systému (ať je vpředu kterákoli aplikace, stisk do ní nedojde), na Linuxu a macOS jen když má fokus okno Video Story. Kombinaci, kterou už zabrala jiná aplikace, Video Story použije jen ve svých oknech. Na klávesnicích s AltGr ji Windows hlásí jako Ctrl+Alt, takže AltGr+S/K/D během nahrávání zkratku také spustí.
 
 Stavový řádek ukazuje uplynulý čas, čas do automatického zastavení, počet obrazovek, snímků a keypointů. Zavření okna před nahráváním ukončí relaci stavem `cancelled`.
 
@@ -63,9 +65,9 @@ Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho re
 - **Zvuk:** `audio.wav`, 16bit PCM, mono, vzorkovací frekvence zařízení.
 - **Obrazovky:** v každém intervalu snímek každé obrazovky, i nezměněný. Název `<sekundy>_<ms>_screenN.<jpg|png>`, čas od začátku nahrávky. `screen1` je primární obrazovka, další jsou řazené podle polohy.
 - **Doprovodný JSON** ke každému snímku: obrazovka a poloha kurzoru v pixelech jejího snímku (počátek vlevo nahoře), dokončené kresby, právě kreslený tvar, zoom, zkopírovaný text.
-- **Kresby:** obdélník (výchozí nástroj), štětec, šipka; pravé tlačítko myši kreslí vždy šipku; 8 barev, výchozí červená. `Esc` kreslení opustí, `Ctrl+Z` vrátí, `Ctrl+Shift+C` smaže vše. Kolečko myši při kreslení přiblíží obrazovku až na 800 %. Kresba je vidět ve snímcích; do JSONu se tvar dostane až po puštění tlačítka myši, s identifikátorem a časy stisku a puštění. Nahrávací okno zůstává nad kreslicí vrstvou.
+- **Kresby:** obdélník (výchozí nástroj), štětec, šipka; pravé tlačítko myši kreslí vždy šipku; 8 barev, výchozí červená. `Esc` kreslení opustí, `Ctrl+Z` vrátí, `Ctrl+Alt+C` smaže vše. Kolečko myši při kreslení přiblíží obrazovku až na 800 %. Kresba je vidět ve snímcích; do JSONu se tvar dostane až po puštění tlačítka myši, s identifikátorem a časy stisku a puštění. Nahrávací okno zůstává nad kreslicí vrstvou.
 - **Zkopírovaný text:** každý nový text zkopírovaný během nahrávání (nejvýš 65 535 znaků) se zapíše jednou, do JSONů nejbližšího snímku. Co bylo ve schránce před nahráváním, se neukládá.
-- **Keypointy:** okamžiky označené tlačítkem Insert keypoint; ukládají se do `manifest.json` hned při vložení.
+- **Keypointy:** okamžiky označené tlačítkem Keypoint (`Ctrl+Alt+K`); ukládají se do `manifest.json` hned při vložení.
 - **Manifest:** `manifest.json` vzniká při stisku Record (obrazovky, nastavení, čas začátku) a doplňuje se při uložení. Pole `stop_reason` říká, proč nahrávka skončila sama (`auto_stop`, `low_disk`, `capture_failed`, `recovered`), `frames.failed_grabs` počet nepořízených snímků.
 
 Obrazovka, kterou nejde sejmout (zamčený počítač, dialog UAC, odpojený monitor), nahrávání neukončí: po tu dobu pro ni snímky chybí a snímání se samo obnoví.

@@ -140,7 +140,7 @@ class LoadedRecording:
 
     @property
     def keypoints(self) -> list[int]:
-        """Moments marked with Insert keypoint while recording (ms, inside the recording)."""
+        """Moments marked with Keypoint while recording (ms, inside the recording)."""
         return [k for k in self.manifest.keypoints if 0 <= k <= self.duration_ms]
 
     # Frames -----------------------------------------------------------------

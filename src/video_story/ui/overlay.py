@@ -1,4 +1,4 @@
-"""On-screen drawing overlay ("Draw on Screen").
+"""On-screen drawing overlay ("Draw").
 
 One frameless, translucent, always-on-top window is created per connected screen so
 the user can draw annotations (brush strokes, rectangles, arrows) anywhere on the
@@ -17,7 +17,7 @@ Other windows (the control window) can be kept above the overlay with
 :meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
 
 Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
-``Ctrl+Z`` undo, ``Ctrl+Shift+C`` clear, ``R`` / ``A`` / ``B`` select a tool, ``1``-``8``
+``Ctrl+Z`` undo, ``Ctrl+Alt+C`` clear, ``R`` / ``A`` / ``B`` select a tool, ``1``-``8``
 a color. On the overlay windows also ``0`` resets the zoom.
 
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
@@ -116,7 +116,7 @@ TOOL_ICON_INK = QColor("#000000")  # the toolbar has fixed light colors in every
 # Keyboard shortcut shown in brackets on every toolbar button (by button label).
 TOOLBAR_SHORTCUTS = {
     "Undo": "Ctrl+Z",
-    "Clear": "Ctrl+Shift+C",
+    "Clear": "Ctrl+Alt+C",
     "Close": "Esc",
     "Rect": "R",
     "Arrow": "A",
@@ -577,18 +577,18 @@ class OverlayWindow(QWidget):
         event.accept()  # the right button draws arrows; there is no context menu
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        # Esc, Ctrl+Z and Ctrl+Shift+C are application-wide shortcuts of the controller
+        # Esc, Ctrl+Z and Ctrl+Alt+C are application-wide shortcuts of the controller
         # (they work whichever Video Story window has the focus); they are handled here
         # too in case a key event reaches the overlay without passing the shortcut map.
         key = event.key()
         modifiers = event.modifiers()
         ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
-        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
         if key == Qt.Key.Key_Escape:
             self._controller._user_close()
         elif key == Qt.Key.Key_Z and ctrl:
             self._controller.undo()
-        elif key == Qt.Key.Key_C and ctrl and shift:
+        elif key == Qt.Key.Key_C and ctrl and alt:
             self._controller.clear()
         elif key == Qt.Key.Key_B and not ctrl:
             self._controller.set_tool(Tool.BRUSH)
@@ -1226,13 +1226,13 @@ class DrawingOverlay(QObject):
     def _create_shortcuts(self, parent: QWidget) -> None:
         """Drawing shortcuts for every Video Story window (enabled while shown).
 
-        Esc close, Ctrl+Z undo, Ctrl+Shift+C clear, R / A / B select a tool and
+        Esc close, Ctrl+Z undo, Ctrl+Alt+C clear, R / A / B select a tool and
         1-8 a palette color.
         """
         bindings: list[tuple[QKeySequence, object]] = [
             (QKeySequence(Qt.Key.Key_Escape), self._user_close),
             (QKeySequence("Ctrl+Z"), self.undo),
-            (QKeySequence("Ctrl+Shift+C"), self.clear),
+            (QKeySequence("Ctrl+Alt+C"), self.clear),
             (QKeySequence("R"), lambda: self.set_tool(Tool.RECTANGLE)),
             (QKeySequence("A"), lambda: self.set_tool(Tool.ARROW)),
             (QKeySequence("B"), lambda: self.set_tool(Tool.BRUSH)),

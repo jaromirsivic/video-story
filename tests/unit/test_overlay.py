@@ -208,13 +208,13 @@ def test_keyboard_shortcuts(overlay, qtbot):
     assert len(overlay.shapes()) == 1
     qtbot.keyClick(window, Qt.Key.Key_C)  # plain C no longer clears (too easy to hit)
     assert len(overlay.shapes()) == 1
-    ctrl_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_shift)
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_alt)
     assert overlay.shapes() == []
 
 
 def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
-    """Esc / Ctrl+Z / Ctrl+Shift+C are application-wide while the overlay is shown."""
+    """Esc / Ctrl+Z / Ctrl+Alt+C are application-wide while the overlay is shown."""
     from PySide6.QtWidgets import QWidget
 
     other = QWidget()
@@ -226,7 +226,7 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     drag(window, [(10, 10), (40, 40)])
     drag(window, [(50, 50), (80, 80)])
     shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
-    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Shift+C", "R", "A", "B"} | {
+    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Alt+C", "R", "A", "B"} | {
         str(n) for n in range(1, 9)
     }
     assert all(
@@ -235,8 +235,8 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     )
     qtbot.keyClick(other, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    ctrl_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-    qtbot.keyClick(other, Qt.Key.Key_C, ctrl_shift)
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    qtbot.keyClick(other, Qt.Key.Key_C, ctrl_alt)
     assert overlay.shapes() == []
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         qtbot.keyClick(other, Qt.Key.Key_Escape)
@@ -488,7 +488,7 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
     assert tools == ["Rect (R)", "Arrow (A)", "Brush (B)"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
-    assert actions == ["Undo (Ctrl+Z)", "Clear (Ctrl+Shift+C)", "Close (Esc)"]
+    assert actions == ["Undo (Ctrl+Z)", "Clear (Ctrl+Alt+C)", "Close (Esc)"]
 
     # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
     start = toolbar.pos()

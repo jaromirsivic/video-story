@@ -92,7 +92,7 @@ class Manifest:
     platform: str = ""
     plugin_version: str = ""
     notes: list[str] = field(default_factory=list)
-    # Moments the user marked with **Insert keypoint** while recording (ms, ascending).
+    # Moments the user marked with **Keypoint** (Ctrl+Alt+K) while recording (ms, ascending).
     keypoints: list[int] = field(default_factory=list)
     # Why the recording ended by itself: "auto_stop", "low_disk" (less than 1 GB free),
     # "capture_failed" or "recovered" (the window died; finished afterwards). None when
@@ -131,7 +131,8 @@ class Manifest:
             "transcript": self.transcript.to_dict() if self.transcript else None,
             "keypoints": self.keypoints_to_dict(),
             "keypoints_note": "moments the user marked as important while recording "
-            "(Insert keypoint); the editor shows them as green lines and snaps the crop to them",
+            "(Keypoint button, Ctrl+Alt+K); the editor shows them as green lines and snaps "
+            "the crop to them",
             "platform": self.platform,
             "plugin_version": self.plugin_version,
             "notes": self.notes,

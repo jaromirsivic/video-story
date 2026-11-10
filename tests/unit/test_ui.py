@@ -139,7 +139,7 @@ def test_initial_state(window, controller):
 def test_record_then_continue_keeps_recording(window, controller, monkeypatch, qtbot):
     window.record_button.click()
     assert controller.recording
-    assert window.record_button.text() == "Stop"
+    assert window.record_button.text() == "Stop (Ctrl+Alt+S)"
     assert not window.settings_button.isEnabled()
     assert window.draw_button.isEnabled()
     assert read_state(controller.paths.state_path).status is Status.RECORDING
@@ -147,7 +147,7 @@ def test_record_then_continue_keeps_recording(window, controller, monkeypatch, q
     _auto_answer_stop(monkeypatch, StopChoice.CONTINUE)
     window.record_button.click()
     assert controller.recording and not FakeRecorder.instances[-1].stopped
-    assert window.record_button.text() == "Stop"
+    assert window.record_button.text() == "Stop (Ctrl+Alt+S)"
 
 
 def test_status_line_order_while_recording(window, controller):
@@ -564,3 +564,154 @@ def test_app_instance_available():
     assert QApplication.instance() is not None
     QTimer.singleShot(0, lambda: None)
     assert QMessageBox is not None
+
+
+# Shortcuts while recording ---------------------------------------------------
+
+
+def _activate(qtbot, widget) -> None:
+    widget.activateWindow()
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is widget, timeout=1000)
+
+
+def test_buttons_name_their_shortcuts(window):
+    assert window.draw_button.text() == "Draw (Ctrl+Alt+D)"
+    assert "Ctrl+Alt+D" in window.draw_button.toolTip()
+    right = window.geometry().right()
+    window.record_button.click()
+    # The longer labels widen the window to the left: it stays in its top right spot.
+    # (The offscreen test platform shifts a moved window by its 1 px frame.)
+    assert abs(window.geometry().right() - right) <= 2
+    assert window.record_button.text() == "Stop (Ctrl+Alt+S)"
+    assert "Ctrl+Alt+S" in window.record_button.toolTip()
+    assert window.keypoint_button.text() == "Keypoint (Ctrl+Alt+K)"
+    assert "Ctrl+Alt+K" in window.keypoint_button.toolTip()
+    window.insert_keypoint()
+    assert window.keypoint_button.text() == "Keypoint (3)"
+    window._reset_keypoint_button()
+    assert window.keypoint_button.text() == "Keypoint (Ctrl+Alt+K)"
+
+
+def test_shortcuts_are_active_only_while_recording(window, monkeypatch):
+    # The offscreen test platform has no system-wide hotkeys: application-wide shortcuts.
+    assert not window.hotkeys.enabled and window.hotkeys.application_wide == []
+    window.record_button.click()
+    assert window.hotkeys.enabled
+    assert window.hotkeys.application_wide == ["Ctrl+Alt+S", "Ctrl+Alt+K", "Ctrl+Alt+D"]
+    _auto_answer_stop(monkeypatch, StopChoice.DISCARD, confirm=True)
+    window.record_button.click()
+    assert not window.hotkeys.enabled and window.hotkeys.application_wide == []
+
+
+def test_keypoint_and_stop_shortcuts(window, controller, monkeypatch, qtbot):
+    from PySide6.QtCore import Qt
+
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    stops: list[int] = []
+
+    def fake_exec(self):
+        stops.append(1)
+        self.choice = StopChoice.CONTINUE
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(cw.StopDialog, "exec", fake_exec)
+    # Not recording: Ctrl+Alt+S must not start (or stop) anything.
+    _activate(qtbot, window)
+    qtbot.keyClick(window, Qt.Key.Key_S, ctrl_alt)
+    qtbot.wait(50)
+    assert not controller.recording and stops == []
+
+    window.record_button.click()
+    _activate(qtbot, window)
+    qtbot.keyClick(window, Qt.Key.Key_K, ctrl_alt)
+    qtbot.waitUntil(lambda: len(FakeRecorder.instances[-1].keypoints) == 1, timeout=1000)
+    assert window.keypoint_countdown == 3
+    qtbot.keyClick(window, Qt.Key.Key_S, ctrl_alt)
+    qtbot.waitUntil(lambda: stops == [1], timeout=1000)
+    assert controller.recording  # Continue Recording
+
+
+def test_draw_shortcut_toggles_drawing(qtbot, controller):
+    from PySide6.QtCore import QObject, Qt, Signal
+
+    class FakeOverlay(QObject):
+        closed = Signal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible = False
+
+        def show(self) -> None:
+            self.visible = True
+
+        def hide(self) -> None:
+            self.visible = False
+
+        def close(self) -> None:
+            self.visible = False
+
+    overlays: list[FakeOverlay] = []
+
+    def factory():
+        overlays.append(FakeOverlay())
+        return overlays[-1]
+
+    w = cw.ControlWindow(controller, on_finished=lambda status: None, overlay_factory=factory)
+    w.show()
+    try:
+        ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        w.record_button.click()
+        _activate(qtbot, w)
+        qtbot.keyClick(w, Qt.Key.Key_D, ctrl_alt)
+        qtbot.waitUntil(lambda: w.draw_button.isChecked(), timeout=1000)
+        assert overlays and overlays[0].visible
+        qtbot.keyClick(w, Qt.Key.Key_D, ctrl_alt)
+        qtbot.waitUntil(lambda: not w.draw_button.isChecked(), timeout=1000)
+        assert not overlays[0].visible
+    finally:
+        w._done = True
+        w.close()
+
+
+def test_windows_hotkey_codes():
+    from video_story.ui import hotkeys
+
+    assert hotkeys.windows_hotkey("Ctrl+Alt+S") == (
+        hotkeys.MOD_NOREPEAT | hotkeys.MOD_CONTROL | hotkeys.MOD_ALT,
+        ord("S"),
+    )
+    assert hotkeys.windows_hotkey("Ctrl+Alt+K")[1] == ord("K")
+    assert hotkeys.windows_hotkey("Ctrl+Alt+F5") is None  # only letters and digits
+
+
+@pytest.mark.skipif(not os.name == "nt", reason="WM_HOTKEY is a Windows message")
+def test_windows_hotkey_message_reaches_the_shortcut(qtbot):
+    import ctypes
+    from ctypes import wintypes
+
+    from PySide6.QtWidgets import QWidget
+    from shiboken6 import VoidPtr
+
+    from video_story.ui import hotkeys
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    hits: list[str] = []
+    keys = hotkeys.RecordingHotkeys(
+        parent, [hotkeys.Hotkey("Ctrl+Alt+S", lambda: hits.append("stop"))], system_wide=False
+    )
+    keys.enable()
+    # Pretend the system registered it (no real RegisterHotKey in unit tests).
+    keys._registered[hotkeys.HOTKEY_ID_BASE] = keys._hotkeys[0]
+    event_filter = hotkeys._WindowsHotkeyFilter(keys._on_windows_hotkey)
+    msg = wintypes.MSG()
+    msg.message = hotkeys.WM_HOTKEY
+    msg.wParam = hotkeys.HOTKEY_ID_BASE
+    pointer = VoidPtr(ctypes.addressof(msg))  # what Qt passes
+    handled, _ = event_filter.nativeEventFilter(b"windows_generic_MSG", pointer)
+    assert handled
+    qtbot.waitUntil(lambda: hits == ["stop"], timeout=1000)
+    msg.wParam = hotkeys.HOTKEY_ID_BASE + 7  # someone else's hotkey
+    assert event_filter.nativeEventFilter(b"windows_generic_MSG", pointer)[0] is False
+    keys._registered.clear()  # nothing to unregister
+    keys.disable()

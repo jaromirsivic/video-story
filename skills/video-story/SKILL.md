@@ -54,9 +54,10 @@ recording could not be saved; see `message`. The next start of Video Story recov
 such a recording into the editor's list, but it is not yours to act on). For
 `cancelled` and `failed` tell the user in one line what happened and stop.
 
-While recording, the control window offers **Insert keypoint**: it marks the current
-moment as important (the button counts down 3, 2, 1 before the next one). The user can
-press **Stop**, then choose **Video Editor** (the default: the editor opens at once and
+While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks the
+current moment as important (the button counts down 3, 2, 1 before the next one), and
+**Draw** (`Ctrl+Alt+D`) switches the drawing layer on and off. The user can press
+**Stop** (`Ctrl+Alt+S`), then choose **Video Editor** (the default: the editor opens at once and
 transcribes while the user crops - the green arrow under the audio track says
 `transcribing (ETA: m:ss)` -, optionally corrects subtitles with **Edit**, types master
 **Instructions** for you, and presses its green **Process** button, which closes the
@@ -137,7 +138,7 @@ line, ordered by time in milliseconds since the recording started:
   `factor` times, and cursor and drawing coordinates are in pixels of that zoomed image
   (`(zoomed view)` on a `DRAW` line). To map an image point back to the real screen:
   `x + px / factor`, `y + py / factor`; `frames --at` returns the exact `zoom` of a frame.
-- `KEYPOINT n` - a moment the user marked with **Insert keypoint** as important (the
+- `KEYPOINT n` - a moment the user marked with **Keypoint** as important (the
   green lines in the editor); use them as anchors when the user refers to "the first
   keypoint" or when you look for the important parts of a long recording.
 
