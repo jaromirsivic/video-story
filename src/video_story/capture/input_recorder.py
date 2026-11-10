@@ -379,7 +379,10 @@ class InputRecorder:
                 tracker = self._trackers[frame.device] = GestureTracker(pad)
             if frame.contacts and frame.device not in self._touch_at:
                 self._touch_at[frame.device] = self._last_move
+            before = tracker.last_touch
             finished = tracker.add(frame)
+            if tracker.last_touch is not before and tracker.last_touch is not None:
+                log.debug("touch: %s", tracker.last_touch)
             for gesture in finished:
                 self._write_gesture(frame.device, gesture)
             if not frame.contacts:

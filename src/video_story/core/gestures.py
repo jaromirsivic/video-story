@@ -7,12 +7,16 @@ once the fingers lift, turns it into :class:`TouchGesture` values - only those g
 
 Rule (measured in M0 on a Precision Touchpad, ``implementation-plan-mouse.md`` ch. 7):
 
-* only touches with exactly two fingers count; one finger is the pointer, a touch that
-  ever had three or more fingers is a system gesture and is ignored;
+* only the frames with exactly two fingers count; one finger is the pointer. A touch
+  that had three or more fingers in more than :data:`MAX_EXTRA_FINGER_FRAMES` frames
+  and more than :data:`MAX_EXTRA_FINGER_SHARE` of its frames is a system gesture and is
+  ignored; a few such frames are a thumb or the palm brushing the pad during a pinch;
 * ``spread`` = largest minus smallest distance of the two fingers, ``travel`` = length
   of the path of the point between them; both relative to the touchpad width;
-* **pinch** when ``spread >= travel``; **scroll** when ``travel >= 2 * spread``;
-  anything in between, and touches where both stay below :data:`MIN_MOVE`, is dropped.
+* **pinch** when ``travel <= PINCH_MAX_TRAVEL * spread``; **scroll** when
+  ``travel >= SCROLL_MIN_TRAVEL * spread``; anything in between, and touches where both
+  stay below :data:`MIN_MOVE`, is dropped. Measured: scrolls had travel/spread >= 4.3,
+  pinches <= 1.67 (fingers drift while pinching), so the gap between 2 and 3 is safe.
   The distance ratio alone does not work: fingers often spread while scrolling.
 
 Directions are those of the fingers (touchpad Y grows downwards): ``up`` means the
@@ -30,6 +34,10 @@ MIN_MOVE = 0.05  # share of the touchpad size; below it a touch is a rest, not a
 MIN_FRAMES = 5
 IDLE_MS = 150  # no frame for this long: the fingers are gone
 PINCH_MIN_SCALE = 1.15  # a pinch must change the distance at least this much
+PINCH_MAX_TRAVEL = 2.0  # pinch: the centre moved at most this many times the spread
+SCROLL_MIN_TRAVEL = 3.0  # scroll: the centre moved at least this many times the spread
+MAX_EXTRA_FINGER_FRAMES = 3  # frames with 3+ fingers a two-finger touch may have...
+MAX_EXTRA_FINGER_SHARE = 0.2  # ...or this share of its frames, whichever is more
 
 
 @dataclass(frozen=True)
@@ -75,21 +83,38 @@ class _Sample:
     cy: float
 
 
-def classify_touch(samples: list[_Sample], pad: TouchpadGeometry) -> list[TouchGesture]:
-    """Gestures of one two-finger touch (empty when it was none)."""
-    if len(samples) < MIN_FRAMES or pad.width <= 0 or pad.height <= 0:
-        return []
+def touch_measures(samples: list[_Sample], pad: TouchpadGeometry) -> tuple[float, float]:
+    """``(spread, travel)`` of a two-finger touch, as shares of the touchpad size."""
+    if not samples or pad.width <= 0 or pad.height <= 0:
+        return 0.0, 0.0
     dists = [s.dist for s in samples]
     spread = (max(dists) - min(dists)) / pad.width
     travel = sum(
         math.hypot((b.cx - a.cx) / pad.width, (b.cy - a.cy) / pad.height)
         for a, b in zip(samples, samples[1:], strict=False)
     )
+    return spread, travel
+
+
+def decide(spread: float, travel: float) -> Literal["pinch", "scroll"] | None:
+    """What a two-finger touch with this spread and travel is (``None``: nothing)."""
     if spread < MIN_MOVE and travel < MIN_MOVE:
+        return None
+    if travel <= PINCH_MAX_TRAVEL * spread:
+        return "pinch"
+    if travel >= SCROLL_MIN_TRAVEL * spread:
+        return "scroll"
+    return None
+
+
+def classify_touch(samples: list[_Sample], pad: TouchpadGeometry) -> list[TouchGesture]:
+    """Gestures of one two-finger touch (empty when it was none)."""
+    if len(samples) < MIN_FRAMES or pad.width <= 0 or pad.height <= 0:
         return []
-    if spread >= travel:
+    kind = decide(*touch_measures(samples, pad))
+    if kind == "pinch":
         return _pinch(samples)
-    if travel >= 2 * spread:
+    if kind == "scroll":
         return _scrolls(samples, pad)
     return []
 
@@ -173,9 +198,12 @@ class GestureTracker:
         self.idle_ms = idle_ms
         self._samples: list[_Sample] = []
         self._ids: tuple[int, int] | None = None
-        self._too_many = False
+        self._frames = 0  # frames of the current touch with at least one finger
+        self._many = 0  # ...and with three or more
         self._touching = False
         self._last_t: int | None = None
+        # What the last two-finger touch measured and became (for the log).
+        self.last_touch: dict[str, object] | None = None
 
     def add(self, frame: ContactFrame) -> list[TouchGesture]:
         out: list[TouchGesture] = []
@@ -187,8 +215,9 @@ class GestureTracker:
             out.extend(self._finish())
             return out
         self._touching = True
+        self._frames += 1
         if n >= 3:
-            self._too_many = True
+            self._many += 1
             return out
         if n != 2:
             return out
@@ -212,15 +241,36 @@ class GestureTracker:
     def flush(self) -> list[TouchGesture]:
         return self._finish()
 
+    @property
+    def _system_gesture(self) -> bool:
+        limit = max(MAX_EXTRA_FINGER_FRAMES, MAX_EXTRA_FINGER_SHARE * self._frames)
+        return self._many > limit
+
     def _classify(self) -> list[TouchGesture]:
         samples, self._samples, self._ids = self._samples, [], None
-        if self._too_many:
+        if not samples:
             return []
-        return classify_touch(samples, self.pad)
+        spread, travel = touch_measures(samples, self.pad)
+        if self._system_gesture:
+            result: list[TouchGesture] = []
+            verdict = "dropped: three or more fingers"
+        else:
+            result = classify_touch(samples, self.pad)
+            verdict = ", ".join(f"{g.kind} {g.direction}" for g in result) or "dropped: no gesture"
+        self.last_touch = {
+            "two_finger_frames": len(samples),
+            "frames": self._frames,
+            "extra_finger_frames": self._many,
+            "spread": round(spread, 3),
+            "travel": round(travel, 3),
+            "result": verdict,
+        }
+        return result
 
     def _finish(self) -> list[TouchGesture]:
         out = self._classify()
-        self._too_many = False
+        self._frames = 0
+        self._many = 0
         self._touching = False
         return out
 
@@ -228,12 +278,17 @@ class GestureTracker:
 __all__ = [
     "IDLE_MS",
     "MIN_FRAMES",
+    "MAX_EXTRA_FINGER_FRAMES",
+    "MAX_EXTRA_FINGER_SHARE",
     "MIN_MOVE",
+    "PINCH_MAX_TRAVEL",
     "PINCH_MIN_SCALE",
+    "SCROLL_MIN_TRAVEL",
     "Contact",
     "ContactFrame",
     "GestureTracker",
     "TouchGesture",
     "TouchpadGeometry",
     "classify_touch",
+    "touch_measures",
 ]
