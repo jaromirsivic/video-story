@@ -730,7 +730,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def use_utf8_streams() -> None:
+    """Write stdout and stderr as UTF-8 whatever the console or pipe encoding is.
+
+    A piped stdout on Windows defaults to the ANSI code page (cp1250, cp1252, ...),
+    which cannot encode many characters found in window texts or transcripts (for
+    example U+FFFC), so ``emit`` crashed; the agents and the editor's workers read
+    the output as UTF-8 anyway. Lone surrogates are escaped instead of raising.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # replaced by a test harness or an embedding host
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):  # pragma: no cover - detached or closed stream
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    use_utf8_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
     setup_logging(args.log_level)
