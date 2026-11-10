@@ -9,6 +9,8 @@ grows up to :data:`SUBTITLE_MAX_LINES` lines and scrolls vertically beyond that.
 from __future__ import annotations
 
 import logging
+import math
+import re
 from collections import OrderedDict
 from pathlib import Path
 
@@ -82,6 +84,39 @@ SUBTITLE_TEXT_DARK = "#e6e6e6"  # the text colours of theme.dark_palette / light
 SUBTITLE_TEXT_LIGHT = "#1e1e1e"
 PREVIEW_BG_DARK = QColor("#101010")
 PREVIEW_BG_LIGHT = QColor("#d6d6d6")
+PAN_BUTTONS = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
+# Watermark around the picture: (background, text) per screen, screen1 grey, screen2
+# blue, screen3 green, screen4 red, then again from grey. Faint on purpose.
+WATERMARK_LIGHT = (
+    (QColor("#d6d6d6"), QColor("#bcbcbc")),
+    (QColor("#d4e0f0"), QColor("#adc3e2")),
+    (QColor("#d5ebd5"), QColor("#a9d1a9")),
+    (QColor("#f1d6d6"), QColor("#dfb0b0")),
+)
+WATERMARK_DARK = (
+    (QColor("#101010"), QColor("#262626")),
+    (QColor("#0d1520"), QColor("#1c2d45")),
+    (QColor("#0e190f"), QColor("#1e3720")),
+    (QColor("#1d0e0e"), QColor("#3c2020")),
+)
+WATERMARK_GAP = "      "  # between the repeats of "screen1 2560x1600" on a line
+
+
+def screen_number(screen_id: str | None) -> int:
+    """1 for ``screen1``, 2 for ``screen2``...; 1 when the id carries no number."""
+    match = re.search(r"(\d+)$", screen_id or "")
+    return max(1, int(match.group(1))) if match else 1
+
+
+def watermark_colors(screen_id: str | None, dark: bool) -> tuple[QColor, QColor]:
+    """(background, text) of the watermark for a screen; cycles every four screens."""
+    table = WATERMARK_DARK if dark else WATERMARK_LIGHT
+    return table[(screen_number(screen_id) - 1) % len(table)]
+
+
+def watermark_pixel_size(width: int, height: int) -> int:
+    """Font size that is neither small nor big for the preview (about 14 pt)."""
+    return int(max(12, min(22, round(min(width, height) / 30))))
 
 
 class _Signals(QObject):
@@ -109,7 +144,9 @@ class PreviewWidget(QWidget):
     """Shows one frame (aspect ratio kept) plus the cursor arrow; decodes in a worker.
 
     The mouse wheel zooms the image (anchored at the pointer) between "fit" and
-    ``MAX_ZOOM``; above fit the left button pans and a double-click returns to fit.
+    ``MAX_ZOOM``; above fit the left or the middle button pans and a double-click
+    returns to fit. Around the picture a faint diagonal watermark names the screen and
+    its resolution, tinted per screen (grey, blue, green, red, then grey again).
     Widget point ``w`` and image point ``i`` relate as ``w = origin + i * zoom``,
     where ``origin`` is the widget position of the image's top-left corner (centred
     at fit, the clamped pan offset above fit). Zoom is display only.
@@ -138,7 +175,10 @@ class PreviewWidget(QWidget):
         self._zoom: float | None = None  # None = fit (whole image visible, centred)
         self._offset = QPointF()  # widget position of the image's top-left when zoomed
         self._drag: tuple[QPointF, QPointF] | None = None  # press position, offset then
+        self._drag_button = Qt.MouseButton.NoButton  # the button (left or middle) panning
         self._background = PREVIEW_BG_DARK
+        self._dark = True
+        self._watermark: tuple[tuple, QPixmap] | None = None  # (key, pixmap) cache
         self.setMinimumSize(160, 100)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -150,6 +190,7 @@ class PreviewWidget(QWidget):
 
     def set_dark(self, dark: bool) -> None:
         """Background around the picture: near black in the dark theme, grey in the light."""
+        self._dark = dark
         self._background = PREVIEW_BG_DARK if dark else PREVIEW_BG_LIGHT
         self.update()
 
@@ -334,8 +375,9 @@ class PreviewWidget(QWidget):
         event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._zoom is not None:
+        if event.button() in PAN_BUTTONS and self._zoom is not None and self._drag is None:
             self._drag = (event.position(), QPointF(self._offset))
+            self._drag_button = event.button()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -353,8 +395,9 @@ class PreviewWidget(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._drag is not None:
+        if self._drag is not None and event.button() == self._drag_button:
             self._drag = None
+            self._drag_button = Qt.MouseButton.NoButton
             if self._zoom is not None:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
@@ -446,6 +489,7 @@ class PreviewWidget(QWidget):
             return
         if self._image_size != image.size():
             self._adopt(image)
+        painter.drawPixmap(0, 0, self._watermark_pixmap(image.width(), image.height()))
         if self._zoom is None:
             pixmap = self._scaled_pixmap(self._shown, image)  # type: ignore[arg-type]
             x = (self.width() - pixmap.width()) // 2
@@ -463,6 +507,41 @@ class PreviewWidget(QWidget):
             at = self.map_from_image(QPointF(cursor.x, cursor.y))
             self._paint_cursor(painter, at.x(), at.y())
         painter.end()
+
+    def _watermark_pixmap(self, image_width: int, image_height: int) -> QPixmap:
+        """The widget-sized background with the diagonal ``screenN WxH`` text (cached)."""
+        key = (self.size(), self.devicePixelRatioF(), self._screen_id, image_width,
+               image_height, self._dark)  # fmt: skip
+        if self._watermark is not None and self._watermark[0] == key:
+            return self._watermark[1]
+        background, color = watermark_colors(self._screen_id, self._dark)
+        ratio = self.devicePixelRatioF()
+        width, height = self.width(), self.height()
+        pixmap = QPixmap(max(1, round(width * ratio)), max(1, round(height * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(background)
+        label = f"{self._screen_id or 'screen'} {image_width}x{image_height}"
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        font = QFont(self.font())
+        font.setPixelSize(watermark_pixel_size(width, height))
+        painter.setFont(font)
+        painter.setPen(QPen(color))
+        metrics = painter.fontMetrics()
+        step_x = max(1, metrics.horizontalAdvance(label + WATERMARK_GAP))
+        step_y = max(1, metrics.height() * 3)
+        half = math.hypot(width, height) / 2 + step_x  # covers the rotated widget
+        painter.translate(width / 2, height / 2)
+        painter.rotate(-45)  # bottom-left to top-right
+        for row in range(int(-half // step_y), int(half // step_y) + 1):
+            shift = (row % 2) * step_x / 2  # brick pattern: the rows do not line up
+            x = -half - shift
+            while x < half:
+                painter.drawText(QPointF(x, row * step_y), label)
+                x += step_x
+        painter.end()
+        self._watermark = (key, pixmap)
+        return pixmap
 
     def _paint_zoomed(self, painter: QPainter, image: QImage) -> None:
         """Draw only the visible part of the source image, scaled by the zoom."""

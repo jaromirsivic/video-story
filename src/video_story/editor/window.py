@@ -81,6 +81,10 @@ from PySide6.QtGui import (
     QFont,
     QKeyEvent,
     QKeySequence,
+    QPainter,
+    QPaintEvent,
+    QPalette,
+    QPen,
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
@@ -97,6 +101,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
+    QSplitterHandle,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -220,11 +225,46 @@ class _LoadJob(QRunnable):
             self._signals.done.emit(self._generation, recording, "")
 
 
-class TimeEdit(QLineEdit):
-    """``HH:MM:SS.mmm`` editor; ``committed(ms)`` fires on Enter / focus out.
+def format_crop_time(ms: int) -> str:
+    """``HH:MM:SS.cc`` - the crop editors and length show hundredths only (narrower)."""
+    return format_timestamp(max(0, int(ms)))[:-1]
 
-    The text is parsed on commit (``HH:MM:SS`` without milliseconds is accepted);
-    anything unparsable reverts to the last value. ``editingFinished`` is not used:
+
+class SeparatorHandle(QSplitterHandle):
+    """Splitter handle with a thin line across, visible on light and dark backgrounds
+    (the style's grip dots alone vanish on a white background)."""
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        painter = QPainter(self)
+        window = self.palette().color(QPalette.ColorRole.Window)
+        if window.lightness() >= 128:
+            color = self.palette().color(QPalette.ColorRole.Dark)
+        else:
+            color = window.lighter(220)
+        painter.setPen(QPen(color, 1))
+        if self.orientation() == Qt.Orientation.Vertical:  # a horizontal line
+            y = self.height() // 2
+            painter.drawLine(0, y, self.width(), y)
+        else:
+            x = self.width() // 2
+            painter.drawLine(x, 0, x, self.height())
+        painter.end()
+
+
+class SeparatorSplitter(QSplitter):
+    """QSplitter whose handles draw :class:`SeparatorHandle`'s line."""
+
+    def createHandle(self) -> QSplitterHandle:  # noqa: N802
+        return SeparatorHandle(self.orientation(), self)
+
+
+class TimeEdit(QLineEdit):
+    """``HH:MM:SS.cc`` editor; ``committed(ms)`` fires on Enter / focus out.
+
+    It shows hundredths of a second; the value itself keeps milliseconds, and text
+    left as shown commits nothing (so focus-out never rounds the crop). The text is
+    parsed on commit (``HH:MM:SS`` without a fraction and one to three decimals are
+    accepted); anything unparsable reverts to the last value. ``editingFinished`` is not used:
     QLineEdit only emits it for text its validator rates Acceptable, so a partial
     entry would otherwise survive Enter and focus-out untouched.
     """
@@ -234,14 +274,14 @@ class TimeEdit(QLineEdit):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9:.]*"), self))
-        self.setFixedWidth(self.fontMetrics().horizontalAdvance("00:00:00.000") + 24)
+        self.setFixedWidth(self.fontMetrics().horizontalAdvance("00:00:00.00") + 16)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._value = 0
         self.set_value(0)
 
     def set_value(self, ms: int) -> None:
         self._value = max(0, ms)
-        self.setText(format_timestamp(self._value))
+        self.setText(format_crop_time(self._value))
 
     @property
     def value(self) -> int:
@@ -250,6 +290,8 @@ class TimeEdit(QLineEdit):
     def commit(self) -> None:
         """Parse the text: emit ``committed`` or revert to the last valid value."""
         text = self.text().strip()
+        if text == format_crop_time(self._value):
+            return  # untouched: the text drops the last digit, the real value stays
         if not TIME_TEXT.match(text):  # partial entries such as "00:00:0" revert
             self.set_value(self._value)
             return
@@ -261,7 +303,7 @@ class TimeEdit(QLineEdit):
             self.set_value(self._value)
             return
         self.committed.emit(value)
-        if self.text() != format_timestamp(self._value):
+        if self.text() != format_crop_time(self._value):
             self.set_value(self._value)  # the owner did not accept it: show its value
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
@@ -416,7 +458,7 @@ class EditorWindow(QMainWindow):
         left.setMinimumWidth(MIN_LIST_WIDTH)
         self.main_splitter.addWidget(left)
 
-        self.right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.right_splitter = SeparatorSplitter(Qt.Orientation.Vertical)
         self.preview = PreviewPanel()
         self.preview.view.set_draw_cursor(self.config.editor_draw_cursor)
         self.preview.play_pause.connect(self.toggle_play)
@@ -468,10 +510,8 @@ class EditorWindow(QMainWindow):
         self.zoom_in_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.zoom_in_button.clicked.connect(self.zoom_in)
         tools.addWidget(self.zoom_in_button)
-        self.fit_button = QPushButton("Fit")
-        self.fit_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.fit_button.clicked.connect(self.zoom_fit)
-        tools.addWidget(self.fit_button)
+        # No Fit button: the slider's left end (or "-") is the whole recording; Ctrl+0
+        # still jumps there.
         bottom_layout.addLayout(tools)
 
         self.timeline = TimelineView(self.model)
@@ -989,6 +1029,11 @@ class EditorWindow(QMainWindow):
         self._sync_playhead()
 
     def _on_playhead_drag_finished(self) -> None:
+        # The play marker (dark ruler triangle, where Stop returns) follows the playhead
+        # once the mouse button is released after a click or drag on the timeline.
+        self.model.set_play_marker(self.model.playhead_ms)
+        self._paused_at = None
+        self.timeline.update()
         resume, self._resume_after_scrub = self._resume_after_scrub, False
         if resume and self.model.playhead_ms < self.model.out_ms:
             self._start_playback()
@@ -1113,7 +1158,7 @@ class EditorWindow(QMainWindow):
     def _crop_updated(self) -> None:
         self.in_edit.set_value(self.model.in_ms)
         self.out_edit.set_value(self.model.out_ms)
-        self.crop_label.setText(f"length {format_timestamp(self.model.crop_length_ms)}")
+        self.crop_label.setText(f"length {format_crop_time(self.model.crop_length_ms)}")
         self.player.set_range(self.model.in_ms, self.model.out_ms)
         self.timeline.update()
         self._update_status()
@@ -1861,15 +1906,6 @@ class EditorWindow(QMainWindow):
     def _show_status_message(self, text: str) -> None:
         self.statusBar().showMessage(text, 8000)
 
-    def _agent_status(self) -> str:
-        if self.recording_session is not None:
-            return f"waiting for Process (recording {self.recording_session})"
-        if self.editor_session is not None:
-            if self.editor_event_sent:
-                return "sent to agent"
-            return f"waiting for Process ({self.editor_session.stem})"
-        return ""
-
     def _transcription_status(self) -> str:
         recording = self.recording
         if recording is None or recording.transcript_complete:
@@ -1889,18 +1925,17 @@ class EditorWindow(QMainWindow):
         return "transcription pending"
 
     def _update_status(self) -> None:
-        parts = [p for p in (self._transcription_status(), self._agent_status()) if p]
-        suffix = "".join(f"   |   {p}" for p in parts)
+        """Recording id and selected screen (plus the transcription while it runs); the
+        crop and the agent's state are not repeated here (user's request 2026-11-10)."""
+        transcription = self._transcription_status()
+        suffix = f"   |   {transcription}" if transcription else ""
         if self.recording is None:
             self.status_label.setText("No recording selected" + suffix)
             return
         width, height = self.recording.screen_size(self.model.selected_screen)
         size = f"{width}x{height}" if width else "unknown size"
-        frames = round(self.model.crop_length_ms / 1000 * EXPORT_FPS)
         self.status_label.setText(
-            f"{self.recording.session_id}   |   {self.model.selected_screen} {size}   |   "
-            f"crop {format_timestamp(self.model.crop_length_ms)} "
-            f"({frames} frames at {EXPORT_FPS} fps)" + suffix
+            f"{self.recording.session_id}   |   {self.model.selected_screen} {size}" + suffix
         )
 
     # Settings and shutdown --------------------------------------------------

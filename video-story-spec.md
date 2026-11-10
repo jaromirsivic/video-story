@@ -94,9 +94,9 @@ V nahrávacím okně se nic nepřepisuje. Pokud se editor nepodaří otevřít, 
 
 Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story“ (`edit --detach`). Běží nejvýš jeden; další žádost ho jen zvedne a načte do něj požadovanou nahrávku. Při startu editor dokončí nahrávky, jejichž okno spadlo (kap. 10).
 
-- **Seznam nahrávek** vlevo, nejnovější nahoře a vybraná. Řádek ukazuje náhled, datum, délku a začátek řeči; pohyb myší po řádku nahrávkou projíždí. Kontextová nabídka: **Open Folder Location**, **Archive Video** / **Archive Videos (N)**, **Delete Video** / **Delete Videos (N)** (N = počet vybraných nahrávek; u archivace jen těch, které ještě archivovat jdou). Na náhledu řádku je štítek (černý text na bílém): `TRANSCRIBING...` a `ARCHIVING...` s procenty na jedno desetinné místo, `ARCHIVED` u archivované nahrávky.
-- **Náhled** s transportem (na In, krok zpět, přehrát, stop, krok vpřed, na Out; Stop se vrací tam, kde bylo naposledy stisknuto Play), titulky pod náhledem, kolečko myši přibližuje až na 800 %, přepínač světlého a tmavého vzhledu.
-- **Časová osa:** jedna stopa na obrazovku s miniaturami, jedna zvuková stopa, zoom `-`/`+`. Úchyty **In/Out** (nebo klávesy `I`/`O`) nastavují crop společný pro všechny obrazovky; ukládá se do `crop.json` při každé změně a přichytává se ke keypointům. Kliknutí na stopu vybírá obrazovku pro náhled a export.
+- **Seznam nahrávek** vlevo, nejnovější nahoře a vybraná. Řádek ukazuje náhled, datum, délku s velikostí složky nahrávky v závorce (KB, MB, GB nebo TB na jedno desetinné místo, např. `00:27 (12.3 MB)`) a začátek řeči; pohyb myší po řádku nahrávkou projíždí. Kontextová nabídka: **Open Folder Location**, **Archive Video** / **Archive Videos (N)**, **Delete Video** / **Delete Videos (N)** (N = počet vybraných nahrávek; u archivace jen těch, které ještě archivovat jdou). Na náhledu řádku je štítek (černý text na bílém): `TRANSCRIBING...` a `ARCHIVING...` s procenty na jedno desetinné místo, `ARCHIVED` u archivované nahrávky.
+- **Náhled** s transportem (na In, krok zpět, přehrát, stop, krok vpřed, na Out; Stop se vrací tam, kde bylo naposledy stisknuto Play), titulky pod náhledem, kolečko myši přibližuje až na 800 %, přiblížený obraz se posouvá tažením levým i prostředním tlačítkem, přepínač světlého a tmavého vzhledu. Plocha kolem snímku nese nevýrazný diagonální vodoznak `screenN ŠxV` (opakovaný), barevně odlišený podle obrazovky: screen1 šedá, screen2 modrá, screen3 zelená, screen4 červená, screen5 znovu šedá atd. (tmavší text na světlém podkladu).
+- **Časová osa:** jedna stopa na obrazovku s miniaturami, jedna zvuková stopa, zoom `-`/posuvník/`+` u pravého okraje (bez tlačítka Fit; levý konec posuvníku je celá nahrávka, `Ctrl+0` tam skočí). Od náhledu ji odděluje tenká linka (táhlo rozdělovače). Kliknutí nebo tažení červené čáry po puštění tlačítka myši přesune pod ni i tmavý trojúhelník na pravítku (místo, odkud Play začne a kam se Stop vrací). Úchyty **In/Out** (nebo klávesy `I`/`O`; pole In, Out a délka ukazují `HH:MM:SS.ss`) nastavují crop společný pro všechny obrazovky; ukládá se do `crop.json` při každé změně a přichytává se ke keypointům. Kliknutí na stopu vybírá obrazovku pro náhled a export.
 - **Přepis** běží na pozadí editoru (Whisper large-v3-turbo přes whisper.cpp, CPU, automatický jazyk). Zelená šipka pod zvukovou stopou ukazuje postup a odhad zbývajícího času, titulky přibývají průběžně. Zavření editoru přepis přeruší, příští výběr nahrávky naváže. Když přepis selže, tlačítko **Retry transcription** ho spustí znovu od místa, kde skončil. Halucinované titulkové kredity se zahazují.
 - **Edit** opraví text titulku (časy zůstávají); změna se zapíše do `transcript.json` i `transcript.txt`.
 - **Instructions:** hlavní pokyny pro agenta k celé nahrávce, uložené v `instructions.txt`; šablony Draft Intent, Create Plan a Implement.
@@ -104,6 +104,8 @@ Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story�
 - **Process:** předá agentovi crop a pokyny a editor zavře (kap. 9).
 
 Render a Process jsou dostupné, až když je přepis zobrazené nahrávky úplný (nebo definitivně selhal).
+
+Stavový řádek editoru ukazuje id nahrávky a vybranou obrazovku s rozlišením, během přepisu i jeho postup; crop ani stav vůči agentovi v něm nejsou.
 
 ### Archivace
 

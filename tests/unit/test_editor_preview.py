@@ -19,6 +19,9 @@ from video_story.editor.preview import (  # noqa: E402
     ZOOM_STEP,
     PreviewPanel,
     PreviewWidget,
+    screen_number,
+    watermark_colors,
+    watermark_pixel_size,
 )
 from video_story.host.runner import FrameRef  # noqa: E402
 
@@ -59,14 +62,20 @@ def wheel(view: PreviewWidget, pos: tuple[float, float], notches: float) -> None
     QApplication.sendEvent(view, event)
 
 
-def mouse(view: PreviewWidget, kind: QEvent.Type, pos: tuple[float, float], pressed: bool) -> None:
+def mouse(
+    view: PreviewWidget,
+    kind: QEvent.Type,
+    pos: tuple[float, float],
+    pressed: bool,
+    button: Qt.MouseButton = Qt.MouseButton.LeftButton,
+) -> None:
     local = QPointF(*pos)
     event = QMouseEvent(
         kind,
         local,
         QPointF(view.mapToGlobal(local.toPoint())),
-        Qt.MouseButton.LeftButton,
-        Qt.MouseButton.LeftButton if pressed else Qt.MouseButton.NoButton,
+        button if kind != QEvent.Type.MouseMove else Qt.MouseButton.NoButton,
+        button if pressed else Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(view, event)
@@ -369,3 +378,50 @@ def test_panel_centres_transport_then_time_then_subtitle(qtbot):
     panel.set_subtitle("always shown")
     assert panel.subtitle_label.text() == "always shown"
     assert panel.edit_subtitle_button.isEnabled()
+
+
+def test_middle_button_pans_like_the_left_one(shown):
+    shown.zoom_at(QPointF(320, 200), 2.0)
+    before = shown.image_origin()
+    middle = Qt.MouseButton.MiddleButton
+    mouse(shown, QEvent.Type.MouseButtonPress, (300, 200), True, middle)
+    mouse(shown, QEvent.Type.MouseMove, (340, 230), True, middle)
+    mouse(shown, QEvent.Type.MouseButtonRelease, (340, 230), False, middle)
+    after = shown.image_origin()
+    assert after.x() == pytest.approx(before.x() + 40)
+    assert after.y() == pytest.approx(before.y() + 30)
+    # The pan ended with the middle button: a later move does nothing.
+    mouse(shown, QEvent.Type.MouseMove, (100, 100), False)
+    assert shown.image_origin() == after
+
+
+def test_watermark_colours_cycle_per_screen():
+    assert [screen_number(s) for s in ("screen1", "screen2", "screen12", None, "x")] == [
+        1,
+        2,
+        12,
+        1,
+        1,
+    ]
+    grey, blue, green, red = (watermark_colors(f"screen{n}", False)[0] for n in (1, 2, 3, 4))
+    assert grey.name() == "#d6d6d6"  # the light preview background stays
+    assert blue.blue() > blue.red() and green.green() > green.red() and red.red() > red.blue()
+    assert watermark_colors("screen5", False) == watermark_colors("screen1", False)
+    for dark in (False, True):
+        for n in range(1, 5):
+            background, text = watermark_colors(f"screen{n}", dark)
+            assert background != text  # the text is visible, but faint
+            assert abs(background.lightness() - text.lightness()) < 60
+    assert 12 <= watermark_pixel_size(640, 400) <= 22
+    assert watermark_pixel_size(100, 100) == 12 and watermark_pixel_size(4000, 3000) == 22
+
+
+def test_watermark_fills_the_sides_and_the_picture_covers_it(qtbot, view, tmp_path):
+    view.resize(800, 300)  # the 320x200 picture fits 450x300: sides of 175 px
+    show(qtbot, view, make_frame(tmp_path, "w", screen_id="screen2"))
+    view.set_dark(False)
+    image = view.grab().toImage()
+    background, text = watermark_colors("screen2", False)
+    side = {image.pixelColor(x, y).name() for x in range(0, 170, 3) for y in range(0, 300, 3)}
+    assert background.name() in side and len(side) > 1  # tinted, with text on it
+    assert image.pixelColor(400, 150).name() == FILL.name()  # the picture on top

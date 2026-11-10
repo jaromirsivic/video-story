@@ -282,8 +282,8 @@ def test_crop_restored_on_reload_and_clamped(qtbot, folder: Path):
     write_crop(_crop_file(folder, OLDER), Crop(-5, 99_999))
     window = _open(qtbot, folder)
     assert (window.model.in_ms, window.model.out_ms) == (600, 2100)
-    assert window.in_edit.text() == "00:00:00.600" and window.out_edit.text() == "00:00:02.100"
-    assert "length 00:00:01.500" in window.crop_label.text()
+    assert window.in_edit.text() == "00:00:00.60" and window.out_edit.text() == "00:00:02.10"
+    assert "length 00:00:01.50" in window.crop_label.text()
     stamp = _read_crop_json(folder)["updated_at"]
     # Switching recordings restores the other crop (clamped) without writing anything.
     window.list_view.setCurrentIndex(window.recordings.index(1))
@@ -312,7 +312,7 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     window = _open(qtbot, folder, editor_session=editor_session, recording_session=paths.session_id)
     adopted = read_state(paths.state_path)
     assert adopted.status is Status.EDITING and adopted.pid == os.getpid()
-    assert f"waiting for Process (recording {NEWEST})" in window.status_label.text()
+    assert "waiting for Process" not in window.status_label.text()  # not in the status bar
     assert es.read_editor_event(editor_session)["event"] == "open"
 
     window.model.set_in(500)
@@ -330,7 +330,6 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     assert state.recording_dir == str(paths.final_dir)
     assert _read_crop_json(folder)["start_ms"] == 500
     assert window.recording_session is None and window.editor_event_sent
-    assert "sent to agent" in window.status_label.text()
 
     # The window closes by itself; closing neither rewrites the event nor touches the
     # finished session.
@@ -416,7 +415,6 @@ def test_attach_request_selects_recording_adopts_sessions_and_raises(
     assert read_state(paths.state_path).pid == os.getpid()
     assert raised == ["raise_", "activateWindow"]
     assert window.isMaximized() and not window.isMinimized()  # not dropped to normal
-    assert f"waiting for Process (recording {third})" in window.status_label.text()
     # The previous editor session was told the editor moved on; its folder is empty.
     assert es.read_editor_event(first)["event"] == "closed"
     assert not list(es.requests_dir(cfg).glob("*.json"))
@@ -443,7 +441,7 @@ def test_attach_timer_serves_requests_on_its_own(qtbot, folder: Path):
     es.write_attach_request(cfg, session, OLDER)
     qtbot.waitUntil(lambda: window.editor_session == session, timeout=5000)
     _wait_loaded(qtbot, window, OLDER)
-    assert "waiting for Process" in window.status_label.text()
+    assert not window.editor_event_sent  # waits for Process (no longer in the status bar)
 
 
 def test_attach_un_minimizes_without_touching_a_normal_window(qtbot, folder: Path):

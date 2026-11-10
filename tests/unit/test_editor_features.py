@@ -373,3 +373,28 @@ def test_subtitle_box_grows_to_five_lines_then_scrolls(qtbot):
     QApplication.processEvents()
     assert box.verticalScrollBar().maximum() == 0
     assert box.alignment() & Qt.AlignmentFlag.AlignHCenter
+
+
+def test_play_marker_follows_the_playhead_on_mouse_release(editor, qtbot):
+    view = editor.timeline
+    y = RULER_H // 2
+    start = QPoint(int(view._x(500)), y)
+    end = QPoint(int(view._x(1600)), y)
+    qtbot.mousePress(view, Qt.MouseButton.LeftButton, pos=start)
+    _mouse_move(view, end)
+    assert editor.model.play_marker_ms is None  # not while the button is held
+    qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=end)
+    marker = editor.model.play_marker_ms
+    assert marker == editor.model.playhead_ms and abs(marker - 1600) < 50
+    # Play from there and Stop: the red line returns to the marker.
+    editor.toggle_play()
+    editor.stop_playback()
+    assert editor.model.playhead_ms == marker
+
+
+def test_status_bar_and_tools_row_after_the_cleanup(editor):
+    text = editor.status_label.text()
+    assert NEWEST in text and "crop" not in text and "waiting for Process" not in text
+    assert not hasattr(editor, "fit_button")
+    assert editor.in_edit.text().count(".") == 1 and len(editor.in_edit.text()) == 11
+    assert editor.crop_label.text().startswith("length ") and len(editor.crop_label.text()) == 18

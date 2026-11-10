@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json  # noqa: E402
+import re  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import wave  # noqa: E402
@@ -29,7 +30,12 @@ from video_story.core.transcript import Segment, Transcript, write_transcript  #
 from video_story.editor import player as player_mod  # noqa: E402
 from video_story.editor.preview import IMAGE_CACHE_SIZE  # noqa: E402
 from video_story.editor.recording import LoadedRecording  # noqa: E402
-from video_story.editor.recordings_model import RecordingsModel, scan_recordings  # noqa: E402
+from video_story.editor.recordings_model import (  # noqa: E402
+    RecordingsModel,
+    folder_size,
+    format_size,
+    scan_recordings,
+)
 from video_story.editor.render_dialog import RenderProgressDialog  # noqa: E402
 from video_story.editor.timeline import thumbnails as thumbnails_mod  # noqa: E402
 from video_story.editor.timeline.model import MAX_ZOOM_PX_PER_S, TimelineModel  # noqa: E402
@@ -43,7 +49,7 @@ from video_story.editor.timeline.view import (  # noqa: E402
     tick_step_ms,
 )
 from video_story.editor.timeline.waveform import column_peaks, compute_peaks  # noqa: E402
-from video_story.editor.window import EditorWindow  # noqa: E402
+from video_story.editor.window import EditorWindow, format_crop_time  # noqa: E402
 from video_story.export import ExportError, ExportRequest, ExportResult  # noqa: E402
 
 FRAME_TIMES = (0, 500, 1000, 1500, 2000)
@@ -281,7 +287,8 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     assert items[2].first_line == ""
     assert "02.01.2026 09:00:00" in items[0].display_text
     # The length in whole seconds; the screens are the row's dots, not text.
-    assert items[0].details == "00:02" and "screens" not in items[0].display_text
+    assert re.fullmatch(r"00:02 \(\d+\.\d KB\)", items[0].details)
+    assert "screens" not in items[0].display_text
     assert items[0].screen_ids == ("screen1", "screen2")
     assert [s[2] for s in items[0].segments] == ["hello world", "second line"]
     assert items[0].text_at(0) == "hello world"
@@ -303,8 +310,22 @@ def test_recording_length_shows_hours_only_when_nonzero(tmp_path: Path):
     make_recording(tmp_path, NEWEST, duration_ms=65 * 60_000)
     make_recording(tmp_path, OLDER)
     items = {item.session_id: item for item in scan_recordings(tmp_path)}
-    assert items[NEWEST].details == "1:05:00"
-    assert items[OLDER].details == "00:02"  # no milliseconds
+    assert items[NEWEST].details.startswith("1:05:00 (")
+    assert items[OLDER].details.startswith("00:02 (")  # no milliseconds
+
+
+def test_size_format_and_folder_size(tmp_path: Path):
+    assert format_size(0) == "0.0 KB" and format_size(500) == "0.5 KB"
+    assert format_size(1536) == "1.5 KB" and format_size(1023 * 1024) == "1023.0 KB"
+    assert format_size(1024 * 1024 - 10) == "1.0 MB"  # never "1024.0 KB"
+    assert format_size(int(2.5 * 1024**2)) == "2.5 MB"
+    assert format_size(3 * 1024**3) == "3.0 GB" and format_size(5 * 1024**4) == "5.0 TB"
+    assert format_size(2048 * 1024**4) == "2048.0 TB"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.bin").write_bytes(b"1" * 1000)
+    (tmp_path / "y.bin").write_bytes(b"1" * 24)
+    assert folder_size(tmp_path) == 1024
+    assert folder_size(tmp_path / "missing") == 0
 
 
 def test_recordings_model_empty_folder(tmp_path: Path):
@@ -442,7 +463,7 @@ def test_window_loads_newest_recording_and_workers(editor, qtbot):
     assert (editor.model.in_ms, editor.model.out_ms) == (0, DURATION_MS)
     assert editor.preview.time_label.text() == "00:00:00.000 / 00:00:02.500"
     assert NEWEST in editor.status_label.text() and "320x200" in editor.status_label.text()
-    assert editor.in_edit.text() == "00:00:00.000" and editor.out_edit.text() == "00:00:02.500"
+    assert editor.in_edit.text() == "00:00:00.00" and editor.out_edit.text() == "00:00:02.50"
 
     qtbot.waitUntil(lambda: editor.timeline.waveform.peaks is not None, timeout=10_000)
     assert editor.timeline.waveform.peaks.shape[0] == DURATION_MS // 20
@@ -494,21 +515,21 @@ def test_io_keys_time_editors_and_reset_crop(editor, qtbot):
     editor.model.set_playhead(700)
     qtbot.keyClick(editor.timeline, Qt.Key_I)
     assert editor.model.in_ms == 700
-    assert editor.in_edit.text() == "00:00:00.700"
+    assert editor.in_edit.text() == "00:00:00.70"
     editor.model.set_playhead(2200)
     qtbot.keyClick(editor.timeline, Qt.Key_O)
     assert editor.model.out_ms == 2200
-    assert editor.out_edit.text() == "00:00:02.200"
-    assert "length 00:00:01.500" in editor.crop_label.text()
+    assert editor.out_edit.text() == "00:00:02.20"
+    assert "length 00:00:01.50" in editor.crop_label.text()
     # Typing into the In editor and pressing Return commits (clamped to keep one second).
     editor.in_edit.selectAll()
     qtbot.keyClicks(editor.in_edit, "00:00:01.900")
     qtbot.keyClick(editor.in_edit, Qt.Key_Return)
     assert editor.model.in_ms == 1200
-    assert editor.in_edit.text() == "00:00:01.200"
+    assert editor.in_edit.text() == "00:00:01.20"
     editor.reset_crop_button.click()
     assert (editor.model.in_ms, editor.model.out_ms) == (0, DURATION_MS)
-    assert editor.in_edit.text() == "00:00:00.000"
+    assert editor.in_edit.text() == "00:00:00.00"
     # Home/End and the step keys move the playhead.
     editor.model.set_in(1000)
     editor._crop_updated()
@@ -529,29 +550,29 @@ def test_time_edit_commits_on_return_and_focus_out_and_reverts_partial_text(edit
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:01.900")
     qtbot.keyClick(edit, Qt.Key_Return)
-    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.200"
+    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.20"
     # A partial entry does not survive Enter: it reverts to the last value.
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:0")
     assert edit.text() == "00:00:0"
     qtbot.keyClick(edit, Qt.Key_Enter)
-    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.200"
+    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.20"
     # HH:MM:SS without milliseconds is accepted; focus-out commits it.
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:00")
     QApplication.sendEvent(edit, QFocusEvent(QEvent.Type.FocusOut))
-    assert editor.model.in_ms == 0 and edit.text() == "00:00:00.000"
+    assert editor.model.in_ms == 0 and edit.text() == "00:00:00.00"
     # Letters are refused by the validator, so the text cannot become garbage.
     edit.selectAll()
     qtbot.keyClicks(edit, "garbage")
-    assert edit.text() == "00:00:00.000"
+    assert edit.text() == "00:00:00.00"
     # The Out editor: partial text plus focus-out reverts too.
     out = editor.out_edit
     out.selectAll()
     qtbot.keyClicks(out, "00:00:1")
     QApplication.sendEvent(out, QFocusEvent(QEvent.Type.FocusOut))
-    assert editor.model.out_ms == 2200 and out.text() == "00:00:02.200"
-    assert "length 00:00:02.200" in editor.crop_label.text()
+    assert editor.model.out_ms == 2200 and out.text() == "00:00:02.20"
+    assert "length 00:00:02.20" in editor.crop_label.text()
 
 
 def test_subtitle_label_follows_playhead(editor):
@@ -914,7 +935,7 @@ def test_crop_handle_press_keeps_grab_offset_and_playhead_wins(qtbot, tmp_path: 
     assert model.in_ms == 60_000  # pressing does not move the crop
     _mouse_move(view, QPoint(press_x + 10, y))
     assert model.in_ms == pytest.approx(60_000 + 10 * ms_per_px, abs=1)
-    assert window.in_edit.text() == format_timestamp(model.in_ms)
+    assert window.in_edit.text() == format_crop_time(model.in_ms)
     qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(press_x + 10, y))
     assert view._drag is None
     # The playhead sitting on the In handle can still be scrubbed.

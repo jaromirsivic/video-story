@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,41 @@ def format_length(duration_ms: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+SIZE_UNITS = ("KB", "MB", "GB", "TB")
+
+
+def format_size(size_bytes: int) -> str:
+    """Size on disk with one decimal in the largest unit below 1024 of it: KB (also for
+    less than 1 KB), MB, GB or TB (binary units, 1 KB = 1024 bytes)."""
+    value = max(0, int(size_bytes)) / 1024
+    for unit in SIZE_UNITS[:-1]:
+        if round(value, 1) < 1024:  # 1023.96 KB would read "1024.0 KB": say 1.0 MB
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} {SIZE_UNITS[-1]}"
+
+
+def folder_size(path: Path) -> int:
+    """Bytes of every file below ``path`` (unreadable entries count as 0)."""
+    total = 0
+    stack = [path]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    return total
+
+
 @dataclass(frozen=True)
 class RecordingItem:
     paths: SessionPaths
@@ -52,6 +88,7 @@ class RecordingItem:
     archive: str | None = None
     archive_leftovers: bool = False  # archived, but some files could not be deleted
     archive_fraction: float = 0.0  # share of the screens archived (queued / archiving)
+    size_bytes: int | None = None  # the recording folder on disk; None = unknown
 
     @property
     def archived(self) -> bool:
@@ -74,9 +111,11 @@ class RecordingItem:
 
     @property
     def details(self) -> str:
-        """The length without milliseconds; the screens are the dots of the row."""
+        """The length without milliseconds and the size on disk in brackets; the screens
+        are the dots of the row."""
         suffix = "" if self.transcript_complete or self.archiving else "  |  transcribing"
-        return f"{format_length(self.duration_ms)}{suffix}"
+        size = "" if self.size_bytes is None else f" ({format_size(self.size_bytes)})"
+        return f"{format_length(self.duration_ms)}{size}{suffix}"
 
     def screen_label(self, screen_id: str) -> str:
         """``screen1 2560x1600`` - the tooltip of a screen dot (as the track header)."""
@@ -170,6 +209,7 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
                 archive=str(archive.status) if archive is not None else None,
                 archive_leftovers=bool(archive and archive.archived and archive.leftovers),
                 archive_fraction=archive.fraction if archive is not None else 0.0,
+                size_bytes=folder_size(base),
             )
         )
     return items
@@ -237,7 +277,9 @@ __all__ = [
     "RecordingItem",
     "RecordingsModel",
     "SegmentText",
+    "folder_size",
     "format_length",
+    "format_size",
     "scan_recordings",
     "session_start",
 ]
