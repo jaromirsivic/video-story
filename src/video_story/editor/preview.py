@@ -26,6 +26,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFont,
     QImage,
     QMouseEvent,
     QPainter,
@@ -132,6 +133,7 @@ class PreviewWidget(QWidget):
         self._screen_id: str | None = None
         self._draw_cursor = True
         self._message: str | None = "No recording"
+        self._message_large = False
         self._image_size: QSize | None = None  # size of the image the zoom state refers to
         self._zoom: float | None = None  # None = fit (whole image visible, centred)
         self._offset = QPointF()  # widget position of the image's top-left when zoomed
@@ -151,9 +153,15 @@ class PreviewWidget(QWidget):
         self._background = PREVIEW_BG_DARK if dark else PREVIEW_BG_LIGHT
         self.update()
 
-    def set_message(self, text: str | None) -> None:
+    def set_message(self, text: str | None, large: bool = False) -> None:
+        """Text shown instead of a picture; ``large`` for a big bold notice."""
         self._message = text
+        self._message_large = large
         self.update()
+
+    @property
+    def message(self) -> str | None:
+        return self._message
 
     def clear(self) -> None:
         """Another recording: forget every frame and the zoom state."""
@@ -180,7 +188,7 @@ class PreviewWidget(QWidget):
     ) -> None:
         self._cursor = cursor
         self._screen_id = screen_id
-        if ref is None:
+        if ref is None or ref.image is None:
             self._wanted = self._shown = None
             self.update()
             return
@@ -195,7 +203,7 @@ class PreviewWidget(QWidget):
         self.update()
 
     def prefetch(self, ref: FrameRef | None) -> None:
-        if ref is not None:
+        if ref is not None and ref.image is not None:
             self._request(ref.image)
 
     @property
@@ -426,6 +434,13 @@ class PreviewWidget(QWidget):
             if self._message:
                 painter.setPen(QPen(QColor("#9a9a9a" if self._background.lightness() < 128
                                            else "#505050")))  # fmt: skip
+                if self._message_large:
+                    font = QFont(painter.font())
+                    font.setBold(True)
+                    size = font.pointSizeF()
+                    if size > 0:
+                        font.setPointSizeF(size * 2.2)
+                    painter.setFont(font)
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
             painter.end()
             return

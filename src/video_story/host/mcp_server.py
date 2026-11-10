@@ -310,7 +310,7 @@ def _frame_from_path(paths: SessionPaths, path: str) -> FrameRef:
         screen_id=parsed.screen_id,
         time_ms=parsed.time_ms,
         image=candidate,
-        sidecar=frames_dir / f"{parsed.base}.json",
+        sidecar=paths.frames_info_dir(paths.current_dir) / f"{parsed.base}.json",
     )
 
 
@@ -321,6 +321,12 @@ def _frame_at(paths: SessionPaths, at_ms: int, screen: str) -> FrameRef:
     if not found["frames"]:
         raise SessionError("NO_FRAMES", f"no frame for screen {screen!r} at {at_ms} ms")
     ref = found["frames"][0]
+    if ref["image"] is None:
+        raise SessionError(
+            "ARCHIVED",
+            "this recording is archived: the frame images are gone; "
+            "see `archive` in the result of describe or timeline",
+        )
     return FrameRef(
         screen_id=ref["screen"],
         time_ms=ref["time_ms"],

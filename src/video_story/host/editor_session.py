@@ -283,6 +283,7 @@ def finish_recording_session(
     state.transcript_txt = str(paths.transcript_txt_path(final))
     state.transcript_json = str(paths.transcript_json_path(final))
     state.frames_dir = str(paths.frames_dir(final))
+    state.frames_info_dir = str(paths.frames_info_dir(final))
     state.message = (
         f"Recording processed; act on {crop.start_ms}-{crop.end_ms} ms (crop from the editor)."
         + note

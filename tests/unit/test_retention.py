@@ -1,4 +1,4 @@
-"""Retention: automatic deletion of old recordings and Delete All."""
+"""Lifetime of recordings: old ones are due for archiving (never deleted), Delete All."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from video_story.core.archive_state import request_archive
 from video_story.core.session import SessionPaths, SessionState, Status, write_state
 from video_story.host import retention
 from video_story.host.runner import FrameRef
@@ -37,29 +38,32 @@ def test_session_started_at():
     assert retention.session_started_at("garbage") is None
 
 
-def test_purge_deletes_only_old_inactive_sessions(tmp_path: Path):
+def test_old_recordings_are_due_for_archive_never_deleted(tmp_path: Path):
     now = datetime(2026, 11, 7, 12, 0, 0)
     old = _make_final(tmp_path, "20261001-090000")  # 37 days old
     recent = _make_final(tmp_path, "20261101-090000")  # 6 days old
-    # Old session that failed in the work folder (final state, dead pid): deleted too.
+    # Old session that failed in the work folder: no saved recording, nothing to archive.
     old_work = _make_work(tmp_path, "20260901-090000", Status.FAILED, pid=2**22)
-    # Old but still open window (live pid): kept.
+    # Old but still open window (live pid): left alone.
     active = _make_work(tmp_path, "20260801-090000", Status.READY, pid=os.getpid())
+    _make_final(tmp_path, "20260801-090000")
+    # Already asked to be archived: not again.
+    queued = _make_final(tmp_path, "20260701-090000")
+    request_archive(queued)
 
-    deleted = retention.purge_old_recordings(tmp_path, 30, now=now)
+    due = retention.recordings_due_for_archive(tmp_path, 30, now=now)
 
-    assert sorted(deleted) == ["20260901-090000", "20261001-090000"]
-    assert not old.final_dir.exists() and not old_work.work_dir.exists()
-    assert recent.final_dir.exists() and active.work_dir.exists()
+    assert [p.session_id for p in due] == ["20261001-090000"]
+    assert old.final_dir.exists() and recent.final_dir.exists()  # nothing deleted
+    assert old_work.work_dir.exists() and active.work_dir.exists()
 
 
-def test_purge_boundary_uses_session_timestamp(tmp_path: Path):
+def test_archive_boundary_uses_session_timestamp(tmp_path: Path):
     now = datetime(2026, 11, 7, 12, 0, 0)
-    just_inside = _make_final(tmp_path, "20261008-120001")  # 29 days 23:59:59 old
-    just_outside = _make_final(tmp_path, "20261008-115959")  # 30 days 00:00:01 old
-    deleted = retention.purge_old_recordings(tmp_path, 30, now=now)
-    assert deleted == ["20261008-115959"]
-    assert just_inside.final_dir.exists() and not just_outside.final_dir.exists()
+    _make_final(tmp_path, "20261008-120001")  # 29 days 23:59:59 old
+    _make_final(tmp_path, "20261008-115959")  # 30 days 00:00:01 old
+    due = retention.recordings_due_for_archive(tmp_path, 30, now=now)
+    assert [p.session_id for p in due] == ["20261008-115959"]
 
 
 def test_summarize_and_delete_all_keep_current_session(tmp_path: Path):

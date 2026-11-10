@@ -1,4 +1,9 @@
-"""A processed recording opened in the editor: manifest, frames, transcript, audio."""
+"""A processed recording opened in the editor: manifest, frames, transcript, audio.
+
+An archived recording (see :mod:`video_story.export.archive`) has no frames and no
+audio any more: every screen shows its still ``archive/<screenId>.jpg`` for the whole
+length, there is no sound and no cursor; the transcript is still there.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +14,10 @@ import wave
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from video_story.core.archive_state import ArchiveState, read_archive_state
 from video_story.core.cursor import CursorPosition, cursor_from_json
 from video_story.core.manifest import Manifest, TranscriptInfo, read_manifest, write_manifest
+from video_story.core.naming import FrameName
 from video_story.core.screens import Screen
 from video_story.core.session import SessionPaths, now_iso
 from video_story.core.transcript import (
@@ -55,13 +62,25 @@ def read_audio_info(path: Path) -> AudioFile | None:
         return None
 
 
-def _load_frame_index(frames_dir: Path) -> FrameIndex:
-    if frames_dir.is_dir():
-        return FrameIndex(frames_dir)
-    index = FrameIndex.__new__(FrameIndex)  # a recording without frames: empty index
-    index.frames_dir = frames_dir
-    index.by_screen = {}
-    return index
+class StillFrames(FrameIndex):
+    """The frames of an archived recording: one still image per screen
+    (``archive/<screenId>.jpg``), valid from 0 ms to the end."""
+
+    def __init__(self, archive_dir: Path, info_dir: Path, screen_ids: list[str]) -> None:
+        self.frames_dir = archive_dir
+        self.info_dir = info_dir
+        self.by_screen = {
+            sid: [FrameName(0, sid, "jpg")]
+            for sid in screen_ids
+            if (archive_dir / f"{sid}.jpg").is_file()
+        }
+
+    def image_of(self, name: FrameName) -> Path | None:
+        return self.frames_dir / f"{name.screen_id}.jpg"
+
+
+def _load_frame_index(paths: SessionPaths, base: Path) -> FrameIndex:
+    return FrameIndex.of(paths, base)
 
 
 class LoadedRecording:
@@ -74,8 +93,10 @@ class LoadedRecording:
         frames: FrameIndex,
         transcript: Transcript | None,
         audio: AudioFile | None,
+        archive: ArchiveState | None = None,
     ) -> None:
         self.paths = paths
+        self.archive = archive
         self.manifest = manifest
         self.frames = frames
         self.transcript = transcript
@@ -93,7 +114,7 @@ class LoadedRecording:
     def load(cls, paths: SessionPaths) -> LoadedRecording:
         base = paths.final_dir
         manifest = read_manifest(paths.manifest_path(base))
-        frames = _load_frame_index(paths.frames_dir(base))
+        archive = read_archive_state(paths, base)
         transcript: Transcript | None = None
         transcript_path = paths.transcript_json_path(base)
         if transcript_path.exists():
@@ -101,9 +122,21 @@ class LoadedRecording:
                 transcript = read_transcript(transcript_path)
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("cannot read transcript %s: %s", transcript_path, exc)
+        if archive is not None and archive.archived:
+            screen_ids = [s.id for s in manifest.screens] or archive.screens
+            frames: FrameIndex = StillFrames(
+                paths.archive_dir(base), paths.frames_info_dir(base), screen_ids
+            )
+            return cls(paths, manifest, frames, transcript, None, archive)
+        frames = _load_frame_index(paths, base)
         audio_path = base / manifest.audio.file
         audio = read_audio_info(audio_path) if audio_path.exists() else None
-        return cls(paths, manifest, frames, transcript, audio)
+        return cls(paths, manifest, frames, transcript, audio, archive)
+
+    @property
+    def archived(self) -> bool:
+        """Archived: stills instead of frames, no audio; only subtitles can change."""
+        return self.archive is not None and self.archive.archived
 
     # Screens ----------------------------------------------------------------
 
@@ -167,9 +200,10 @@ class LoadedRecording:
         return self.frames._ref(self.frames.by_screen[screen_id][index])
 
     def cursor_at(self, screen_id: str, time_ms: int) -> CursorPosition | None:
-        """Cursor from the sidecar of the frame valid at ``time_ms`` (any screen)."""
+        """Cursor from the sidecar of the frame valid at ``time_ms`` (any screen); none
+        for an archived recording (its still image shows no moment in particular)."""
         ref = self.frame_at(screen_id, time_ms)
-        if ref is None:
+        if ref is None or self.archived:
             return None
         if self._cursor_cache is not None and self._cursor_cache[0] == ref.sidecar:
             return self._cursor_cache[1]

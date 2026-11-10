@@ -55,7 +55,7 @@ Folder applies at once, also to the window that is open. The CLI edits every key
 ```bash
 uv run video-story config get
 uv run video-story config set capture_interval_ms 250
-uv run video-story config set retention_days 90
+uv run video-story config set archive_after_days 90
 uv run video-story config set image_format jpeg
 uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 ```
@@ -68,7 +68,7 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `jpeg_quality` | 70 | 20 to 100, used for JPEG only |
 | `audio_input` | `null` | device name; `null` means the system default input |
 | `auto_stop_minutes` | 120 | recording stops by itself after this time; it is saved and opened in the editor like after Stop |
-| `retention_days` | 30 | recordings older than this (by their start time) are deleted when the control window starts, 1 to 3650 |
+| `archive_after_days` | 30 | recordings older than this (by their start time) are archived when the editor starts (one MP4 per screen; frames and audio deleted; nothing is deleted automatically), 1 to 3650 |
 | `export_preset` | `medium` | libx264 preset for MP4 export (`ultrafast` ... `slow`) |
 | `export_crf` | 18 | libx264 quality (lower is better, 0 to 51) |
 | `export_audio_bitrate_k` | 192 | AAC bitrate in kb/s |
@@ -179,7 +179,8 @@ uv run video-story run            # opens the window and waits; press Record, ta
 ```
 
 Recordings land in the recording folder as `<YYYYMMDD-HHMMSS>/` with `manifest.json`,
-`audio.wav`, `transcript.txt`, `transcript.json` and `frames/`.
+`audio/audio.wav`, `transcript.txt`, `transcript.json`, `frames/` (images) and
+`frames_info/` (one sidecar JSON per frame).
 
 Developer checks:
 

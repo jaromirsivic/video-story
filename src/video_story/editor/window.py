@@ -38,6 +38,17 @@ instructions for the AI about the whole recording (``instructions.txt`` next to 
 recording, empty by default); they travel to the agent with the crop. **Stop** returns
 to where **Play** was last pressed (a white arrow on the ruler). The theme button above
 **Edit** switches between the light and the dark theme (remembered in the settings).
+
+The list's menu offers **Archive Video** / **Archive Videos (N)** under Open Folder
+Location (N counts only the selected recordings that can still be archived: not
+archived, not being archived, transcript complete). Archiving runs in
+:class:`ArchiveManager`, one recording after another; recordings older than
+``archive_after_days`` join that queue when the window starts, and so do archives an
+earlier editor left unfinished. A recording in the queue cannot be edited: the preview
+says "This video is being archived." with the percentage. An archived recording shows
+the still of every screen (``archive/<screenId>.jpg``), a flat audio line and the
+subtitles; the playhead moves and subtitles can be edited, but Auto process, Process,
+Instructions and Render are disabled.
 """
 
 from __future__ import annotations
@@ -91,6 +102,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from video_story.core.archive_state import request_archive
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.crop import Crop, read_crop, write_crop
 from video_story.core.instructions import read_instructions, write_instructions
@@ -107,14 +119,20 @@ from video_story.host.editor_session import (
     update_recording_session_progress,
     write_editor_event,
 )
-from video_story.host.retention import IN_USE_REASON, delete_recording, recording_in_use
+from video_story.host.retention import (
+    IN_USE_REASON,
+    delete_recording,
+    recording_in_use,
+    recordings_due_for_archive,
+)
 
+from .archiving import PHASE_TRANSCRIBING, ArchiveManager
 from .instructions_dialog import InstructionsDialog
 from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import ItemRole, RecordingItem, RecordingsModel
-from .recordings_view import MIN_LIST_WIDTH, RecordingsListView
+from .recordings_view import MIN_LIST_WIDTH, RecordingsListView, format_percent
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
 from .subtitle_dialog import SubtitleDialog
 from .theme import apply_theme, system_prefers_dark
@@ -162,8 +180,21 @@ QPushButton:pressed { background-color: #185aa8; }
 QPushButton:disabled { background-color: #9dbfe8; color: #f3f8ff; border-color: #8fb2dc; }
 """
 DELETE_ONE_LABEL = "Delete Video"
-DELETE_MANY_LABEL = "Delete Video(s)"
+ARCHIVE_ONE_LABEL = "Archive Video"
+ARCHIVING_MESSAGE = "This video is being archived."
+ARCHIVED_NOTE = "Not available for an archived video"
+BEING_ARCHIVED_REASON = "it is being archived"
 TRANSCRIBING_NOTE = "Available once the transcription is complete"
+
+
+def delete_label(count: int) -> str:
+    """``Delete Video`` for one recording, ``Delete Videos (8)`` for more."""
+    return DELETE_ONE_LABEL if count == 1 else f"Delete Videos ({count})"
+
+
+def archive_label(count: int) -> str:
+    """``Archive Video`` for one recording, ``Archive Videos (4)`` for more."""
+    return ARCHIVE_ONE_LABEL if count == 1 else f"Archive Videos ({count})"
 
 
 class _LoadSignals(QObject):
@@ -272,6 +303,7 @@ class EditorWindow(QMainWindow):
         recording_session: str | None = None,
         config_file: Path | None = None,
         transcription: TranscriptionManager | None = None,
+        archiver: ArchiveManager | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
@@ -301,6 +333,11 @@ class EditorWindow(QMainWindow):
         self.transcription.progress.connect(self._on_transcription_progress)
         self.transcription.finished.connect(self._on_transcription_finished)
         self.transcription.failed.connect(self._on_transcription_failed)
+        self.archiver = archiver or ArchiveManager(config, config_file, self)
+        self.archiver.started.connect(self._on_archive_started)
+        self.archiver.progress.connect(self._on_archive_progress)
+        self.archiver.finished.connect(self._on_archive_finished)
+        self.archiver.failed.connect(self._on_archive_failed)
         self._transcription_failed: dict[str, str] = {}  # session id -> message
         self._transcription_fraction: dict[str, float] = {}
         # session id -> (monotonic time, fraction) of the first progress event: the ETA
@@ -346,6 +383,7 @@ class EditorWindow(QMainWindow):
         self.recordings = RecordingsModel(config.recording_folder, self)
         self.list_view.setModel(self.recordings)
         self.list_view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self._start_archive_queue()
         self._select_row(self.recordings.default_row(session_id))
         self._update_status()
         self._decline_attach_requests()  # left behind by an editor that was closing
@@ -554,7 +592,7 @@ class EditorWindow(QMainWindow):
     # Recordings list --------------------------------------------------------
 
     def refresh_recordings(self) -> None:
-        current = self.recording.session_id if self.recording else None
+        current = self.recording.session_id if self.recording else self._current_item_id()
         self.recordings.refresh()
         row = self.recordings.default_row(current)
         if row >= 0 and self.recordings.item(row).session_id == current:
@@ -584,8 +622,24 @@ class EditorWindow(QMainWindow):
         rows = sorted(index.row() for index in self.list_view.selectionModel().selectedRows())
         return [item for row in rows if (item := self.recordings.item(row)) is not None]
 
+    def _current_item_id(self) -> str | None:
+        item = self.list_view.currentIndex().data(ItemRole)
+        return item.session_id if isinstance(item, RecordingItem) else None
+
+    def archivable(self, items: list[RecordingItem]) -> list[RecordingItem]:
+        """The recordings among ``items`` that can be archived now: not archived, not in
+        the archive queue, transcript complete."""
+        return [
+            item
+            for item in items
+            if not item.archived
+            and not item.archiving
+            and not self.archiver.is_queued(item.session_id)
+            and item.transcript_complete
+        ]
+
     def _show_list_menu(self, pos: QPoint) -> None:
-        """Right click on the list: Open Folder Location and Delete Video(s)."""
+        """Right click on the list: Open Folder Location, Archive Video(s), Delete."""
         index = self.list_view.indexAt(pos)
         clicked = index.data(ItemRole) if index.isValid() else None
         if not isinstance(clicked, RecordingItem):
@@ -597,9 +651,15 @@ class EditorWindow(QMainWindow):
         menu = QMenu(self)
         open_action = menu.addAction("Open Folder Location")
         open_action.triggered.connect(lambda: self.open_folder_location(clicked))
+        archivable = self.archivable(selected)
+        archive_action = menu.addAction(archive_label(max(1, len(archivable))))
+        archive_action.setEnabled(bool(archivable))
+        if not archivable:
+            archive_action.setToolTip(self._not_archivable_reason(selected))
+        menu.setToolTipsVisible(True)
+        archive_action.triggered.connect(lambda: self.archive_recordings(archivable))
         menu.addSeparator()
-        label = DELETE_ONE_LABEL if len(selected) == 1 else DELETE_MANY_LABEL
-        delete_action = menu.addAction(label)
+        delete_action = menu.addAction(delete_label(len(selected)))
         delete_action.triggered.connect(lambda: self.delete_recordings(selected))
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
         menu.deleteLater()
@@ -611,6 +671,143 @@ class EditorWindow(QMainWindow):
             return True
         self._show_status_message(f"Cannot open {folder}")
         return False
+
+    def _not_archivable_reason(self, items: list[RecordingItem]) -> str:
+        if all(item.archived for item in items):
+            return "Already archived"
+        if any(not item.transcript_complete for item in items if not item.archived):
+            return "Available once the transcription is complete"
+        return "Already archived or being archived"
+
+    def _confirm_archive(self, items: list[RecordingItem]) -> bool:
+        """Ask before recordings are archived (tests override this)."""
+        if len(items) == 1:
+            text = f"Do you want to archive this video?\n\n{items[0].paths.final_dir}"
+        else:
+            text = f"Do you want to archive these {len(items)} videos?"
+        answer = QMessageBox.question(
+            self,
+            archive_label(len(items)),
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def archive_recordings(self, items: list[RecordingItem]) -> list[str]:
+        """Queue ``items`` for archiving after a confirmation; returns the queued ids.
+
+        From now on they cannot be edited: a shown one is unloaded (its audio and
+        frames released, so that they can be deleted) and replaced by the notice.
+        """
+        items = self.archivable(items)
+        if not items or not self._confirm_archive(items):
+            return []
+        queued: list[str] = []
+        failures: list[str] = []
+        for item in items:
+            if recording_in_use(item.paths):
+                failures.append(f"{item.title} ({item.session_id}): {IN_USE_REASON}")
+                continue
+            try:
+                request_archive(item.paths, reason="user")
+            except OSError as exc:
+                failures.append(f"{item.title} ({item.session_id}): {exc}")
+                continue
+            queued.append(item.session_id)
+        if self.recording is not None and self.recording.session_id in queued:
+            self._unload_for_archive()
+        for session_id in queued:
+            if self.transcription.running == session_id:
+                self.transcription.shutdown()
+        self.refresh_recordings()
+        for session_id in queued:
+            self.archiver.enqueue(SessionPaths(self.config.recording_folder, session_id))
+        self._show_status_message(f"Archiving {len(queued)} recording(s)")
+        if failures:
+            QMessageBox.warning(self, "Not archived", "\n".join(failures))
+        return queued
+
+    def _unload_for_archive(self) -> None:
+        """Release the shown recording (audio stream, decoded frames) before its files
+        are deleted by the archive worker."""
+        self._load_generation += 1
+        self._set_recording(None)
+        collect_garbage()
+
+    def _start_archive_queue(self) -> None:
+        """Resume unfinished archives, retry leftover deletions once and queue the
+        recordings older than ``archive_after_days``."""
+        folder = self.config.recording_folder
+        try:
+            due = recordings_due_for_archive(folder, self.config.archive_after_days)
+        except OSError as exc:
+            log.warning("cannot look for old recordings: %s", exc)
+            due = []
+        requested = False
+        for paths in due:
+            if paths.session_id == self.recording_session:
+                continue  # an agent waits for Process on it
+            try:
+                request_archive(paths, reason="age")
+            except OSError as exc:
+                log.warning("cannot queue %s for archiving: %s", paths.session_id, exc)
+                continue
+            log.info(
+                "recording %s is older than %d days: archiving it",
+                paths.session_id,
+                self.config.archive_after_days,
+            )
+            requested = True
+        if requested:
+            self.recordings.refresh()
+        for item in self.recordings.items:
+            if item.archiving or item.archive_leftovers:
+                self.archiver.enqueue(item.paths)
+
+    def _archive_notice(self, session_id: str) -> str:
+        phase = self.archiver.phase(session_id)
+        if phase is not None and phase[0] == PHASE_TRANSCRIBING:
+            return f"{ARCHIVING_MESSAGE}\nTranscribing first: {format_percent(phase[1])}"
+        if phase is not None:
+            fraction = phase[1]
+        else:
+            item = self.recordings.item(self.recordings.row_of(session_id))
+            fraction = item.archive_fraction if item is not None else 0.0
+        return f"{ARCHIVING_MESSAGE}\n{format_percent(fraction)}"
+
+    def _show_archive_notice(self, session_id: str) -> None:
+        self.preview.view.set_message(self._archive_notice(session_id), large=True)
+        self.preview.set_subtitle("")
+
+    def _refresh_archive_notice(self, session_id: str) -> None:
+        if self.recording is None and self._current_item_id() == session_id:
+            self._show_archive_notice(session_id)
+
+    def _on_archive_started(self, session_id: str) -> None:
+        self.list_view.set_activity(session_id, "archiving", 0.0)
+        self._refresh_archive_notice(session_id)
+
+    def _on_archive_progress(self, session_id: str, phase: str, fraction: float) -> None:
+        kind = "transcribing" if phase == PHASE_TRANSCRIBING else "archiving"
+        self.list_view.set_activity(session_id, kind, fraction)
+        self._refresh_archive_notice(session_id)
+
+    def _on_archive_finished(self, session_id: str, done: object) -> None:
+        self.list_view.set_activity(session_id, None)
+        leftovers = done.get("leftovers") if isinstance(done, dict) else None
+        if leftovers:
+            self._show_status_message(
+                f"Archived {session_id}; {len(leftovers)} file(s) could not be deleted"
+            )
+        else:
+            self._show_status_message(f"Archived {session_id}")
+        self.refresh_recordings()
+
+    def _on_archive_failed(self, session_id: str, message: str) -> None:
+        self.list_view.set_activity(session_id, None)
+        self._show_status_message(f"Archiving {session_id} stopped: {message}")
+        self.refresh_recordings()
 
     def _confirm_delete(self, items: list[RecordingItem]) -> bool:
         """Ask before recordings are deleted for good (tests override this)."""
@@ -626,7 +823,7 @@ class EditorWindow(QMainWindow):
             )
         answer = QMessageBox.question(
             self,
-            DELETE_ONE_LABEL if len(items) == 1 else DELETE_MANY_LABEL,
+            delete_label(len(items)),
             text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -649,7 +846,18 @@ class EditorWindow(QMainWindow):
             for item in items
             if recording_in_use(item.paths)
         ]
-        items = [item for item in items if not recording_in_use(item.paths)]
+        failures += [
+            f"{item.title} ({item.session_id}): {BEING_ARCHIVED_REASON}"
+            for item in items
+            if self.archiver.running == item.session_id
+        ]
+        items = [
+            item
+            for item in items
+            if not recording_in_use(item.paths) and self.archiver.running != item.session_id
+        ]
+        for item in items:
+            self.archiver.dequeue(item.session_id)
         ids = {item.session_id for item in items}
         if self.recording is not None and self.recording.session_id in ids:
             self._load_generation += 1  # a load in flight is dropped
@@ -671,7 +879,19 @@ class EditorWindow(QMainWindow):
         return deleted
 
     def _load_recording(self, item: RecordingItem) -> None:
-        if self.recording is not None and self.recording.paths == item.paths:
+        if (
+            self.recording is not None
+            and self.recording.paths == item.paths
+            and self.recording.archived == item.archived
+        ):
+            return
+        if item.archiving or self.archiver.is_queued(item.session_id):
+            # Queued for archiving: it cannot be edited any more (module docstring).
+            self.auto_process_checkbox.setChecked(False)
+            self._load_generation += 1
+            self._set_recording(None)
+            self._show_archive_notice(item.session_id)
+            self._update_status()
             return
         # Another recording: Auto process was ticked for the previous one and must
         # never press Process over this one by itself.
@@ -717,7 +937,9 @@ class EditorWindow(QMainWindow):
             self.preview.set_time(0, 0)
         else:
             if not recording.frame_times(self.model.selected_screen):
-                self.preview.view.set_message("No frames")
+                self.preview.view.set_message(
+                    "No still image" if recording.archived else "No frames"
+                )
             self.timeline.setFocus()
         self._sync_playhead()
         self._update_transcription_ui()
@@ -987,6 +1209,9 @@ class EditorWindow(QMainWindow):
         if self.recording is None:
             self._show_status_message("Select a recording first.")
             return None
+        if self.recording.archived:
+            self._show_status_message(ARCHIVED_NOTE + ".")
+            return None
         if not self.actions_allowed:
             self._show_status_message(TRANSCRIBING_NOTE + ".")
             return None
@@ -1235,9 +1460,10 @@ class EditorWindow(QMainWindow):
     @property
     def actions_allowed(self) -> bool:
         """Render and Process need a complete transcript (or one that cannot be made:
-        a failed transcription must not lock the user out)."""
+        a failed transcription must not lock the user out); an archived recording
+        allows neither."""
         recording = self.recording
-        if recording is None:
+        if recording is None or recording.archived:
             return False
         return recording.transcript_complete or recording.session_id in self._transcription_failed
 
@@ -1277,7 +1503,11 @@ class EditorWindow(QMainWindow):
                 "Try again from where it stopped"
             )
         allowed = self.actions_allowed
-        note = "" if allowed or self.recording is None else f"\n{TRANSCRIBING_NOTE}"
+        archived = self.recording is not None and self.recording.archived
+        if allowed or self.recording is None:
+            note = ""
+        else:
+            note = f"\n{ARCHIVED_NOTE if archived else TRANSCRIBING_NOTE}"
         self.render_button.setEnabled(allowed)
         self.render_action.setEnabled(allowed)
         self.render_button.setToolTip(self.render_tooltip + note)
@@ -1285,8 +1515,12 @@ class EditorWindow(QMainWindow):
         if not self._process_feedback_timer.isActive():
             self.process_button.setEnabled(allowed)
             self.process_action.setEnabled(allowed)
-        self.instructions_button.setEnabled(self.recording is not None)
-        self.instructions_action.setEnabled(self.recording is not None)
+        editable = self.recording is not None and not archived
+        self.instructions_button.setEnabled(editable)
+        self.instructions_action.setEnabled(editable)
+        if archived:
+            self.auto_process_checkbox.setChecked(False)
+        self.auto_process_checkbox.setEnabled(self.recording is None or not archived)
 
     def _update_transcription_ui(self) -> None:
         """Start the background transcription of the shown recording when it needs one
@@ -1352,6 +1586,7 @@ class EditorWindow(QMainWindow):
 
     def _on_transcription_progress(self, session_id: str, fraction: float, reached: int) -> None:
         self._transcription_fraction[session_id] = fraction
+        self.list_view.set_activity(session_id, "transcribing", fraction)
         now = time.monotonic()
         eta = self._estimate_eta(session_id, fraction, now)
         if eta is None:
@@ -1379,6 +1614,7 @@ class EditorWindow(QMainWindow):
                     log.debug("progress not written to state.json: %s", exc)
 
     def _on_transcription_finished(self, session_id: str, done: object) -> None:
+        self.list_view.set_activity(session_id, None)
         self._transcription_fraction.pop(session_id, None)
         self._transcription_origin.pop(session_id, None)
         self._transcription_eta.pop(session_id, None)
@@ -1400,6 +1636,7 @@ class EditorWindow(QMainWindow):
         self.transcription_changed.emit(session_id)
 
     def _on_transcription_failed(self, session_id: str, message: str) -> None:
+        self.list_view.set_activity(session_id, None)
         self._transcription_failed[session_id] = message
         self._transcription_fraction.pop(session_id, None)
         self._transcription_origin.pop(session_id, None)
@@ -1708,6 +1945,7 @@ class EditorWindow(QMainWindow):
             app.removeEventFilter(self)
         self.player.stop()
         self.transcription.shutdown()  # the stored partial transcript resumes next time
+        self.archiver.shutdown()  # stops cleanly; the next editor resumes the queue
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
         self.timeline.shutdown()

@@ -1,8 +1,11 @@
-"""Retention of recordings: delete old ones automatically, or all of them on request.
+"""Lifetime of recordings: old ones are archived (never deleted automatically); one or
+all of them are deleted on request.
 
 A recording's age is taken from its session id (``YYYYMMDD-HHMMSS``, local time of the
-recording start), which is deterministic and independent of file timestamps. A session
-whose control window is still running is never deleted.
+recording start), which is deterministic and independent of file timestamps. Recordings
+older than ``archive_after_days`` are archived by the editor when it starts (see
+:func:`recordings_due_for_archive` and :mod:`video_story.export.archive`). A session
+whose control window is still running is never deleted or archived.
 """
 
 from __future__ import annotations
@@ -120,20 +123,26 @@ def delete_recording(paths: SessionPaths) -> str | None:
     return None
 
 
-def purge_old_recordings(
-    recording_folder: Path, retention_days: int, now: datetime | None = None
-) -> list[str]:
-    """Delete recordings older than ``retention_days``; returns the deleted session ids."""
-    cutoff = (now or datetime.now()) - timedelta(days=retention_days)
-    deleted: list[str] = []
+def recordings_due_for_archive(
+    recording_folder: Path, archive_after_days: int, now: datetime | None = None
+) -> list[SessionPaths]:
+    """Saved recordings older than ``archive_after_days`` that were never asked to be
+    archived (nothing is deleted automatically: the editor archives them instead).
+    Sessions whose window still runs are left alone."""
+    from video_story.core.archive_state import archive_state_path
+
+    cutoff = (now or datetime.now()) - timedelta(days=archive_after_days)
+    due: list[SessionPaths] = []
     for paths in list_sessions(recording_folder):
         started = session_started_at(paths.session_id)
-        if started is None or started >= cutoff or _is_active(paths):
+        if started is None or started >= cutoff:
             continue
-        if _delete_session(paths):
-            deleted.append(paths.session_id)
-            log.info("retention: deleted recording %s (started %s)", paths.session_id, started)
-    return deleted
+        if not paths.manifest_path(paths.final_dir).is_file():
+            continue
+        if archive_state_path(paths, paths.final_dir).exists() or _is_active(paths):
+            continue
+        due.append(paths)
+    return due
 
 
 def delete_all_recordings(
@@ -156,8 +165,8 @@ __all__ = [
     "RecordingsSummary",
     "delete_all_recordings",
     "delete_recording",
-    "purge_old_recordings",
     "recording_in_use",
+    "recordings_due_for_archive",
     "session_started_at",
     "summarize_recordings",
 ]

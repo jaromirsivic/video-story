@@ -92,7 +92,9 @@ def _screens_from_frames(index: FrameIndex) -> list[Screen]:
     screens: list[Screen] = []
     left = 0
     for number, screen_id in enumerate(index.screens, start=1):
-        first = index.by_screen[screen_id][0]
+        first = next((n for n in index.by_screen[screen_id] if not n.is_sidecar), None)
+        if first is None:
+            continue
         try:
             with Image.open(index.frames_dir / first.filename) as image:
                 width, height = image.size
@@ -130,7 +132,8 @@ def _finished_at(index: FrameIndex) -> str:
     for screen_id in index.screens:
         last = index.by_screen[screen_id][-1]
         try:
-            newest = max(newest, (index.frames_dir / last.filename).stat().st_mtime)
+            written = index.image_of(last) or index.info_dir / last.filename
+            newest = max(newest, written.stat().st_mtime)
         except OSError:
             continue
     when = datetime.fromtimestamp(newest) if newest else datetime.now()

@@ -299,7 +299,7 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
         raise CliError(exc.code, str(exc)) from exc
     base = paths.current_dir
     if not paths.audio_path(base).exists():
-        raise CliError("NO_AUDIO", f"no audio.wav in {base}")
+        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
 
     def progress(fraction: float, text: str) -> None:
         log.info("%3d%% %s", int(fraction * 100), text)
@@ -339,7 +339,7 @@ def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
         raise CliError(exc.code, str(exc)) from exc
     base = paths.current_dir
     if not paths.audio_path(base).exists():
-        raise CliError("NO_AUDIO", f"no audio.wav in {base}")
+        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
 
     def emit_event(event: dict[str, Any]) -> None:
         sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -348,6 +348,91 @@ def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
     return stream_transcription(
         paths, cfg, base_dir=base, start_ms=max(0, args.from_ms), emit=emit_event
     )
+
+
+def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
+    """Archive a saved recording, one JSON event per line (the editor's archive worker).
+
+    A recording whose transcript is not complete is transcribed first (the segments
+    are stored as they come, so a stopped run resumes where it ended). Events:
+    ``phase`` (``transcribing`` / ``archiving``), ``progress`` (``phase``, ``fraction``
+    0..1 of that phase) and the returned ``done`` (``status``, ``leftovers``). With
+    ``--stop-on-eof`` the run stops cleanly (FFmpeg cancelled, partial files removed)
+    once stdin is closed: the editor closes it when it quits.
+    """
+    import threading
+
+    from video_story.core.transcript import Segment, transcript_status
+    from video_story.editor.recording import LoadedRecording
+    from video_story.export.archive import ArchiveError, archive_recording
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.pipeline import stream_transcription
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    base = paths.final_dir
+    stop = threading.Event()
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    if args.stop_on_eof:
+
+        def watch_stdin() -> None:
+            try:
+                while sys.stdin.read(1):
+                    pass
+            except (OSError, ValueError):
+                pass
+            stop.set()
+
+        threading.Thread(target=watch_stdin, name="stdin-eof", daemon=True).start()
+
+    if not transcript_status(paths.transcript_json_path(base)).complete:
+        if not paths.audio_path(base).exists():
+            raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
+        emit_event({"event": "phase", "phase": "transcribing"})
+        recording = LoadedRecording.load(paths)
+
+        def on_transcription(event: dict[str, Any]) -> None:
+            kind = event.get("event")
+            if kind == "segment":
+                segment = Segment.from_dict(event)
+                recording.add_segments([segment], segment.end_ms)
+            elif kind == "progress":
+                total = max(1, recording.duration_ms)
+                reached = recording.transcribed_ms
+                fraction = max(float(event.get("fraction", 0.0)), reached / total)
+                emit_event(
+                    {"event": "progress", "phase": "transcribing", "fraction": min(1.0, fraction)}
+                )
+
+        done = stream_transcription(
+            paths, cfg, base_dir=base, start_ms=recording.transcribed_ms, emit=on_transcription
+        )
+        recording.finish_transcript(done.get("language"), done.get("model"), done.get("backend"))
+        if stop.is_set():
+            raise CliError("CANCELLED", "archiving was stopped")
+
+    emit_event({"event": "phase", "phase": "archiving"})
+
+    def on_progress(fraction: float, _text: str) -> None:
+        emit_event({"event": "progress", "phase": "archiving", "fraction": round(fraction, 4)})
+
+    try:
+        state = archive_recording(paths, cfg, progress=on_progress, cancel=stop.is_set)
+    except ArchiveError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    return {
+        "event": "done",
+        "recording_dir": str(base),
+        "status": str(state.status),
+        "leftovers": state.leftovers,
+    }
 
 
 def default_export_output(paths: SessionPaths, screen: str) -> Path:
@@ -543,6 +628,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("directory", help="session id or recording directory")
     p.add_argument("--from-ms", type=int, default=0, help="resume at this time")
     p.set_defaults(func=cmd_transcribe_stream)
+
+    p = sub.add_parser("archive-stream", help=argparse.SUPPRESS)  # internal: editor worker
+    p.add_argument("directory", help="session id or recording directory")
+    p.add_argument("--stop-on-eof", action="store_true", help="stop once stdin is closed")
+    p.set_defaults(func=cmd_archive_stream)
 
     p = sub.add_parser("export", help="render a recording to MP4 (+ SRT) with ffmpeg")
     p.add_argument("--session", required=True, help="session id or recording directory")

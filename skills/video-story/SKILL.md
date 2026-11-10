@@ -173,8 +173,14 @@ dialog here", the look of something). Skip the rest.
 - Avoid `--screen all` and `--window` unless one image does not settle it; they list
   many frames.
 
-Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` with a sidecar
-`<same>.json` in `frames_dir`. `describe --session <session_id>` returns the paths, the
+Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` in `frames_dir`; their
+sidecars `<same>.json` lie in `frames_info_dir` (`frames_info/`), the audio in
+`audio/audio.wav`. An archived recording (the editor's **Archive Video**, or any
+recording older than `archive_after_days`) has no frame images and no audio any more:
+`archive/<screenId>.mp4` (with `<screenId>.srt` and a still `<screenId>.jpg`) replace
+them; `timeline` still works (sidecars and transcript stay), `frames` returns
+`image: null`, and `describe`/`timeline`/`frames` carry an `archive` object with the
+paths. `describe --session <session_id>` returns the paths, the
 manifest (screens, capture interval, keypoints), `instructions`, the whole transcript and
 `transcript_in_range`; you rarely need it next to `timeline`.
 
@@ -191,10 +197,11 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
 
 - `config get|set <key> <value>|path` - settings (`recording_folder`,
   `capture_interval_ms` 1-1000, `image_format` png|jpeg, `jpeg_quality` 20-100,
-  `audio_input`, `auto_stop_minutes`, `retention_days`). The user can also use the
-  **Settings** button, which also opens the recording folder and can delete all
-  recordings. Recordings older than `retention_days` (default 30) are deleted when the
-  window starts.
+  `audio_input`, `auto_stop_minutes`, `archive_after_days`). The user can also use
+  the **Settings** button, which also opens the recording folder and can delete all
+  recordings. Recordings older than `archive_after_days` (default 30) are archived when
+  the editor starts (one MP4 per screen; frames and audio are deleted); nothing is
+  deleted automatically.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
 - `transcribe <recording_dir>` - redo (or complete) the transcription of an existing

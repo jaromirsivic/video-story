@@ -1,5 +1,5 @@
 """Settings dialog: items in the order required by the specification, followed by the
-retention setting and the recording folder actions (Open Folder, Delete All)."""
+archiving setting and the recording folder actions (Open Folder, Delete All)."""
 
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ from PySide6.QtWidgets import (
 )
 
 from video_story.core.config import (
+    ARCHIVE_AFTER_MAX_DAYS,
+    ARCHIVE_AFTER_MIN_DAYS,
     AUTO_STOP_MAX_MINUTES,
     AUTO_STOP_MIN_MINUTES,
     CAPTURE_INTERVAL_MAX_MS,
     CAPTURE_INTERVAL_MIN_MS,
     JPEG_QUALITY_MAX,
     JPEG_QUALITY_MIN,
-    RETENTION_MAX_DAYS,
-    RETENTION_MIN_DAYS,
     Config,
     ConfigError,
     config_from_dict,
@@ -125,15 +125,17 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Auto Stop Recording", self.auto_stop_spin)
 
-        # 6. Keep Recordings (retention)
-        self.retention_spin = QSpinBox()
-        self.retention_spin.setRange(RETENTION_MIN_DAYS, RETENTION_MAX_DAYS)
-        self.retention_spin.setSuffix(" days")
-        self.retention_spin.setValue(config.retention_days)
-        self.retention_spin.setToolTip(
-            "Recordings older than this are deleted automatically when Video Story starts"
+        # 6. Archive After: older recordings become one MP4 per screen
+        self.archive_after_spin = QSpinBox()
+        self.archive_after_spin.setRange(ARCHIVE_AFTER_MIN_DAYS, ARCHIVE_AFTER_MAX_DAYS)
+        self.archive_after_spin.setSuffix(" days")
+        self.archive_after_spin.setValue(config.archive_after_days)
+        self.archive_after_spin.setToolTip(
+            "Recordings older than this are archived (one MP4 video per screen; the frames "
+            "and the audio are deleted) when the Video Story Editor starts. Nothing is "
+            "deleted automatically."
         )
-        form.addRow("Keep Recordings", self.retention_spin)
+        form.addRow("Archive After", self.archive_after_spin)
 
         # 7. Recordings: open the folder, delete everything
         self.open_folder_button = QPushButton("Open Folder")
@@ -244,7 +246,7 @@ class SettingsDialog(QDialog):
                 "jpeg_quality": self.quality_spin.value(),
                 "audio_input": self.audio_combo.currentData(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
-                "retention_days": self.retention_spin.value(),
+                "archive_after_days": self.archive_after_spin.value(),
             }
         )
         return data

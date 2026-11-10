@@ -498,11 +498,11 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
         "Audio Input",
     ]
     assert form.itemAt(5, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
-    assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Keep Recordings"
+    assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Archive After"
     assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Recordings"
     assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "jpeg"
     assert dialog.quality_spin.value() == 70
-    assert dialog.auto_stop_spin.value() == 120 and dialog.retention_spin.value() == 30
+    assert dialog.auto_stop_spin.value() == 120 and dialog.archive_after_spin.value() == 30
     assert dialog.interval_spin.minimum() == 1 and dialog.interval_spin.maximum() == 1000
     assert form.isRowVisible(3)  # JPEG is the default, so the quality row shows
     dialog.format_combo.setCurrentIndex(0)
@@ -512,13 +512,13 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     dialog.interval_spin.setValue(1000)
     dialog.quality_spin.setValue(20)
     dialog.auto_stop_spin.setValue(45)
-    dialog.retention_spin.setValue(7)
+    dialog.archive_after_spin.setValue(7)
     dialog._save()
     assert dialog.result_config is not None
     assert dialog.result_config.capture_interval_ms == 1000
     assert dialog.result_config.image_format == "jpeg" and dialog.result_config.jpeg_quality == 20
     assert dialog.result_config.auto_stop_minutes == 45
-    assert dialog.result_config.retention_days == 7
+    assert dialog.result_config.archive_after_days == 7
     reloaded = cfg_mod.load_config()
     assert reloaded == dialog.result_config
 

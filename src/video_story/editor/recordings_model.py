@@ -15,6 +15,7 @@ from typing import Any
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, QPersistentModelIndex, Qt
 
+from video_story.core.archive_state import ArchiveStatus, read_archive_state
 from video_story.core.manifest import read_manifest
 from video_story.core.session import SessionPaths, list_sessions
 from video_story.core.transcript import read_transcript, transcript_status
@@ -47,6 +48,19 @@ class RecordingItem:
     screen_ids: tuple[str, ...] = ()  # manifest order, screen1 (the primary) first
     segments: tuple[SegmentText, ...] = ()  # non-empty transcript segments by start
     screen_sizes: tuple[tuple[int, int], ...] = ()  # image size of each screen, as screen_ids
+    # None (not archived), "queued" or "archiving" (in the archive queue), "archived"
+    archive: str | None = None
+    archive_leftovers: bool = False  # archived, but some files could not be deleted
+    archive_fraction: float = 0.0  # share of the screens archived (queued / archiving)
+
+    @property
+    def archived(self) -> bool:
+        return self.archive == ArchiveStatus.ARCHIVED
+
+    @property
+    def archiving(self) -> bool:
+        """Queued for archiving or being archived: it cannot be edited any more."""
+        return self.archive in (ArchiveStatus.QUEUED, ArchiveStatus.ARCHIVING)
 
     @property
     def session_id(self) -> str:
@@ -61,7 +75,7 @@ class RecordingItem:
     @property
     def details(self) -> str:
         """The length without milliseconds; the screens are the dots of the row."""
-        suffix = "" if self.transcript_complete else "  |  transcribing"
+        suffix = "" if self.transcript_complete or self.archiving else "  |  transcribing"
         return f"{format_length(self.duration_ms)}{suffix}"
 
     def screen_label(self, screen_id: str) -> str:
@@ -141,6 +155,7 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
             log.warning("skipping %s: %s", manifest_path, exc)
             continue
         first_line, segments = _transcript_lines(paths, base)
+        archive = read_archive_state(paths, base)
         items.append(
             RecordingItem(
                 paths=paths,
@@ -152,6 +167,9 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
                 screen_ids=tuple(screen.id for screen in manifest.screens),
                 segments=segments,
                 screen_sizes=tuple((s.image_width, s.image_height) for s in manifest.screens),
+                archive=str(archive.status) if archive is not None else None,
+                archive_leftovers=bool(archive and archive.archived and archive.leftovers),
+                archive_fraction=archive.fraction if archive is not None else 0.0,
             )
         )
     return items

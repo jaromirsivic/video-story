@@ -181,6 +181,7 @@ class SessionController:
             transcript_txt=str(self.paths.transcript_txt_path(final_dir)),
             transcript_json=str(self.paths.transcript_json_path(final_dir)),
             frames_dir=str(self.paths.frames_dir(final_dir)),
+            frames_info_dir=str(self.paths.frames_info_dir(final_dir)),
             recorded_duration_ms=summary.recorded_duration_ms,
         )
         self.recorder = None

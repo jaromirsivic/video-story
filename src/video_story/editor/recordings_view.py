@@ -11,6 +11,11 @@ hover scrub of DaVinci Resolve's media pool: the horizontal position maps to a m
 the recording (left edge = start, right edge = end), a thin red line marks it, the
 thumbnail shows the selected screen at that moment and the text shows what was being
 said. Leaving the row returns it to the start.
+
+A label in the middle of the thumbnail (black capitals on white) tells what happens to
+a recording: ``TRANSCRIBING...`` and ``ARCHIVING...`` with the percentage under it
+(one decimal; archiving counts all screens together, so one of two screens done is
+50 %), ``ARCHIVED`` once it was archived. A recording without a label is not archived.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ from PySide6.QtWidgets import (
 
 from video_story.host.runner import FrameIndex
 
+from .recording import StillFrames
 from .recordings_model import ItemRole, RecordingItem
 from .timeline.thumbnails import ThumbnailCache
 
@@ -69,6 +75,19 @@ SCRUB_COLOR = QColor("#ff4a4a")  # the red of the timeline's playhead
 SEPARATOR_DARK = QColor("#505050")
 SEPARATOR_LIGHT = QColor("#cfcfcf")
 THUMB_BG = QColor("#101010")
+BADGE_BG = QColor("#ffffff")
+BADGE_FG = QColor("#000000")
+BADGE_PAD = 4
+BADGE_TRANSCRIBING = "TRANSCRIBING..."
+BADGE_ARCHIVING = "ARCHIVING..."
+BADGE_ARCHIVED = "ARCHIVED"
+
+
+def format_percent(fraction: float) -> str:
+    """``37.5 %`` - one decimal place."""
+    return f"{max(0.0, min(1.0, fraction)) * 100:.1f} %"
+
+
 MIN_LIST_WIDTH = 300  # narrower than this and the splitter hides the list completely
 
 
@@ -82,9 +101,14 @@ class _Frames:
     """Frame names of one recording, per screen, with their times for bisecting."""
 
     def __init__(self, item: RecordingItem) -> None:
-        frames_dir = item.paths.frames_dir(item.paths.final_dir)
+        paths, base = item.paths, item.paths.final_dir
         try:
-            self.index: FrameIndex | None = FrameIndex(frames_dir) if frames_dir.is_dir() else None
+            if item.archived:
+                self.index: FrameIndex | None = StillFrames(
+                    paths.archive_dir(base), paths.frames_info_dir(base), list(item.screen_ids)
+                )
+            else:
+                self.index = FrameIndex.of(paths, base)
         except OSError:
             self.index = None
         by_screen = self.index.by_screen if self.index is not None else {}
@@ -195,6 +219,7 @@ class RecordingDelegate(QStyledItemDelegate):
         time_ms = self.view.hover_time(index.row(), item)
         screen_id = self.view.screen_of(item)
         self._paint_thumbnail(painter, rect, item, screen_id, time_ms)
+        self._paint_badge(painter, self.thumb_rect(rect), self.view.badge_of(item), option.font)
 
         font = QFont(option.font)
         metrics = QFontMetrics(font)
@@ -250,6 +275,40 @@ class RecordingDelegate(QStyledItemDelegate):
         painter.drawImage(target, image)
 
     @staticmethod
+    def _paint_badge(
+        painter: QPainter, box: QRect, badge: tuple[str, str | None] | None, base: QFont
+    ) -> None:
+        if badge is None:
+            return
+        label, percent = badge
+        font = QFont(base)
+        font.setBold(True)
+        size = font.pointSizeF()
+        if size > 0:
+            font.setPointSizeF(max(6.0, size * 0.85))
+        metrics = QFontMetrics(font)
+        lines = [label] if percent is None else [label, percent]
+        width = max(metrics.horizontalAdvance(text) for text in lines) + 2 * BADGE_PAD
+        width = min(width, box.width() - 2)
+        height = metrics.height() * len(lines) + 2 * BADGE_PAD
+        area = QRect(
+            box.left() + (box.width() - width) // 2,
+            box.top() + (box.height() - height) // 2,
+            width,
+            height,
+        )
+        painter.save()
+        painter.fillRect(area, BADGE_BG)
+        painter.setFont(font)
+        painter.setPen(QPen(BADGE_FG))
+        for k, text in enumerate(lines):
+            line_rect = QRect(
+                area.left(), area.top() + BADGE_PAD + k * metrics.height(), width, metrics.height()
+            )
+            painter.drawText(line_rect, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.restore()
+
+    @staticmethod
     def _paint_dots(
         painter: QPainter,
         dots: list[QRect],
@@ -295,6 +354,8 @@ class RecordingsListView(QListView):
         self._screen: dict[str, str] = {}  # session id -> screen shown in the thumbnail
         self._frames: dict[str, _Frames] = {}  # session id -> frame index (lazy)
         self._last_image: dict[str, QImage] = {}  # session id -> thumbnail drawn last
+        # session id -> ("transcribing" | "archiving", fraction): work running right now
+        self._activity: dict[str, tuple[str, float]] = {}
 
     # Model --------------------------------------------------------------------
 
@@ -311,6 +372,36 @@ class RecordingsListView(QListView):
         self._frames.clear()
         self._last_image.clear()
         self._hover = None
+
+    # Labels ---------------------------------------------------------------------
+
+    def set_activity(self, session_id: str, kind: str | None, fraction: float = 0.0) -> None:
+        """What runs for a recording now (``"transcribing"``, ``"archiving"``) and how
+        far it got; ``None`` clears it."""
+        if kind is None:
+            changed = self._activity.pop(session_id, None) is not None
+        else:
+            value = (kind, max(0.0, min(1.0, fraction)))
+            changed = self._activity.get(session_id) != value
+            self._activity[session_id] = value
+        if changed:
+            self.viewport().update()
+
+    def activity(self, session_id: str) -> tuple[str, float] | None:
+        return self._activity.get(session_id)
+
+    def badge_of(self, item: RecordingItem) -> tuple[str, str | None] | None:
+        """The label of the thumbnail: ``(text, percent or None)``, ``None`` for none."""
+        active = self._activity.get(item.session_id)
+        if active is not None:
+            kind, fraction = active
+            label = BADGE_TRANSCRIBING if kind == "transcribing" else BADGE_ARCHIVING
+            return label, format_percent(fraction)
+        if item.archived:
+            return BADGE_ARCHIVED, None
+        if item.archiving:
+            return BADGE_ARCHIVING, format_percent(item.archive_fraction)
+        return None
 
     # State used by the delegate -------------------------------------------------
 
@@ -464,11 +555,15 @@ class RecordingsListView(QListView):
 
 
 __all__ = [
+    "BADGE_ARCHIVED",
+    "BADGE_ARCHIVING",
+    "BADGE_TRANSCRIBING",
     "MIN_LIST_WIDTH",
     "RecordingDelegate",
     "RecordingsListView",
     "THUMB_H",
     "THUMB_W",
     "elided_lines",
+    "format_percent",
     "separator_color",
 ]

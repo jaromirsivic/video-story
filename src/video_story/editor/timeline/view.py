@@ -617,7 +617,7 @@ class TimelineView(QWidget):
             if t > self.model.duration_ms:
                 break
             ref = self.recording.frame_at(screen_id, t)
-            if ref is None:
+            if ref is None or ref.image is None:
                 continue
             x = int(self._x(t))
             image = self.thumbnails.get(ref.image, height)
@@ -634,6 +634,11 @@ class TimelineView(QWidget):
         subtitle = "" if peaks is not None else ("loading" if self.waveform.busy else "")
         self._paint_header(painter, rect, "audio", subtitle)
         if peaks is None or len(peaks) == 0:
+            if self.recording is not None and self.recording.archived:
+                # Archived: the audio is gone; a plain line where the waveform was.
+                mid = int(body.y() + body.height() / 2.0)
+                painter.setPen(QPen(self.colors["tick"]))
+                painter.drawLine(body.x(), mid, body.right(), mid)
             return
         columns = body.width()
         ms_per_px = 1000.0 / self.model.zoom

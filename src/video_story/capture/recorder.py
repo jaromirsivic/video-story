@@ -536,6 +536,7 @@ class Recorder:
 
     def _write_tick(self, tick: _Tick) -> int:
         frames_dir = self.paths.frames_dir(self.paths.work_dir)
+        info_dir = self.paths.frames_info_dir(self.paths.work_dir)
         written = 0
         for frame in tick.frames:
             data = encode_frame(frame, self.config.image_format, self.config.jpeg_quality)
@@ -553,7 +554,7 @@ class Recorder:
                 "clipboard": tick.clipboard,
                 "captured_at": now_iso(),
             }
-            (frames_dir / sidecar_filename(tick.time_ms, frame.screen_id)).write_text(
+            (info_dir / sidecar_filename(tick.time_ms, frame.screen_id)).write_text(
                 json.dumps(sidecar), encoding="utf-8"
             )
             written += 1

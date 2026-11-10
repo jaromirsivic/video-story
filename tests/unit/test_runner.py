@@ -19,6 +19,7 @@ def make_recording(root: Path, session_id: str = "20260101-120000") -> SessionPa
     paths = SessionPaths(root, session_id)
     paths.create_work_dirs()
     frames = paths.frames_dir(paths.work_dir)
+    info = paths.frames_info_dir(paths.work_dir)
     screens = assign_screen_ids(
         [
             RawScreen(0, 0, 100, 100, primary=True),
@@ -29,7 +30,7 @@ def make_recording(root: Path, session_id: str = "20260101-120000") -> SessionPa
         cursor = {"screen": "screen2" if t >= 500 else "screen1", "x": t % 50, "y": 1}
         for sid in ("screen1", "screen2"):
             (frames / frame_filename(t, sid, "png")).write_bytes(b"\x89PNG")
-            (frames / sidecar_filename(t, sid)).write_text(
+            (info / sidecar_filename(t, sid)).write_text(
                 json.dumps({"time_ms": t, "screen": sid, "cursor": cursor}), encoding="utf-8"
             )
     write_manifest(

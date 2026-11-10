@@ -29,13 +29,14 @@ def make_recording(
     paths = SessionPaths(root, session_id)
     paths.create_work_dirs()
     frames = paths.frames_dir(paths.work_dir)
+    info = paths.frames_info_dir(paths.work_dir)
     screens = assign_screen_ids([RawScreen(0, 0, 64, 32, primary=True), RawScreen(64, 0, 64, 32)])
     for t in (0, 250, 500, 750):
         cursor = {"screen": "screen2" if t >= 500 else "screen1", "x": 40, "y": 10}
         for sid, colour in (("screen1", "red"), ("screen2", "blue")):
             image = PilImage.new("RGB", (64, 32), colour)
             image.save(frames / frame_filename(t, sid, image_format))
-            (frames / sidecar_filename(t, sid)).write_text(
+            (info / sidecar_filename(t, sid)).write_text(
                 json.dumps({"time_ms": t, "screen": sid, "cursor": cursor}), encoding="utf-8"
             )
     write_manifest(

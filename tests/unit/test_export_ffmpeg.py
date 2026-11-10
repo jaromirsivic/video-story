@@ -69,6 +69,7 @@ def make_recording(
     paths = SessionPaths(root, session_id)
     paths.create_work_dirs()
     frames = paths.frames_dir(paths.work_dir)
+    info = paths.frames_info_dir(paths.work_dir)
     screens = assign_screen_ids(
         [RawScreen(0, 0, *SCREEN1, primary=True), RawScreen(SCREEN1[0], 0, *SCREEN2)]
     )
@@ -81,7 +82,7 @@ def make_recording(
             PilImage.new("RGB", size, COLOURS[sid][index]).save(
                 frames / frame_filename(t, sid, "png")
             )
-            (frames / sidecar_filename(t, sid)).write_text(
+            (info / sidecar_filename(t, sid)).write_text(
                 json.dumps({"time_ms": t, "screen": sid, "cursor": cursor}), encoding="utf-8"
             )
     write_manifest(
@@ -218,10 +219,11 @@ def make_offset_recording(root: Path) -> SessionPaths:
     paths = SessionPaths(root, SESSION_ID)
     paths.create_work_dirs()
     frames = paths.frames_dir(paths.work_dir)
+    info = paths.frames_info_dir(paths.work_dir)
     screens = assign_screen_ids([RawScreen(0, 0, *SCREEN1, primary=True)])
     for t, colour, (cx, cy) in zip(OFFSET_TIMES, OFFSET_COLOURS, OFFSET_CURSORS, strict=True):
         PilImage.new("RGB", SCREEN1, colour).save(frames / frame_filename(t, "screen1", "png"))
-        (frames / sidecar_filename(t, "screen1")).write_text(
+        (info / sidecar_filename(t, "screen1")).write_text(
             json.dumps(
                 {
                     "time_ms": t,

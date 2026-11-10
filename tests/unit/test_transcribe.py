@@ -615,7 +615,7 @@ def test_transcribe_recording_writes_files_and_progress(session):
 def test_transcribe_recording_uses_base_dir(session, tmp_path: Path):
     paths, cfg = session
     final = tmp_path / "final"
-    final.mkdir()
+    paths.audio_dir(final).mkdir(parents=True)
     shutil.copy(paths.audio_path(paths.work_dir), paths.audio_path(final))
     result = pipeline.transcribe_recording(paths, cfg, base_dir=final, backend=FakeBackend())
     assert paths.transcript_json_path(final).exists()

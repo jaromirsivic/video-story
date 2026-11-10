@@ -70,7 +70,9 @@ def make_recording(
     paths = SessionPaths(root, session_id)
     final = paths.final_dir
     frames = paths.frames_dir(final)
+    info = paths.frames_info_dir(final)
     frames.mkdir(parents=True)
+    info.mkdir(parents=True)
     screens = assign_screen_ids(
         [RawScreen(0, 0, 320, 200, primary=True), RawScreen(320, 0, 160, 100)]
     )
@@ -81,13 +83,14 @@ def make_recording(
             ("screen2", (160, 100), (40, 80, t // 10 % 255)),
         ):
             Image.new("RGB", size, colour).save(frames / frame_filename(t, sid, "png"))
-            (frames / sidecar_filename(t, sid)).write_text(
+            (info / sidecar_filename(t, sid)).write_text(
                 json.dumps({"time_ms": t, "screen": sid, "cursor": cursor}), encoding="utf-8"
             )
     n = SAMPLE_RATE * (DURATION_MS if audio_ms is None else audio_ms) // 1000
     tt = np.arange(n) / SAMPLE_RATE
     samples = (np.sin(2 * np.pi * 440 * tt) * 12000).astype("<i2")
-    with wave.open(str(final / "audio.wav"), "wb") as wf:
+    paths.audio_dir(final).mkdir(parents=True, exist_ok=True)
+    with wave.open(str(paths.audio_path(final)), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
@@ -252,7 +255,7 @@ def test_subtitle_single_segment_at_touching_boundary(tmp_path: Path):
 
 def test_waveform_peaks(tmp_path: Path):
     paths = make_recording(tmp_path)
-    peaks = compute_peaks(paths.final_dir / "audio.wav")
+    peaks = compute_peaks(paths.audio_path(paths.final_dir))
     assert peaks.shape == (DURATION_MS // 20, 2)
     assert float(peaks[:, 1].max()) == pytest.approx(12000 / 32768, abs=0.01)
     assert float(peaks[:, 0].min()) == pytest.approx(-12000 / 32768, abs=0.01)

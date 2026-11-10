@@ -16,7 +16,6 @@ from __future__ import annotations
 import bisect
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from video_story.core.crop import Crop, read_crop
@@ -24,7 +23,7 @@ from video_story.core.instructions import read_instructions
 from video_story.core.naming import frame_base
 from video_story.core.session import SessionPaths
 from video_story.core.transcript import Segment, read_transcript, transcript_status
-from video_story.host.runner import FrameIndex, SessionError
+from video_story.host.runner import FrameIndex, SessionError, archive_info
 
 CLIPBOARD_EXCERPT_CHARS = 200
 
@@ -79,10 +78,9 @@ class _Ticks:
         return self.all_times[pos] if pos >= 0 else None
 
 
-def _load_ticks(frames_dir: Path, start_ms: int, end_ms: int) -> _Ticks:
-    index = FrameIndex(frames_dir)
+def _load_ticks(index: FrameIndex, start_ms: int, end_ms: int) -> _Ticks:
     if not index.screens:
-        raise SessionError("NO_FRAMES", f"no frames in {frames_dir}")
+        raise SessionError("NO_FRAMES", f"no frames in {index.info_dir}")
     owner: dict[int, str] = {}
     for screen_id in reversed(index.screens):  # the first screen wins
         for name in index.by_screen[screen_id]:
@@ -94,7 +92,7 @@ def _load_ticks(frames_dir: Path, start_ms: int, end_ms: int) -> _Ticks:
     first = max(bisect.bisect_right(all_times, start_ms) - 1, 0)
     last = min(bisect.bisect_right(all_times, end_ms), len(all_times) - 1)
     for time_ms in all_times[first : last + 1]:
-        sidecar = frames_dir / f"{frame_base(time_ms, owner[time_ms])}.json"
+        sidecar = index.info_dir / f"{frame_base(time_ms, owner[time_ms])}.json"
         try:
             data = json.loads(sidecar.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -354,9 +352,9 @@ def build_timeline(
     ``start_ms`` / ``end_ms`` override either end.
     """
     base = paths.current_dir
-    frames_dir = paths.frames_dir(base)
-    if not frames_dir.is_dir():
-        raise SessionError("NO_FRAMES", f"no frames directory in {base}")
+    index = FrameIndex.of(paths, base)
+    if not index.screens:
+        raise SessionError("NO_FRAMES", f"no frames in {base}")
     manifest: dict[str, Any] = {}
     manifest_path = paths.manifest_path(base)
     if manifest_path.exists():
@@ -373,7 +371,7 @@ def build_timeline(
     if window.end_ms < window.start_ms:
         raise SessionError("USAGE", f"end_ms {window.end_ms} is before start_ms {window.start_ms}")
 
-    ticks = _load_ticks(frames_dir, window.start_ms, window.end_ms)
+    ticks = _load_ticks(index, window.start_ms, window.end_ms)
     events, counts = _screen_events(ticks, window)
 
     status = transcript_status(paths.transcript_json_path(base))
@@ -427,6 +425,9 @@ def build_timeline(
             f"The transcript is incomplete (segments reach {status.transcribed_ms} ms); "
             "run `video-story transcribe` first."
         )
+    archive = archive_info(paths, base)
+    if archive is not None:
+        result["archive"] = archive
     return result
 
 

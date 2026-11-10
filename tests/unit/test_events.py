@@ -46,6 +46,7 @@ def make_recording(
     paths = SessionPaths(root, "20260101-120000")
     paths.create_work_dirs()
     frames = paths.frames_dir(paths.work_dir)
+    info = paths.frames_info_dir(paths.work_dir)
     cursor = {"screen": "screen1", "x": 1, "y": 2}
     for t in range(0, duration_ms + 1, INTERVAL):
         extra = ticks.get(t, {})
@@ -61,7 +62,7 @@ def make_recording(
                 "clipboard": extra.get("clipboard"),
             }
             (frames / frame_filename(t, sid, "png")).write_bytes(b"\x89PNG")
-            (frames / sidecar_filename(t, sid)).write_text(json.dumps(sidecar), encoding="utf-8")
+            (info / sidecar_filename(t, sid)).write_text(json.dumps(sidecar), encoding="utf-8")
     write_manifest(
         paths.manifest_path(paths.work_dir),
         Manifest(

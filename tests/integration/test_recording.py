@@ -42,7 +42,9 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
     assert screens, "at least one screen"
 
     frames = sorted(p for p in paths.frames_dir(final).iterdir() if p.suffix == ".png")
-    sidecars = {p.stem for p in paths.frames_dir(final).iterdir() if p.suffix == ".json"}
+    sidecars = {p.stem for p in paths.frames_info_dir(final).iterdir() if p.suffix == ".json"}
+    assert not any(p.suffix == ".json" for p in paths.frames_dir(final).iterdir())
+    assert paths.audio_path(final).is_file()
     assert len(frames) >= 5 * len(screens), f"expected >= 5 frames per screen, got {len(frames)}"
     assert {p.stem for p in frames} == sidecars, "every frame has a sidecar"
 
@@ -51,7 +53,8 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         parsed = parse_frame_filename(frame.name)
         assert parsed is not None and parsed.screen_id in screens
         per_screen.setdefault(parsed.screen_id, []).append(parsed.time_ms)
-        sidecar = json.loads(frame.with_suffix(".json").read_text(encoding="utf-8"))
+        sidecar_path = paths.frames_info_dir(final) / f"{frame.stem}.json"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["screen"] == parsed.screen_id and sidecar["time_ms"] == parsed.time_ms
         assert sidecar["drawings"] == []  # no overlay in a headless recording
         assert sidecar["zoom"] == []

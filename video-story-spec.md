@@ -53,7 +53,7 @@ Dialog **Settings** nabízí položky v tomto pořadí; ostatní klíče `config
 | JPEG Quality | `jpeg_quality` | 70 % | 20–100, jen pro JPEG |
 | Audio Input | `audio_input` | systémový výchozí vstup | – |
 | Auto Stop Recording | `auto_stop_minutes` | 120 min | 1–1440 |
-| Keep Recordings | `retention_days` | 30 dní | 1–3650 |
+| Archive After | `archive_after_days` | 30 dní | 1–3650 |
 | Recordings | – | **Open Folder**, **Delete All Recordings** (s potvrzením; relace otevřeného okna se nemaže) | – |
 
 Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho relace se přesune do nové složky, takže nahrávka, editor i čekající agent pracují s novou složkou. Během nahrávání nastavení otevřít nelze.
@@ -62,9 +62,9 @@ Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho re
 
 ## 6. Co se zaznamenává
 
-- **Zvuk:** `audio.wav`, 16bit PCM, mono, vzorkovací frekvence zařízení.
+- **Zvuk:** `audio/audio.wav`, 16bit PCM, mono, vzorkovací frekvence zařízení.
 - **Obrazovky:** v každém intervalu snímek každé obrazovky, i nezměněný. Název `<sekundy>_<ms>_screenN.<jpg|png>`, čas od začátku nahrávky. `screen1` je primární obrazovka, další jsou řazené podle polohy.
-- **Doprovodný JSON** ke každému snímku: obrazovka a poloha kurzoru v pixelech jejího snímku (počátek vlevo nahoře), dokončené kresby, právě kreslený tvar, zoom, zkopírovaný text.
+- **Doprovodný JSON** ke každému snímku (stejný název s příponou `.json`, ve složce `frames_info/`; ve `frames/` jsou jen obrázky): obrazovka a poloha kurzoru v pixelech jejího snímku (počátek vlevo nahoře), dokončené kresby, právě kreslený tvar, zoom, zkopírovaný text.
 - **Kresby:** obdélník (výchozí nástroj), štětec, šipka; pravé tlačítko myši kreslí vždy šipku; 8 barev, výchozí červená. `Esc` kreslení opustí, `Ctrl+Z` vrátí, `Ctrl+Alt+C` smaže vše. Kolečko myši při kreslení přiblíží obrazovku až na 800 %. Kresba je vidět ve snímcích; do JSONu se tvar dostane až po puštění tlačítka myši, s identifikátorem a časy stisku a puštění. Nahrávací okno zůstává nad kreslicí vrstvou.
 - **Zkopírovaný text:** každý nový text zkopírovaný během nahrávání (nejvýš 65 535 znaků) se zapíše jednou, do JSONů nejbližšího snímku. Co bylo ve schránce před nahráváním, se neukládá.
 - **Keypointy:** okamžiky označené tlačítkem Keypoint (`Ctrl+Alt+K`); ukládají se do `manifest.json` hned při vložení.
@@ -94,7 +94,7 @@ V nahrávacím okně se nic nepřepisuje. Pokud se editor nepodaří otevřít, 
 
 Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story“ (`edit --detach`). Běží nejvýš jeden; další žádost ho jen zvedne a načte do něj požadovanou nahrávku. Při startu editor dokončí nahrávky, jejichž okno spadlo (kap. 10).
 
-- **Seznam nahrávek** vlevo, nejnovější nahoře a vybraná. Řádek ukazuje náhled, datum, délku a začátek řeči; pohyb myší po řádku nahrávkou projíždí. Nahrávky lze po potvrzení smazat (kontextová nabídka, i více najednou).
+- **Seznam nahrávek** vlevo, nejnovější nahoře a vybraná. Řádek ukazuje náhled, datum, délku a začátek řeči; pohyb myší po řádku nahrávkou projíždí. Kontextová nabídka: **Open Folder Location**, **Archive Video** / **Archive Videos (N)**, **Delete Video** / **Delete Videos (N)** (N = počet vybraných nahrávek; u archivace jen těch, které ještě archivovat jdou). Na náhledu řádku je štítek (černý text na bílém): `TRANSCRIBING...` a `ARCHIVING...` s procenty na jedno desetinné místo, `ARCHIVED` u archivované nahrávky.
 - **Náhled** s transportem (na In, krok zpět, přehrát, stop, krok vpřed, na Out; Stop se vrací tam, kde bylo naposledy stisknuto Play), titulky pod náhledem, kolečko myši přibližuje až na 800 %, přepínač světlého a tmavého vzhledu.
 - **Časová osa:** jedna stopa na obrazovku s miniaturami, jedna zvuková stopa, zoom `-`/`+`. Úchyty **In/Out** (nebo klávesy `I`/`O`) nastavují crop společný pro všechny obrazovky; ukládá se do `crop.json` při každé změně a přichytává se ke keypointům. Kliknutí na stopu vybírá obrazovku pro náhled a export.
 - **Přepis** běží na pozadí editoru (Whisper large-v3-turbo přes whisper.cpp, CPU, automatický jazyk). Zelená šipka pod zvukovou stopou ukazuje postup a odhad zbývajícího času, titulky přibývají průběžně. Zavření editoru přepis přeruší, příští výběr nahrávky naváže. Když přepis selže, tlačítko **Retry transcription** ho spustí znovu od místa, kde skončil. Halucinované titulkové kredity se zahazují.
@@ -104,6 +104,15 @@ Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story�
 - **Process:** předá agentovi crop a pokyny a editor zavře (kap. 9).
 
 Render a Process jsou dostupné, až když je přepis zobrazené nahrávky úplný (nebo definitivně selhal).
+
+### Archivace
+
+- **Archive Video(s)** se po potvrzení („Do you want to archive this video?“ s cestou, u více nahrávek jen počet) zařadí do fronty; archivovat jde jen nahrávku s úplným přepisem. Od té chvíle nahrávku nejde upravovat: vpravo je jen velký text „This video is being archived.“ s procenty.
+- Fronta běží v editoru na pozadí, jedna nahrávka po druhé (`archive-stream`). Každá obrazovka se převede na `archive/screenN.mp4` (celá nahrávka, plné audio, stejně jako Render) se `screenN.srt` a `screenN.jpg` (snímek z prostředku nahrávky); hotová obrazovka se zapíše do `archive/archive.json` a hned se smažou její snímky. Po poslední obrazovce se smaže `audio/` a zbytek `frames/`; `frames_info/`, přepis, manifest, crop a pokyny zůstávají.
+- Zavřený editor archivaci přeruší čistě (FFmpeg se zastaví, rozdělané soubory se smažou); další start editoru naváže: hotové obrazovky přeskočí, rozdělanou udělá znovu.
+- Soubory, které nejde smazat (drží je jiný program), zůstanou; archivace přesto skončí jako hotová a příští start editoru zkusí smazat zbytek ještě jednou.
+- Při startu editoru se do fronty zařadí i nahrávky starší než **Archive After**; pokud nemají úplný přepis, nejdřív se přepíšou.
+- **Archivovaná nahrávka** ukazuje v náhledu i na časové ose `screenN.jpg`, zvuková stopa je jen čára (bez přepínače roztažení), Play nehraje zvuk a mění se jen titulky. Edit titulků funguje, crop také; Auto process, Process, Instructions a Render jsou zakázané.
 
 ### Auto process
 
@@ -145,19 +154,22 @@ Další příkazy: `describe`, `status`, `sessions`, `transcribe`, `export`, `co
 | Editor spadne | Relace skončí stavem `cancelled`; nahrávka i částečný přepis zůstávají. |
 | Chybí model nebo FFmpeg | Oznámí se při stisku Record; `video-story setup` je stáhne. |
 
-## 11. Uložení a retence
+## 11. Uložení a archivace
 
 ```
 <Recording Folder>/
   .work/<id>/                 rozpracovaná nahrávka; trvale tu zůstává state.json, lock, ui.log
   <id>/                       uložená nahrávka (id = RRRRMMDD-HHMMSS)
-    manifest.json, audio.wav, recording.log
+    manifest.json, recording.log
     transcript.txt, transcript.json     (complete false, dokud editor přepisuje)
     crop.json, instructions.txt         (jen pokud je uživatel nastavil)
-    frames/<s>_<ms>_screenN.jpg + .json
+    audio/audio.wav
+    frames/<s>_<ms>_screenN.jpg         jen obrázky
+    frames_info/<s>_<ms>_screenN.json   doprovodné JSONy
+    archive/                            po archivaci: screenN.mp4, .srt, .jpg, archive.json
 ```
 
-Nahrávky starší než **Keep Recordings** se mažou při startu nahrávacího okna; relace s běžícím oknem se nemaže. Při výchozím nastavení a dvou obrazovkách zabere nahrávka zhruba 3 GB a 29 000 souborů za hodinu.
+Nic se nemaže automaticky. Nahrávky starší než **Archive After** se při startu editoru archivují (kap. 8); relace s běžícím oknem se nearchivuje. Při výchozím nastavení a dvou obrazovkách zabere nahrávka zhruba 3 GB a 29 000 souborů za hodinu.
 
 ## 12. Známá omezení
 

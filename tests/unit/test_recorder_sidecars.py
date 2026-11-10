@@ -79,7 +79,10 @@ def test_sidecars_store_the_clipboard_once_and_the_manifest_the_keypoints(tmp_pa
     paths, keypoints = _record(tmp_path, monkeypatch, ["copied text"])
     final = paths.final_dir
     sidecars = sorted(
-        (json.loads(p.read_text(encoding="utf-8")) for p in paths.frames_dir(final).glob("*.json")),
+        (
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in paths.frames_info_dir(final).glob("*.json")
+        ),
         key=lambda d: d["time_ms"],
     )
     assert len(sidecars) >= 6

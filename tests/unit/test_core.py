@@ -39,7 +39,7 @@ def test_config_defaults():
     assert c.image_format == "jpeg"
     assert c.jpeg_quality == 70
     assert c.auto_stop_minutes == 120
-    assert c.retention_days == 30
+    assert c.archive_after_days == 30
     assert c.audio_input is None
     assert c.recording_folder.name == "VideoStory"
 
@@ -229,9 +229,10 @@ def test_finalize_with_open_ui_log(tmp_path: Path):
     and leave ``ui.log`` (and ``state.json``) behind."""
     paths = SessionPaths(tmp_path, "20260101-000000")
     paths.create_work_dirs()
-    (paths.work_dir / "audio.wav").write_bytes(b"x")
+    paths.audio_path(paths.work_dir).write_bytes(b"x")
     (paths.work_dir / "manifest.json").write_text("{}", encoding="utf-8")
     paths.frames_dir(paths.work_dir).joinpath("0_000_screen1.png").write_bytes(b"y")
+    paths.frames_info_dir(paths.work_dir).joinpath("0_000_screen1.json").write_bytes(b"{}")
     paths.lock_path.write_text("1", encoding="utf-8")
     write_state(
         paths.state_path,
@@ -242,8 +243,16 @@ def test_finalize_with_open_ui_log(tmp_path: Path):
         ui_log.flush()
         final = paths.finalize()
     assert final == tmp_path / paths.session_id
-    assert sorted(p.name for p in final.iterdir()) == ["audio.wav", "frames", "manifest.json"]
+    assert sorted(p.name for p in final.iterdir()) == [
+        "audio",
+        "frames",
+        "frames_info",
+        "manifest.json",
+    ]
     assert (final / "frames" / "0_000_screen1.png").read_bytes() == b"y"
+    assert (final / "frames_info" / "0_000_screen1.json").read_bytes() == b"{}"
+    assert (final / "audio" / "audio.wav").read_bytes() == b"x"
+    assert list((final / "frames").glob("*.json")) == []
     assert sorted(p.name for p in paths.work_dir.iterdir()) == ["lock", "state.json", "ui.log"]
     assert read_state(paths.state_path).status is Status.PROCESSING
     assert paths.current_dir == final

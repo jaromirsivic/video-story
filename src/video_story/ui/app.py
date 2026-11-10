@@ -15,10 +15,9 @@ log = logging.getLogger(__name__)
 
 
 def _housekeeping_in_background(config, session_id: str) -> None:
-    """Finish recordings a dead window left behind, then apply the retention setting,
-    without delaying the window (deleting is slow)."""
+    """Finish recordings a dead window left behind, without delaying the window. Old
+    recordings are not touched here: the editor archives them when it starts."""
     from video_story.host.recovery import recover_orphaned_recordings
-    from video_story.host.retention import purge_old_recordings
 
     def work() -> None:
         try:
@@ -28,13 +27,6 @@ def _housekeeping_in_background(config, session_id: str) -> None:
         else:
             if recovered:
                 log.info("recovered recordings: %s", ", ".join(recovered))
-        try:
-            deleted = purge_old_recordings(config.recording_folder, config.retention_days)
-        except Exception:  # pragma: no cover - housekeeping must never break the window
-            log.exception("retention cleanup failed")
-            return
-        if deleted:
-            log.info("retention (%d days): deleted %s", config.retention_days, ", ".join(deleted))
 
     threading.Thread(target=work, name="housekeeping", daemon=True).start()
 

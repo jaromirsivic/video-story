@@ -23,6 +23,7 @@ from video_story.core.instructions import read_instructions
 from video_story.core.manifest import Manifest, read_manifest
 from video_story.core.naming import FrameName, parse_frame_filename
 from video_story.core.session import (
+    FRAMES_INFO_DIR_NAME,
     UI_LOG_FILE_NAME,
     SessionPaths,
     SessionState,
@@ -190,6 +191,7 @@ def _processed_without_state(paths: SessionPaths) -> dict[str, Any]:
         transcript_txt=str(paths.transcript_txt_path(final)),
         transcript_json=str(paths.transcript_json_path(final)),
         frames_dir=str(paths.frames_dir(final)),
+        frames_info_dir=str(paths.frames_info_dir(final)),
     ).to_dict()
 
 
@@ -208,6 +210,32 @@ def wait_for_session(paths: SessionPaths, timeout_s: float) -> dict[str, Any]:
         time.sleep(POLL_INTERVAL_S)
 
 
+ARCHIVED_NOTE = (
+    "This recording is archived: its frames and audio were replaced by one MP4 per screen "
+    "in archive/ (<screenId>.mp4 with subtitles <screenId>.srt and a still <screenId>.jpg "
+    "from the middle). The transcript and the frame sidecars (frames_info/) are still "
+    "there, so the timeline works; frame images are gone (image null)."
+)
+
+
+def archive_info(paths: SessionPaths, base: Path) -> dict[str, Any] | None:
+    """``{status, archive_dir, videos, stills, note}`` of an archived (or queued)
+    recording; ``None`` when it was never asked to be archived."""
+    from video_story.core.archive_state import read_archive_state
+
+    state = read_archive_state(paths, base)
+    if state is None:
+        return None
+    folder = paths.archive_dir(base)
+    return {
+        "status": str(state.status),
+        "archive_dir": str(folder),
+        "videos": {s: str(folder / f"{s}.mp4") for s in state.screens_done},
+        "stills": {s: str(folder / f"{s}.jpg") for s in state.screens_done},
+        "note": ARCHIVED_NOTE if state.archived else "Archiving is queued or running.",
+    }
+
+
 # Frames -----------------------------------------------------------------------
 
 
@@ -215,7 +243,7 @@ def wait_for_session(paths: SessionPaths, timeout_s: float) -> dict[str, Any]:
 class FrameRef:
     screen_id: str
     time_ms: int
-    image: Path
+    image: Path | None  # None: the image is gone (an archived recording)
     sidecar: Path
 
     def to_dict(self, include_drawings: bool = True) -> dict[str, Any]:
@@ -245,7 +273,7 @@ class FrameRef:
         result: dict[str, Any] = {
             "screen": self.screen_id,
             "time_ms": self.time_ms,
-            "image": str(self.image),
+            "image": str(self.image) if self.image is not None else None,
             "sidecar": str(self.sidecar),
             "cursor": cursor,
             "drawings": drawings,
@@ -260,18 +288,42 @@ class FrameRef:
 
 
 class FrameIndex:
-    """Index of all frames of a recording, grouped by screen and sorted by time."""
+    """Index of all frames of a recording, grouped by screen and sorted by time.
 
-    def __init__(self, frames_dir: Path) -> None:
+    Images live in ``frames/``, their sidecars in ``frames_info/`` (next to it unless
+    ``info_dir`` says otherwise). A frame whose image is gone (archiving deletes
+    ``frames/`` screen by screen) is still indexed from its sidecar, with no image.
+    """
+
+    def __init__(self, frames_dir: Path, info_dir: Path | None = None) -> None:
         self.frames_dir = frames_dir
-        self.by_screen: dict[str, list[FrameName]] = {}
-        for entry in os.scandir(frames_dir):
-            parsed = parse_frame_filename(entry.name)
-            if parsed is None or parsed.is_sidecar:
+        if info_dir is None:
+            info_dir = frames_dir.parent / FRAMES_INFO_DIR_NAME
+        self.info_dir = info_dir
+        found: dict[tuple[str, int], FrameName] = {}
+        for directory, sidecars in ((self.frames_dir, False), (self.info_dir, True)):
+            try:
+                entries = list(os.scandir(directory))
+            except FileNotFoundError:
                 continue
-            self.by_screen.setdefault(parsed.screen_id, []).append(parsed)
+            for entry in entries:
+                parsed = parse_frame_filename(entry.name)
+                if parsed is None or parsed.is_sidecar != sidecars:
+                    continue
+                found.setdefault((parsed.screen_id, parsed.time_ms), parsed)
+        self.by_screen: dict[str, list[FrameName]] = {}
+        for name in found.values():
+            self.by_screen.setdefault(name.screen_id, []).append(name)
         for names in self.by_screen.values():
             names.sort()
+
+    @classmethod
+    def of(cls, paths: SessionPaths, base: Path | None = None) -> FrameIndex:
+        """The frames of a recording directory (``paths.current_dir`` by default)."""
+        return cls(paths.frames_dir(base), paths.frames_info_dir(base))
+
+    def image_of(self, name: FrameName) -> Path | None:
+        return None if name.is_sidecar else self.frames_dir / name.filename
 
     @property
     def screens(self) -> list[str]:
@@ -281,8 +333,8 @@ class FrameIndex:
         return FrameRef(
             screen_id=name.screen_id,
             time_ms=name.time_ms,
-            image=self.frames_dir / name.filename,
-            sidecar=self.frames_dir / f"{name.base}.json",
+            image=self.image_of(name),
+            sidecar=self.info_dir / f"{name.base}.json",
         )
 
     def at(self, screen_id: str, time_ms: int) -> FrameRef | None:
@@ -318,12 +370,9 @@ def frames_at(
     drawings list of every frame by ``drawing_ids``.
     """
     base = paths.current_dir
-    frames_dir = paths.frames_dir(base)
-    if not frames_dir.is_dir():
-        raise SessionError("NO_FRAMES", f"no frames directory in {base}")
-    index = FrameIndex(frames_dir)
+    index = FrameIndex.of(paths, base)
     if not index.screens:
-        raise SessionError("NO_FRAMES", f"no frames in {frames_dir}")
+        raise SessionError("NO_FRAMES", f"no frames in {base}")
     manifest: Manifest | None = None
     manifest_path = paths.manifest_path(base)
     if manifest_path.exists():
@@ -369,6 +418,9 @@ def frames_at(
         }
     if manifest is not None:
         result["screen_bounds"] = {s.id: s.to_manifest()["bounds"] for s in manifest.screens}
+    archive = archive_info(paths, base)
+    if archive is not None:
+        result["archive"] = archive
     return result
 
 
@@ -383,7 +435,11 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
         "transcript_txt": str(paths.transcript_txt_path(base)),
         "transcript_json": str(paths.transcript_json_path(base)),
         "frames_dir": str(paths.frames_dir(base)),
+        "frames_info_dir": str(paths.frames_info_dir(base)),
     }
+    archive = archive_info(paths, base)
+    if archive is not None:
+        data["archive"] = archive
     duration_ms = 0
     keypoints: list[Any] = []
     if manifest_path.exists():

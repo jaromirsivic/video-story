@@ -4,9 +4,16 @@ Layout inside the Recording Folder::
 
     <recording_folder>/
       .work/<session_id>/      # while recording / processing
-        state.json, lock, ui.log, audio.wav, recording.log, frames/
+        state.json, lock, ui.log, recording.log, audio/audio.wav, frames/, frames_info/
       <session_id>/            # once the recording was saved (Stop, auto stop, recovery)
-        manifest.json, audio.wav, transcript.txt, transcript.json, recording.log, frames/
+        manifest.json, transcript.txt, transcript.json, recording.log, crop.json,
+        instructions.txt, audio/audio.wav, frames/, frames_info/, archive/
+
+``frames/`` holds only the images (``<seconds>_<millis>_<screenId>.<png|jpg>``),
+``frames_info/`` the sidecar JSON of every frame (same name, ``.json``). Archiving
+(:mod:`video_story.core.archive`) turns every screen into ``archive/<screenId>.mp4``
+with a still ``<screenId>.jpg`` and subtitles ``<screenId>.srt``, then deletes
+``audio/`` and ``frames/``; ``frames_info/`` and the transcript stay.
 
 ``state.json``, ``lock`` and ``ui.log`` never leave the work directory: ``state.json`` is
 the agent's contract, and ``ui.log`` is the stdout/stderr of the detached window process,
@@ -34,8 +41,11 @@ from video_story.core.fileio import (
 
 WORK_DIR_NAME = ".work"
 FRAMES_DIR_NAME = "frames"
+FRAMES_INFO_DIR_NAME = "frames_info"
+AUDIO_DIR_NAME = "audio"
 AUDIO_FILE_NAME = "audio.wav"
 AUDIO_16K_FILE_NAME = "audio16k.wav"
+ARCHIVE_DIR_NAME = "archive"
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = "lock"
 LOG_FILE_NAME = "recording.log"
@@ -119,13 +129,24 @@ class SessionPaths:
     # Files inside the current directory ------------------------------------
 
     def frames_dir(self, base: Path | None = None) -> Path:
+        """Images of the frames only."""
         return (base or self.current_dir) / FRAMES_DIR_NAME
 
+    def frames_info_dir(self, base: Path | None = None) -> Path:
+        """Sidecar JSON of every frame (cursor, drawings, zoom, clipboard)."""
+        return (base or self.current_dir) / FRAMES_INFO_DIR_NAME
+
+    def audio_dir(self, base: Path | None = None) -> Path:
+        return (base or self.current_dir) / AUDIO_DIR_NAME
+
     def audio_path(self, base: Path | None = None) -> Path:
-        return (base or self.current_dir) / AUDIO_FILE_NAME
+        return self.audio_dir(base) / AUDIO_FILE_NAME
 
     def audio_16k_path(self, base: Path | None = None) -> Path:
-        return (base or self.current_dir) / AUDIO_16K_FILE_NAME
+        return self.audio_dir(base) / AUDIO_16K_FILE_NAME
+
+    def archive_dir(self, base: Path | None = None) -> Path:
+        return (base or self.current_dir) / ARCHIVE_DIR_NAME
 
     def log_path(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / LOG_FILE_NAME
@@ -157,6 +178,8 @@ class SessionPaths:
 
     def create_work_dirs(self) -> None:
         self.frames_dir(self.work_dir).mkdir(parents=True, exist_ok=True)
+        self.frames_info_dir(self.work_dir).mkdir(parents=True, exist_ok=True)
+        self.audio_dir(self.work_dir).mkdir(parents=True, exist_ok=True)
 
     def finalize(self, resume: bool = False) -> Path:
         """Move the recording into its final directory (same volume => renames).
@@ -232,6 +255,7 @@ class SessionState:
     transcript_txt: str | None = None
     transcript_json: str | None = None
     frames_dir: str | None = None
+    frames_info_dir: str | None = None
     progress: float | None = None  # 0..1 during processing
     message: str | None = None  # human readable detail (errors, auto stop, ...)
     error_code: str | None = None
@@ -287,11 +311,14 @@ def list_sessions(recording_folder: Path) -> list[SessionPaths]:
 
 
 __all__ = [
+    "ARCHIVE_DIR_NAME",
     "AUDIO_16K_FILE_NAME",
+    "AUDIO_DIR_NAME",
     "AUDIO_FILE_NAME",
     "CROP_FILE_NAME",
     "FINAL_STATUSES",
     "FRAMES_DIR_NAME",
+    "FRAMES_INFO_DIR_NAME",
     "INSTRUCTIONS_FILE_NAME",
     "LOG_FILE_NAME",
     "UI_LOG_FILE_NAME",

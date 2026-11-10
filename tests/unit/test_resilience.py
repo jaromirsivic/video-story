@@ -148,7 +148,8 @@ def test_copied_text_waits_for_a_tick_that_is_stored(recorder: Recorder):
     recorder.stop()
     frames_dir = recorder.paths.frames_dir(recorder.paths.work_dir)
     stored = [
-        json.loads(p.read_text(encoding="utf-8"))["clipboard"] for p in frames_dir.glob("*.json")
+        json.loads(p.read_text(encoding="utf-8"))["clipboard"]
+        for p in frames_dir.parent.joinpath("frames_info").glob("*.json")
     ]
     assert "copied while the screen was locked" in stored
 
@@ -271,7 +272,9 @@ def _left_behind(
     last = sorted(frames_dir.glob("*_screen1.png"))[-1]
     for extra in ("1_500_screen1", "1_500_screen2"):  # make it longer than a second
         (frames_dir / f"{extra}.png").write_bytes(last.read_bytes())
-        (frames_dir / f"{extra}.json").write_text('{"time_ms": 1500}', encoding="utf-8")
+        (paths.frames_info_dir(paths.work_dir) / f"{extra}.json").write_text(
+            '{"time_ms": 1500}', encoding="utf-8"
+        )
     with wave.open(str(paths.audio_path(paths.work_dir)), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -335,8 +338,9 @@ def test_recovery_leaves_a_running_window_and_foreign_folders_alone(tmp_path: Pa
 def test_recovery_ignores_leftovers_shorter_than_a_second(tmp_path: Path):
     paths = _left_behind(tmp_path)
     paths.audio_path(paths.work_dir).unlink()
-    for path in paths.frames_dir(paths.work_dir).glob("1_500_*"):
-        path.unlink()
+    for folder in (paths.frames_dir(paths.work_dir), paths.frames_info_dir(paths.work_dir)):
+        for path in folder.glob("1_500_*"):
+            path.unlink()
     assert recovery.recover_orphaned_recordings(tmp_path) == []
     assert not paths.final_dir.exists()
 
@@ -347,11 +351,11 @@ def test_a_save_that_stopped_half_way_is_resumed(tmp_path: Path):
     paths = _left_behind(tmp_path, status=Status.FAILED)
     with pytest.raises(FileExistsError):
         paths.final_dir.mkdir(parents=True)
-        os.replace(paths.audio_path(paths.work_dir), paths.final_dir / "audio.wav")
+        os.replace(paths.audio_dir(paths.work_dir), paths.audio_dir(paths.final_dir))
         paths.finalize()
     assert recovery.recover_orphaned_recordings(tmp_path) == [SESSION]
     final = paths.final_dir
-    assert (final / "audio.wav").is_file() and (final / "manifest.json").is_file()
+    assert paths.audio_path(final).is_file() and (final / "manifest.json").is_file()
     assert paths.frames_dir(final).is_dir() and not paths.frames_dir(paths.work_dir).exists()
     assert paths.state_path.is_file()  # the session files stay in the work folder
 

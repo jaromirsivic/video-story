@@ -36,9 +36,10 @@ AUTO_STOP_MIN_MINUTES = 1
 AUTO_STOP_MAX_MINUTES = 1440
 AUTO_STOP_DEFAULT_MINUTES = 120
 
-RETENTION_MIN_DAYS = 1
-RETENTION_MAX_DAYS = 3650
-RETENTION_DEFAULT_DAYS = 30
+# Recordings older than this are archived (MP4 per screen) when the editor starts.
+ARCHIVE_AFTER_MIN_DAYS = 1
+ARCHIVE_AFTER_MAX_DAYS = 3650
+ARCHIVE_AFTER_DEFAULT_DAYS = 30
 
 EXPORT_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow")
 EXPORT_PRESET_DEFAULT = "medium"
@@ -103,7 +104,7 @@ class Config:
     jpeg_quality: int = JPEG_QUALITY_DEFAULT
     audio_input: str | None = None
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
-    retention_days: int = RETENTION_DEFAULT_DAYS
+    archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
     export_preset: str = EXPORT_PRESET_DEFAULT
     export_crf: int = EXPORT_CRF_DEFAULT
     export_audio_bitrate_k: int = EXPORT_AUDIO_BITRATE_K_DEFAULT
@@ -225,8 +226,12 @@ def config_from_dict(data: dict[str, Any]) -> Config:
             AUTO_STOP_MAX_MINUTES,
             AUTO_STOP_DEFAULT_MINUTES,
         ),
-        retention_days=_require_int(
-            data, "retention_days", RETENTION_MIN_DAYS, RETENTION_MAX_DAYS, RETENTION_DEFAULT_DAYS
+        archive_after_days=_require_int(
+            data,
+            "archive_after_days",
+            ARCHIVE_AFTER_MIN_DAYS,
+            ARCHIVE_AFTER_MAX_DAYS,
+            ARCHIVE_AFTER_DEFAULT_DAYS,
         ),
         export_preset=_choice(data, "export_preset", EXPORT_PRESETS, EXPORT_PRESET_DEFAULT),
         export_crf=_require_int(data, "export_crf", 0, 51, EXPORT_CRF_DEFAULT),
@@ -315,9 +320,9 @@ __all__ = [
     "JPEG_QUALITY_DEFAULT",
     "JPEG_QUALITY_MAX",
     "JPEG_QUALITY_MIN",
-    "RETENTION_DEFAULT_DAYS",
-    "RETENTION_MAX_DAYS",
-    "RETENTION_MIN_DAYS",
+    "ARCHIVE_AFTER_DEFAULT_DAYS",
+    "ARCHIVE_AFTER_MAX_DAYS",
+    "ARCHIVE_AFTER_MIN_DAYS",
     "Config",
     "ConfigError",
     "config_from_dict",

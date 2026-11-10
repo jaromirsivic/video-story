@@ -9,14 +9,16 @@ from typing import Any
 
 from .fileio import atomic_write_text
 from .screens import Screen
-from .session import FRAMES_DIR_NAME
+from .session import AUDIO_DIR_NAME, AUDIO_FILE_NAME, FRAMES_DIR_NAME, FRAMES_INFO_DIR_NAME
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: audio/audio.wav, frames/ images only, sidecars in frames_info/
+
+AUDIO_FILE = f"{AUDIO_DIR_NAME}/{AUDIO_FILE_NAME}"
 
 
 @dataclass
 class AudioInfo:
-    file: str = "audio.wav"
+    file: str = AUDIO_FILE
     device: str | None = None
     sample_rate: int = 0
     channels: int = 1
@@ -35,9 +37,13 @@ class AudioInfo:
 @dataclass
 class FramesInfo:
     dir: str = FRAMES_DIR_NAME
+    info_dir: str = FRAMES_INFO_DIR_NAME
     count: int = 0
     dropped_ticks: int = 0
-    naming: str = "<seconds>_<millis>_<screenId>.<png|jpg> with sidecar .json"
+    naming: str = (
+        "<seconds>_<millis>_<screenId>.<png|jpg> in dir, its sidecar "
+        "<seconds>_<millis>_<screenId>.json in info_dir"
+    )
     # Grabs of one screen that failed (lock screen, UAC prompt): no frame of that
     # screen exists for that tick; the frame before it is the latest one.
     failed_grabs: int = 0
@@ -45,6 +51,7 @@ class FramesInfo:
     def to_dict(self) -> dict[str, Any]:
         return {
             "dir": self.dir,
+            "info_dir": self.info_dir,
             "count": self.count,
             "dropped_ticks": self.dropped_ticks,
             "failed_grabs": self.failed_grabs,
@@ -153,7 +160,7 @@ class Manifest:
             jpeg_quality=data.get("jpeg_quality"),
             screens=[Screen.from_manifest(s) for s in data.get("screens", [])],
             audio=AudioInfo(
-                file=audio.get("file", "audio.wav"),
+                file=audio.get("file", AUDIO_FILE),
                 device=audio.get("device"),
                 sample_rate=int(audio.get("sample_rate", 0)),
                 channels=int(audio.get("channels", 1)),
@@ -161,6 +168,7 @@ class Manifest:
             ),
             frames=FramesInfo(
                 dir=frames.get("dir", FRAMES_DIR_NAME),
+                info_dir=frames.get("info_dir", FRAMES_INFO_DIR_NAME),
                 count=int(frames.get("count", 0)),
                 dropped_ticks=int(frames.get("dropped_ticks", 0)),
                 failed_grabs=int(frames.get("failed_grabs", 0)),
