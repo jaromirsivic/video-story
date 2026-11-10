@@ -1,10 +1,10 @@
 # Video Story – specifikace
 
-Stav: **platný popis aktuálního chování aplikace** (9. 11. 2026). Tento dokument se udržuje spolu s kódem; když se chování změní, mění se i tady. Nahrazuje původní zadání v1 a rozšíření v2 ([video-story-spec-v2.md](video-story-spec-v2.md), ponecháno jako historický záznam). Implementační plány ([implementation-plan.md](implementation-plan.md), [implementation-plan-editor.md](implementation-plan-editor.md)) popisují, jak návrh vznikal, a tam, kde se s tímto dokumentem liší, neplatí. Ověření je v [tests/manual/acceptance.md](tests/manual/acceptance.md).
+Stav: **platný popis aktuálního chování aplikace** (10. 11. 2026). Tento dokument se udržuje spolu s kódem; když se chování změní, mění se i tady. Nahrazuje původní zadání v1 a rozšíření v2 ([video-story-spec-v2.md](video-story-spec-v2.md), ponecháno jako historický záznam). Implementační plány ([implementation-plan.md](implementation-plan.md), [implementation-plan-editor.md](implementation-plan-editor.md), [implementation-plan-mouse.md](implementation-plan-mouse.md)) popisují, jak návrh vznikal, a tam, kde se s tímto dokumentem liší, neplatí. Ověření je v [tests/manual/acceptance.md](tests/manual/acceptance.md).
 
 ## 1. Účel
 
-Video Story je plugin se dvěma skilly (`video-story`, `video-story-edit`) pro AI agenty. Uživatel při práci na počítači nahlas popisuje, co dělá nebo co chce udělat. Plugin nahrává mikrofon, v pravidelném intervalu snímá všechny obrazovky a zaznamenává polohu kurzoru, kresby na obrazovce, zkopírované texty a označené okamžiky. Zvuk přepíše lokálně a uživatel pak v editoru rozhodne, kterou část nahrávky a s jakými pokyny agentovi předá.
+Video Story je plugin se dvěma skilly (`video-story`, `video-story-edit`) pro AI agenty. Uživatel při práci na počítači nahlas popisuje, co dělá nebo co chce udělat. Plugin nahrává mikrofon, v pravidelném intervalu snímá všechny obrazovky a zaznamenává polohu kurzoru, kresby na obrazovce, zkopírované texty, označené okamžiky a akce myši s prvky pod myší (Windows). Zvuk přepíše lokálně a uživatel pak v editoru rozhodne, kterou část nahrávky a s jakými pokyny agentovi předá.
 
 Celý plugin (rozhraní, hlášky, skilly, kód) je anglicky. Přepis zachovává jazyk řeči. Tato specifikace a plány jsou česky.
 
@@ -13,7 +13,7 @@ Celý plugin (rozhraní, hlášky, skilly, kód) je anglicky. Přepis zachováv�
 1. **Agent jedná jen po stisku Process.** Nahrávku agentovi předá výhradně zelené tlačítko **Process** v editoru, ať ho stiskne uživatel, nebo odpočet **Auto process**. Každý jiný konec (zavření editoru, pád editoru, editor se neotevřel, pád nahrávacího okna) znamená „nahrávka je uložená, nic nedělej“.
 2. **Nahrávka se neztrácí.** Ať nahrávání skončí jakkoli, nahrávka se uloží a otevře v editoru. Pokud okno spadne dřív, dokončí ji příští spuštění.
 3. **Nahrávání se nikdy nepozastavuje.** Časová osa je souvislá od stisku Record do konce; při otevřeném dialogu Stop se nahrává dál.
-4. **Nahrávání a přepis běží lokálně.** To, co si agent z výsledku přečte (přepis, zkopírované texty, snímky, které otevře), putuje k modelu, na kterém agent běží, a pokud je to vzdálený model, opouští počítač.
+4. **Nahrávání a přepis běží lokálně.** To, co si agent z výsledku přečte (přepis, zkopírované texty, titulky oken, prvky pod myší a jejich obsah, snímky, které otevře), putuje k modelu, na kterém agent běží, a pokud je to vzdálený model, opouští počítač. Obsah polí pro heslo se nikdy nečte.
 
 ## 3. Podporovaná prostředí
 
@@ -53,6 +53,7 @@ Dialog **Settings** nabízí položky v tomto pořadí; ostatní klíče `config
 | JPEG Quality | `jpeg_quality` | 70 % | 20–100, jen pro JPEG |
 | Audio Input | `audio_input` | systémový výchozí vstup | – |
 | Computer Audio (Record computer audio) | `computer_audio` | zapnuto | zatím jen Windows; jinde zašedlé |
+| Mouse (Record mouse actions) | `mouse_actions` | zapnuto | zatím jen Windows; jinde zašedlé. Jeden přepínač pro všechno: akce myši, gesta touchpadu, titulky oken, prvky pod myší a jejich obsah |
 | Auto Stop Recording | `auto_stop_minutes` | 120 min | 1–1440 |
 | Archive After | `archive_after_days` | 30 dní | 1–3650 |
 | Recordings | – | **Open Folder**, **Delete All Recordings** (s potvrzením; relace otevřeného okna se nemaže) | – |
@@ -69,6 +70,12 @@ Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho re
 - **Doprovodný JSON** ke každému snímku (stejný název s příponou `.json`, ve složce `frames_info/`; ve `frames/` jsou jen obrázky): obrazovka a poloha kurzoru v pixelech jejího snímku (počátek vlevo nahoře), dokončené kresby, právě kreslený tvar, zoom, zkopírovaný text.
 - **Kresby:** obdélník (výchozí nástroj), štětec, šipka; pravé tlačítko myši kreslí vždy šipku; 8 barev, výchozí červená. `Esc` kreslení opustí, `Ctrl+Z` vrátí, `Ctrl+Alt+C` smaže vše. Kolečko myši při kreslení přiblíží obrazovku až na 800 %. Kresba je vidět ve snímcích; do JSONu se tvar dostane až po puštění tlačítka myši, s identifikátorem a časy stisku a puštění. Nahrávací okno zůstává nad kreslicí vrstvou.
 - **Zkopírovaný text:** každý nový text zkopírovaný během nahrávání (nejvýš 65 535 znaků) se zapíše jednou, do JSONů nejbližšího snímku. Co bylo ve schránce před nahráváním, se neukládá.
+- **Myš** (zapnuté Mouse, zatím jen Windows): `input/mouse.jsonl`, jeden JSON na řádek, zapisuje se průběžně (pád ztratí nejvýš poslední sekundu). Obsahuje:
+  - stisk a puštění tlačítek (levé, prostřední, pravé, X1 = zpět, X2 = vpřed), kolečko svisle i vodorovně (i jemný posun), dráhu tažení (pohyb bez stisknutého tlačítka se neukládá, poloha kurzoru je v doprovodných JSONech), stav Ctrl/Shift/Alt/Win a příznak `injected` (událost vytvořená programem);
+  - gesta touchpadu dvěma prsty (pinch, posun) z Precision Touchpadu, jen hotová gesta; tři a více prstů se nezaznamenávají;
+  - prvek pod myší (UI Automation): při každém stisku, kde skončilo tažení nebo dvojklik, kde začal scroll a kde se kurzor zastavil aspoň na 0,6 s – role, název, okno a proces, ohraničení, nejvýš tři pojmenovaní předci a obsah: hodnota pole, odstavec v místě kliku, po tažení nebo dvojkliku označený text. Obsah má nejvýš 4096 znaků (delší končí `...`) a každý text je v souboru jen jednou. Pole pro heslo se nečte nikdy, okna Video Story a kreslicí vrstva se neprohledávají;
+  - titulek a proces okna jednou na okno (při změně titulku znovu).
+  Hook myši i UI Automation běží ve dvou malých pomocných procesech, aby nezpomalovaly kurzor ani okno; skončí spolu s Video Story. Když něco z toho nejde (např. to zablokuje bezpečnostní politika), nahrává se dál bez toho a manifest to v sekci `mouse` řekne (jinak `null`); `doctor` ukáže, co jde.
 - **Keypointy:** okamžiky označené tlačítkem Keypoint (`Ctrl+Alt+K`); ukládají se do `manifest.json` hned při vložení.
 - **Manifest:** `manifest.json` vzniká při stisku Record (obrazovky, nastavení, čas začátku) a doplňuje se při uložení. Pole `stop_reason` říká, proč nahrávka skončila sama (`auto_stop`, `low_disk`, `capture_failed`, `recovered`), `frames.failed_grabs` počet nepořízených snímků.
 
@@ -145,9 +152,9 @@ Při samostatně otevřeném editoru agent čeká příkazem `wait --editor <sou
 
 Pokud agent čeká na nahrávku ze Stop dialogu a její přepis ještě není hotový, Process nad jinou nahrávkou se odmítne.
 
-Po `processed` agent pracuje nejdřív s textem: přečte `instructions`, pak `timeline` (řeč s polohou kurzoru, kresby s geometrií a časy, zkopírované texty, přechody kurzoru mezi obrazovkami, zoom, keypointy – vše v rozsahu cropu) a snímky si přes `frames --at <ms>` vyžádá jen pro okamžiky, které z textu nejdou rozhodnout. Přesný postup je ve `skills/video-story/SKILL.md`.
+Po `processed` agent pracuje nejdřív s textem: přečte `instructions`, pak `timeline` (řeč s polohou kurzoru a prvkem, nad kterým se kurzor zastavil, kresby s geometrií a časy, zkopírované texty, přechody kurzoru mezi obrazovkami, zoom, keypointy a akce myši v jiných aplikacích – `CLICK`, `DOUBLE-CLICK`, `DRAG`, `SCROLL`, `ZOOM-SCROLL`, `GESTURE` s prvkem, oknem a obsahem zkráceným na 200 znaků – vše v rozsahu cropu) a snímky si přes `frames --at <ms>` vyžádá jen pro okamžiky, které z textu nejdou rozhodnout. Celý obsah prvku (do 4096 znaků), ohraničení a dráhy vrací `mouse --at <ms>`. Při více než 400 akcích myši v rozsahu `timeline` sloučí scrolly a gesta po 10 s (`--mouse full|summary|off` to mění). Přesný postup je ve `skills/video-story/SKILL.md`.
 
-Další příkazy: `describe`, `status`, `sessions`, `transcribe`, `export`, `config`, `devices`, `screens`, `doctor`, `setup`, `mcp`. MCP server nabízí tytéž funkce jako nástroje `video_story_*`.
+Další příkazy: `describe`, `mouse`, `status`, `sessions`, `transcribe`, `export`, `config`, `devices`, `screens`, `doctor`, `setup`, `mcp`. MCP server nabízí tytéž funkce jako nástroje `video_story_*`.
 
 ## 10. Poruchy a obnova
 
@@ -160,6 +167,7 @@ Další příkazy: `describe`, `status`, `sessions`, `transcribe`, `export`, `co
 | Přepis selže | V editoru tlačítko Retry transcription; relace agenta trvá. |
 | Editor spadne | Relace skončí stavem `cancelled`; nahrávka i částečný přepis zůstávají. |
 | Chybí model nebo FFmpeg | Oznámí se při stisku Record; `video-story setup` je stáhne. |
+| Hook myši nebo UI Automation nejde spustit | Nahrává se bez nich; manifest to uvede v `mouse.error`, soubor v řádku `status`. Pomocný proces, který skončí nebo přestane posílat události, se spustí znovu (nejvýš třikrát). |
 
 ## 11. Uložení a archivace
 
@@ -175,6 +183,7 @@ Další příkazy: `describe`, `status`, `sessions`, `transcribe`, `export`, `co
     audio/tracks.json                   zapnuté stopy (jen pokud je uživatel přepnul)
     frames/<s>_<ms>_screenN.jpg         jen obrázky
     frames_info/<s>_<ms>_screenN.json   doprovodné JSONy
+    input/mouse.jsonl                   myš, prvky pod myší, gesta (Windows, zapnuté Mouse)
     archive/                            po archivaci: screenN.mp4, .srt, .jpg, archive.json
 ```
 
@@ -188,4 +197,5 @@ Nic se nemaže automaticky. Nahrávky starší než **Archive After** se při st
 - Odpojení nebo připojení monitoru během nahrávání se nepromítne do rozložení obrazovek.
 - Zvuk a snímky nemají společné hodiny; odchylka bývá do půl sekundy.
 - Zvuk počítače se nahrává jen na Windows. Bez sluchátek zachytí mikrofon i zvuk z reproduktorů, takže ve smíšené stopě je zvuk počítače dvakrát (s malým zpožděním). Změna výchozího výstupního zařízení během nahrávání (připojená sluchátka) se do stopy nepromítne.
+- Myš se zaznamenává jen na Windows (rozhraní pro macOS a Linux je připravené, viz implementation-plan-mouse.md kap. 8). Windows zná pět tlačítek myši; další tlačítka si přemapuje software výrobce myši a jako tlačítka nedorazí. Posun a pinch na touchpadu se nad prohlížeči a moderními aplikacemi čtou jen z Precision Touchpadu; touchpad s vlastním ovladačem výrobce gesta nedá. Ve Firefoxu se místo odstavce v místě kliku čte viditelný text; aplikace bez UI Automation (např. Sublime Text) dají jen okno a proces. Prvky v oknech spuštěných jako správce Video Story bez práv správce nepřečte.
 - Další otevřené body jsou v [video-story-review.md](video-story-review.md).

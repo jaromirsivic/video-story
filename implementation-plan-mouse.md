@@ -1,6 +1,6 @@
 # Video Story – implementační plán: akce myši, prvky pod myší, gesta touchpadu
 
-Stav: **M0–M5 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu). M3 = prvky pod myší, jejich obsah a okna (UI Automation v druhém pomocném procesu). M4 = řádky myši v `timeline` (`--mouse auto|full|summary|off`), příkaz `mouse` a nástroj MCP `video_story_mouse`, SKILL.md. M5 = gesta touchpadu dvěma prsty (Raw Input ve vlákně pomocného procesu hooku); ověřeno bez dotyku (touchpad se najde, data a gesta testy), skutečné gesto prsty ověří ruční zkouška.
+Stav: **implementováno (M0–M6, 10. 11. 2026)**; platné chování je ve [video-story-spec.md](video-story-spec.md) (kap. 2, 5, 6, 9, 10, 11, 12) a tam, kde se tento plán liší, platí spec. Výsledky M0 jsou v kap. 12. Skutečné gesto prsty na touchpadu a čtení označeného textu v cizích aplikacích ověřuje ruční zkouška ([tests/manual/acceptance.md](tests/manual/acceptance.md)).
 
 ## 1. Cíl a rozsah
 
