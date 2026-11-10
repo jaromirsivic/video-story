@@ -280,7 +280,23 @@ def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
     if args.all:
         start_ms, end_ms = 0, 10**12
     try:
-        return build_timeline(paths, start_ms, end_ms)
+        return build_timeline(paths, start_ms, end_ms, mouse=args.mouse)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_mouse(args: argparse.Namespace) -> dict[str, Any]:
+    """Every detail of the mouse actions: paths, bounds, ancestors, the whole content."""
+    from video_story.host.events import build_mouse_detail
+    from video_story.host.runner import SessionError
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    start_ms, end_ms = args.start_ms, args.end_ms
+    if args.all:
+        start_ms, end_ms = 0, 10**12
+    try:
+        return build_mouse_detail(paths, start_ms, end_ms, args.at)
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
 
@@ -617,13 +633,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_frames)
 
     p = sub.add_parser(
-        "timeline", help="speech, drawings, clipboard, cursor and keypoints as one text timeline"
+        "timeline",
+        help="speech, drawings, clipboard, cursor, mouse and keypoints as one text timeline",
     )
     p.add_argument("--session")
     p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
     p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
     p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.add_argument(
+        "--mouse",
+        choices=["auto", "full", "summary", "off"],
+        default="auto",
+        help="mouse lines: auto (all, scrolls merged when there are very many), full, "
+        "summary (scrolls merged per 10 s) or off",
+    )
     p.set_defaults(func=cmd_timeline)
+
+    p = sub.add_parser(
+        "mouse", help="every detail of the mouse actions (elements, content, paths, bounds)"
+    )
+    p.add_argument("--session")
+    p.add_argument("--at", type=int, help="only the action at this time (a timeline line's ms)")
+    p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
+    p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
+    p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.set_defaults(func=cmd_mouse)
 
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
     p.add_argument("directory", help="session id or recording directory")

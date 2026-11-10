@@ -424,6 +424,7 @@ def test_create_server_registers_tools(config_file: Path, recording: SessionPath
         "video_story_get_frame",
         "video_story_get_transcript",
         "video_story_list_frames",
+        "video_story_mouse",
         "video_story_start",
         "video_story_status",
         "video_story_timeline",

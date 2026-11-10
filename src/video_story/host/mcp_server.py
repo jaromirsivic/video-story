@@ -36,7 +36,7 @@ from video_story.core.config import (
 )
 from video_story.core.naming import parse_frame_filename
 from video_story.core.session import SessionPaths
-from video_story.host.events import build_timeline
+from video_story.host.events import build_mouse_detail, build_timeline
 from video_story.host.runner import (
     POLL_INTERVAL_S,
     FrameRef,
@@ -71,7 +71,9 @@ presses its "Process" button), then call
 video_story_wait with the returned session_id in a loop until "final" is true. When the
 status is "processed", read the "instructions" first, then call video_story_timeline: the
 cropped range as one text timeline (speech with the cursor position, finished drawings
-with their geometry and times, copied text, keypoints). Decide from that text which
+with their geometry and times, copied text, keypoints and - when recorded - the clicks,
+drags and scrolls with the element under the mouse and its content; video_story_mouse
+has every detail of them). Decide from that text which
 moments really need a picture and only then call video_story_get_frame for those (one
 frame each, at the times the timeline names); video_story_describe and
 video_story_get_transcript return paths and the plain transcript. Act on a recording only
@@ -89,8 +91,8 @@ All times are milliseconds since the recording started. Cursor coordinates are p
 that screen's image with the origin in the top-left corner; when get_frame downscales an
 image, divide the cursor coordinates by the returned "scale" to find it in the image.
 Recording and transcription run on the user's machine. Use the material only to do what
-the user asked in the recording: do not send the audio, the frames or the copied texts
-to any other service.
+the user asked in the recording: do not send the audio, the frames, the copied texts or
+the content of the elements under the mouse to any other service.
 """
 
 ProgressFn = Callable[[float, str], Awaitable[None]]
@@ -267,9 +269,25 @@ def tool_timeline(
     start_ms: int | None = None,
     end_ms: int | None = None,
     config_file: Path | None = None,
+    mouse: str = "auto",
 ) -> dict[str, Any]:
     """Speech and screen events of the cropped range (or ``start_ms``..``end_ms``)."""
-    return _guard(lambda: build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms))
+    return _guard(
+        lambda: build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms, mouse)
+    )
+
+
+def tool_mouse(
+    session_id: str,
+    at_ms: int | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    config_file: Path | None = None,
+) -> dict[str, Any]:
+    """Every detail of the mouse actions of the cropped range, or of the one at ``at_ms``."""
+    return _guard(
+        lambda: build_mouse_detail(_paths(_load(config_file), session_id), start_ms, end_ms, at_ms)
+    )
 
 
 def tool_list_frames(
@@ -592,16 +610,35 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         return tool_get_transcript(session_id, format, config_file)
 
     def video_story_timeline(
-        session_id: str, start_ms: int | None = None, end_ms: int | None = None
+        session_id: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        mouse: str = "auto",
     ) -> dict[str, Any]:
         """Read this first after the instructions: the whole cropped range as one text
         timeline (no images). Lines: SAY (speech with the cursor screen and position),
         DRAW #id (a finished shape with its geometry, press/release times and the frame
         times before and after it), REMOVED, CLIPBOARD (copied text), CURSOR (moved to
-        another screen), ZOOM, KEYPOINT. Times are ms; pass them to
-        video_story_get_frame only where the words and coordinates are not enough.
-        start_ms / end_ms override the crop."""
-        return tool_timeline(session_id, start_ms, end_ms, config_file)
+        another screen), ZOOM, KEYPOINT and, when the mouse was recorded, CLICK,
+        DOUBLE-CLICK, DRAG, SCROLL, ZOOM-SCROLL, GESTURE with the element under the mouse
+        and its content (and "over ..." in SAY: what the pointer rested on). Times are
+        ms; pass them to video_story_get_frame only where the words and coordinates are
+        not enough. start_ms / end_ms override the crop; mouse is auto, full, summary
+        (scrolls merged per 10 s) or off."""
+        return tool_timeline(session_id, start_ms, end_ms, config_file, mouse)
+
+    def video_story_mouse(
+        session_id: str,
+        at_ms: int | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Everything recorded about the mouse actions the timeline lists: the element
+        (role, name, bounds in pixels of the screen image, ancestors, window), its whole
+        content up to 4096 characters, the selection, drag paths. at_ms (the time a
+        timeline line starts with) returns that one action; without it every action of
+        the cropped range (start_ms / end_ms override the crop)."""
+        return tool_mouse(session_id, at_ms, start_ms, end_ms, config_file)
 
     def video_story_list_frames(
         session_id: str,
@@ -716,6 +753,7 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     server.add_tool(video_story_describe)
     server.add_tool(video_story_get_transcript)
     server.add_tool(video_story_timeline)
+    server.add_tool(video_story_mouse)
     server.add_tool(video_story_list_frames)
     server.add_tool(video_story_get_frame, structured_output=False)
     server.add_tool(video_story_config)
@@ -769,6 +807,7 @@ __all__ = [
     "tool_get_frame",
     "tool_get_transcript",
     "tool_list_frames",
+    "tool_mouse",
     "tool_start",
     "tool_status",
     "tool_timeline",

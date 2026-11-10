@@ -2,8 +2,10 @@
 
 Agents read this before any screenshot. It merges the transcript segments with what
 the frame sidecars say happened on screen - shapes drawn and removed, text copied,
-the cursor moving to another screen, zoomed screens - and the keypoints of the
-manifest, all on the recording timeline (milliseconds since the start). Every event
+the cursor moving to another screen, zoomed screens - the keypoints of the manifest
+and, when it was recorded, what the user did with the mouse in other applications
+(:mod:`video_story.host.mouse_timeline`), all on the recording timeline (milliseconds
+since the start). Every event
 names the frame times worth fetching (``frames --at <ms>``), so the agent opens only
 the few images the words and the geometry cannot answer.
 
@@ -23,6 +25,8 @@ from video_story.core.instructions import read_instructions
 from video_story.core.naming import frame_base
 from video_story.core.session import SessionPaths
 from video_story.core.transcript import Segment, read_transcript, transcript_status
+from video_story.host.mouse_timeline import LEGEND as MOUSE_LEGEND
+from video_story.host.mouse_timeline import MOUSE_MODES, mouse_detail, mouse_events
 from video_story.host.runner import FrameIndex, SessionError, archive_info
 
 CLIPBOARD_EXCERPT_CHARS = 200
@@ -76,6 +80,19 @@ class _Ticks:
         """Time of the last tick strictly before ``time_ms`` (any tick of the recording)."""
         pos = bisect.bisect_left(self.all_times, time_ms) - 1
         return self.all_times[pos] if pos >= 0 else None
+
+    def after(self, time_ms: int) -> int | None:
+        """Time of the first tick strictly after ``time_ms`` (any tick of the recording)."""
+        pos = bisect.bisect_right(self.all_times, time_ms)
+        return self.all_times[pos] if pos < len(self.all_times) else None
+
+    def frames_around(self, start_ms: int, end_ms: int) -> str:
+        """``frames before X, after Y`` for an action from ``start_ms`` to ``end_ms``."""
+        before, after = self.before(start_ms), self.after(end_ms)
+        parts = ([f"before {before}"] if before is not None else []) + (
+            [f"after {after}"] if after is not None else []
+        )
+        return "frames " + ", ".join(parts) if parts else "no frames around"
 
 
 def _load_ticks(index: FrameIndex, start_ms: int, end_ms: int) -> _Ticks:
@@ -154,13 +171,18 @@ def _excerpt(text: str) -> str:
 # Events -----------------------------------------------------------------------
 
 
-def _speech_events(segments: list[Segment], crop: Crop, ticks: _Ticks) -> list[_Event]:
+def _speech_events(
+    segments: list[Segment], crop: Crop, ticks: _Ticks, over=lambda _s, _e: None
+) -> list[_Event]:
     events = []
     for seg in segments:
         start = max(seg.start_ms, crop.start_ms)
         end = min(seg.end_ms, crop.end_ms)
         first, last = _cursor(ticks.at(start)), _cursor(ticks.at(end))
         cursor = first if first == last else f"{first} -> {last}"
+        rested = over(start, end)
+        if rested:
+            cursor += f" {rested}"
         events.append(
             _Event(
                 seg.start_ms,
@@ -344,13 +366,19 @@ def _screen_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str,
 
 
 def build_timeline(
-    paths: SessionPaths, start_ms: int | None = None, end_ms: int | None = None
+    paths: SessionPaths,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    mouse: str = "auto",
 ) -> dict[str, Any]:
     """Merged text timeline of a processed recording.
 
     The range defaults to the user's crop (the whole recording when uncropped);
-    ``start_ms`` / ``end_ms`` override either end.
+    ``start_ms`` / ``end_ms`` override either end. ``mouse``: ``auto`` (every action, or
+    scrolls merged when there are very many), ``full``, ``summary`` or ``off``.
     """
+    if mouse not in MOUSE_MODES:
+        raise SessionError("USAGE", f"unknown mouse mode {mouse!r}; use {', '.join(MOUSE_MODES)}")
     base = paths.current_dir
     index = FrameIndex.of(paths, base)
     if not index.screens:
@@ -373,6 +401,10 @@ def build_timeline(
 
     ticks = _load_ticks(index, window.start_ms, window.end_ms)
     events, counts = _screen_events(ticks, window)
+    pointer = mouse_events(paths, manifest, window, ticks.frames_around, mouse)
+    for line in pointer.lines:
+        events.append(_Event(line.time_ms, 3, line.text))
+    counts.update(pointer.counts)
 
     status = transcript_status(paths.transcript_json_path(base))
     segments: list[Segment] = []
@@ -385,7 +417,7 @@ def build_timeline(
         if transcript is not None:
             language = transcript.language
             segments = transcript.segments_in_range(window.start_ms, window.end_ms)
-    events.extend(_speech_events(segments, window, ticks))
+    events.extend(_speech_events(segments, window, ticks, pointer.over))
 
     keypoints = [k for k in manifest.get("keypoints") or [] if isinstance(k, dict)]
     for kp in keypoints:
@@ -417,9 +449,12 @@ def build_timeline(
         "screens": screens,
         "capture_interval_ms": manifest.get("capture_interval_ms"),
         "counts": counts,
-        "legend": LEGEND,
+        "legend": LEGEND + (" " + MOUSE_LEGEND if pointer.recorded else ""),
+        "mouse": {"recorded": pointer.recorded, "mode": pointer.mode},
         "timeline": "\n".join(e.text for e in events) + ("\n" if events else ""),
     }
+    if pointer.note:
+        result["mouse_note"] = pointer.note
     if not status.complete:
         result["transcript_note"] = (
             f"The transcript is incomplete (segments reach {status.transcribed_ms} ms); "
@@ -431,4 +466,31 @@ def build_timeline(
     return result
 
 
-__all__ = ["CLIPBOARD_EXCERPT_CHARS", "LEGEND", "build_timeline"]
+def build_mouse_detail(
+    paths: SessionPaths,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    at_ms: int | None = None,
+) -> dict[str, Any]:
+    """Everything recorded about the mouse actions of the cropped range (or
+    ``start_ms``..``end_ms``), or of the one action at ``at_ms``."""
+    base = paths.current_dir
+    manifest_path = paths.manifest_path(base)
+    if not manifest_path.exists():
+        raise SessionError("NOT_FOUND", f"no manifest.json in {base}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SessionError("NOT_FOUND", f"cannot read {manifest_path}: {exc}") from exc
+    duration_ms = int(manifest.get("recorded_duration_ms") or 0)
+    crop = read_crop(paths.crop_path(base), duration_ms)
+    window = Crop(
+        start_ms=crop.start_ms if start_ms is None else max(0, start_ms),
+        end_ms=crop.end_ms if end_ms is None else end_ms,
+    )
+    if window.end_ms < window.start_ms:
+        raise SessionError("USAGE", f"end_ms {window.end_ms} is before start_ms {window.start_ms}")
+    return {"session_id": paths.session_id, **mouse_detail(paths, manifest, window, at_ms)}
+
+
+__all__ = ["CLIPBOARD_EXCERPT_CHARS", "LEGEND", "build_mouse_detail", "build_timeline"]

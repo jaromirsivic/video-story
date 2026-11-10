@@ -1,6 +1,6 @@
 # Video Story – implementační plán: akce myši, prvky pod myší, gesta touchpadu
 
-Stav: **M0–M3 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu). M3 = prvky pod myší, jejich obsah a okna (UI Automation v druhém pomocném procesu). Timeline (M4) a gesta touchpadu (M5) zatím ne.
+Stav: **M0–M4 hotové** (10. 11. 2026; výsledky M0 v kap. 12). M1 = čistá logika v `core/`, rozhraní v `platform/base.py`, nastavení a manifest. M2 = na Windows se myš nahrává do `input/mouse.jsonl` (hook v pomocném procesu, checkbox Mouse v Settings, `doctor`, obnova po pádu). M3 = prvky pod myší, jejich obsah a okna (UI Automation v druhém pomocném procesu). M4 = řádky myši v `timeline` (`--mouse auto|full|summary|off`), příkaz `mouse` a nástroj MCP `video_story_mouse`, SKILL.md. Gesta touchpadu (M5) zatím ne.
 
 ## 1. Cíl a rozsah
 
@@ -296,10 +296,10 @@ Navazující práce mimo tento plán: značky kliků na časové ose editoru a �
 
 Pravidla proti zahlcení kontextu:
 
-- Jeden řádek na akci, název prvku nejvýš 60 znaků a jen jeden předek, titulek okna jen při změně okna oproti předchozí akci.
+- Jeden řádek na akci, název prvku nejvýš 60 znaků a jen jeden pojmenovaný předek (ne okno: to říká část `in "titulek" [proces]`), titulek okna jen při změně okna oproti předchozí akci. Řádky myši mají i `frames before/after` (snímek před akcí a po ní).
 - **Obsah v timeline nejvýš 200 znaků** (stejně jako `CLIPBOARD`), za ním počet znaků a odkaz na `mouse --at <ms>`, kde je celý (do 4096). Opakovaný obsah se nevypisuje znovu, jen `same as <ms>`. Označený text (`selected`) se vypisuje celý až do 1000 znaků, protože ho uživatel vybral záměrně.
 - Zastavení kurzoru (`hover`) nemá vlastní řádky; jen doplní `over …` do `SAY`, bez obsahu.
-- `--mouse summary` (automaticky, když je v rozsahu přes 400 řádků myši): kliky, dvojkliky a tažení zůstávají, scrolly a gesta se sloučí po 10 s. Výsledek to oznámí v `mouse_note`.
+- `--mouse summary` (výchozí `auto` ho zapne, když je v rozsahu přes 400 akcí myši): kliky, dvojkliky a tažení zůstávají, scrolly a gesta se sloučí po 10 s. Výsledek to oznámí v `mouse_note`.
 - Vše ostatní (dráhy tažení, bounds, předci, `automation_id`, celý obsah) je jen v příkazu `mouse`.
 
 Odhad: řádek s prvkem má 25–40 tokenů, s obsahem do ~100 tokenů. 100 akcí tedy vyjde zhruba na 4–8 tisíc tokenů, řádově jako dva snímky obrazovky, a agent jich díky tomu většinu nemusí otevírat.

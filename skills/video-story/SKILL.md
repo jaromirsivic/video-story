@@ -8,8 +8,8 @@ description: Record the user's narrated screen session (microphone, every screen
 The user talks while working; you receive a timed transcript plus screenshots of every
 screen with the cursor position, all on one timeline (milliseconds since the recording
 started). Recording and speech-to-text run on the user's machine; what you read of the
-result (transcript, copied texts, the screenshots you open) reaches you like any other
-file content. You act on a recording only after the user pressed **Process** in the
+result (transcript, copied texts, the elements clicked and their content, the
+screenshots you open) reaches you like any other file content. You act on a recording only after the user pressed **Process** in the
 editor (status `processed`); every other ending means: do nothing with it.
 
 ## 1. Locate and run the tool
@@ -110,6 +110,13 @@ line, ordered by time in milliseconds since the recording started:
 51000 CURSOR -> screen2 412,388
 60000 KEYPOINT 1
 70500 ZOOM screen1 2.441x region 135,244 1049x656
+72300 CLICK left screen1 812,440 on edit "Search" in toolbar "Find bar" in "Settings" [notepad.exe] value "video story mouse" (frames before 72000, after 72500)
+73010-73230 DOUBLE-CLICK left screen1 300,220 on document "Návrh.docx" selected "souvislá" (frames before 73000, after 73500)
+74000-75200 DRAG left screen1 100,200 -> screen1 600,220 (1200 ms, 512 px) on list_item "report.pdf" in "Downloads" [explorer.exe] to tree_item "Archive" (frames before 73500, after 75500)
+76000-77500 SCROLL down 6 notches screen2 900,500 over document "Pull requests" in "Pull requests" [msedge.exe]
+78000-78600 ZOOM-SCROLL in 3 notches (Ctrl+wheel) screen1 640,400
+80000-80800 GESTURE pinch out 2 fingers x1.8 screen1 640,400 (touchpad)
+81000-83500 SAY Tohle tlačítko nefunguje. [cursor screen1 812,440 over button "Save" (notepad.exe)]
 ```
 
 - `SAY` is a transcript segment with the cursor screen and position at its start and
@@ -141,10 +148,40 @@ line, ordered by time in milliseconds since the recording started:
 - `KEYPOINT n` - a moment the user marked with **Keypoint** as important (the
   green lines in the editor); use them as anchors when the user refers to "the first
   keypoint" or when you look for the important parts of a long recording.
+- Mouse lines (when Mouse was switched on in Settings, the default; Windows for now) -
+  what the user did with the mouse in other applications: `CLICK`, `DOUBLE-CLICK`,
+  `TRIPLE-CLICK`, `MULTI-CLICK n` (button `left`, `right`, `middle`, `x1 (back)`,
+  `x2 (forward)`), `DRAG a -> b`, `SCROLL <direction> n notches`, `ZOOM-SCROLL`
+  (Ctrl+wheel) and `GESTURE` (two fingers on a touchpad: `pinch in/out xN`, or a scroll
+  with the direction the fingers moved). `on <role> "name"` is the element under the
+  mouse (with one named parent: `in toolbar "Find bar"`), `in "title" [process]` the
+  window when it changed since the previous mouse line. `value` (a field's value), `text`
+  (the paragraph at the click) and `selected` (what a drag or a double click selected)
+  are the element's content, cut after 200 characters (a selection after 1000) with
+  `(N chars, mouse --at <ms>)`; `same as <ms>` repeats an earlier content. `over ...` in a
+  `SAY` line is the element the pointer rested on while the user spoke - usually what
+  "this" or "here" means. `(held 1.4 s)`, `(Ctrl)` and `(injected)` (made by a program)
+  qualify an action. Clicks into Video Story itself and onto the drawing layer are left
+  out (the DRAW, ZOOM and KEYPOINT lines cover them). A field's exact text, a file name,
+  an error message or the paragraph the user clicked into is often already here: you
+  may not need a frame for it. Password fields are never read.
+- With very many mouse actions in the range, scrolls and gestures are merged per 10 s
+  (`SCROLLS 6x (down 6)`, `mouse_note` says so); `--mouse full`, `summary` or `off`
+  choose it yourself.
 
 The result also carries `screens` (ids and image sizes; `screen1` is the primary),
-`counts` and `transcript_complete`; when it is false, run `transcribe` first (see
-below).
+`counts`, `mouse` (`recorded`, `mode`) and `transcript_complete`; when it is false, run
+`transcribe` first (see below).
+
+Everything the mouse lines leave out - the whole content up to 4096 characters (longer
+texts end with `...`), the element's bounds in pixels of the screen image, its parents,
+the drag path - is in:
+
+```text
+<launcher> mouse --session <session_id> --at <ms>
+```
+
+(`--at` is the time a mouse line starts with; without it every action of the range).
 
 **Step 3 - pick the moments that need a picture.** Read the whole timeline once, work
 out what the user asks for and list the requests in order. For each, decide whether the
@@ -176,7 +213,9 @@ dialog here", the look of something). Skip the rest.
 Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` in `frames_dir`; their
 sidecars `<same>.json` lie in `frames_info_dir` (`frames_info/`), the microphone in
 `audio/audio.wav` and, on Windows, what the computer played meanwhile (a video in
-the background, a call) in `audio/computer.wav` (`computer_audio` in the manifest).
+the background, a call) in `audio/computer.wav` (`computer_audio` in the manifest),
+the mouse in `input/mouse.jsonl` (`mouse` in the manifest; read it through `timeline`
+and `mouse`).
 The transcript is made from the tracks the user left switched on in the editor
 (both by default), so it may contain speech that came from the computer, not from
 the user. An archived recording (the editor's **Archive Video**, or any
@@ -201,7 +240,8 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
 
 - `config get|set <key> <value>|path` - settings (`recording_folder`,
   `capture_interval_ms` 1-1000, `image_format` png|jpeg, `jpeg_quality` 20-100,
-  `audio_input`, `computer_audio` true|false, `auto_stop_minutes`,
+  `audio_input`, `computer_audio` true|false, `mouse_actions` true|false (clicks, the
+  elements under the mouse and their content; default true), `auto_stop_minutes`,
   `archive_after_days`). The user can also use
   the **Settings** button, which also opens the recording folder and can delete all
   recordings. Recordings older than `archive_after_days` (default 30) are archived when
