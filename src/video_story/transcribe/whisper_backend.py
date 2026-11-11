@@ -47,11 +47,14 @@ class TranscriptionBackend(Protocol):
         threads: int,
         progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,
+        initial_prompt: str | None = None,
     ) -> Transcript:
         """Transcribe a 16 kHz mono 16-bit WAV. ``language`` None/"auto" = detect.
 
         ``on_segment`` (when the backend can stream) receives every segment as soon as
-        whisper produces it, before the matching ``progress`` call.
+        whisper produces it, before the matching ``progress`` call. ``initial_prompt``
+        is text that preceded the audio (a resumed transcription passes the end of the
+        transcript so far).
         """
         ...
 
@@ -118,6 +121,10 @@ class PyWhisperCppBackend:
         self.model_path = Path(model_path)
         self._model: Any = None
 
+    def load(self, threads: int) -> None:
+        """Load the model now (otherwise the first transcription does)."""
+        self._load(threads)
+
     def _load(self, threads: int) -> Any:
         if self._model is None:
             if not self.model_path.is_file():
@@ -143,9 +150,46 @@ class PyWhisperCppBackend:
         threads: int,
         progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,
+        initial_prompt: str | None = None,
+    ) -> Transcript:
+        return self._transcribe_audio(
+            load_wav16k(wav16k),
+            language=language,
+            threads=threads,
+            progress=progress,
+            on_segment=on_segment,
+            initial_prompt=initial_prompt,
+        )
+
+    def transcribe_samples(
+        self,
+        samples: np.ndarray,
+        *,
+        language: str | None,
+        threads: int,
+        initial_prompt: str | None = None,
+    ) -> tuple[list[Segment], str | None]:
+        """Transcribe 16 kHz mono float32 samples (the live transcription's windows);
+        returns the segments (ms from the first sample) and the language whisper used."""
+        transcript = self._transcribe_audio(
+            np.asarray(samples, dtype=np.float32),
+            language=language,
+            threads=threads,
+            initial_prompt=initial_prompt,
+        )
+        return transcript.segments, transcript.language
+
+    def _transcribe_audio(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str | None,
+        threads: int,
+        progress: ProgressCallback | None = None,
+        on_segment: SegmentCallback | None = None,
+        initial_prompt: str | None = None,
     ) -> Transcript:
         model = self._load(threads)
-        audio = load_wav16k(wav16k)
         total_ms = int(len(audio) * 1000 / WHISPER_SAMPLE_RATE)
         if total_ms < MIN_AUDIO_MS:
             pad = int((MIN_AUDIO_MS - total_ms) * WHISPER_SAMPLE_RATE / 1000)
@@ -168,6 +212,8 @@ class PyWhisperCppBackend:
             n_threads=threads,
             language=lang,
             translate=False,
+            # Parameters stay set on the model between calls: always pass the prompt.
+            initial_prompt=(initial_prompt or "").strip(),
         )
         segments = [
             Segment(int(s.t0) * 10, int(s.t1) * 10, str(s.text).strip()) for s in raw_segments
@@ -227,6 +273,7 @@ class WhisperCliBackend:
         threads: int,
         progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,  # whisper-cli reports only at the end
+        initial_prompt: str | None = None,
     ) -> Transcript:
         if not self.cli_path.is_file():
             raise TranscriptionError(f"whisper-cli not found: {self.cli_path}")
@@ -253,6 +300,8 @@ class WhisperCliBackend:
                 "-of",
                 str(out_prefix),
             ]
+            if initial_prompt and initial_prompt.strip():
+                cmd += ["--prompt", initial_prompt.strip()]
             log.debug("Running %s", " ".join(cmd))
             try:
                 proc = subprocess.run(

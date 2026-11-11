@@ -26,6 +26,7 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
+from video_story.host.live_transcription import LiveTranscriber, live_transcription_available
 from video_story.platform.base import Platform
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,11 @@ class SessionController:
         self.recorder: Recorder | None = None
         self.summary: RecordingSummary | None = None
         self.discarded_recordings = 0
+        # Settings > Live Transcription: the worker of the running recording, and its
+        # statistics once the recording stopped (manifest ``live_transcription``).
+        self.config_file: Path | None = None
+        self.live: LiveTranscriber | None = None
+        self.live_info: dict[str, object] | None = None
         self._log_handler: logging.Handler | None = None
         self._lock = threading.Lock()
         self.paths.work_dir.mkdir(parents=True, exist_ok=True)
@@ -125,12 +131,55 @@ class SessionController:
             recording_started_at=recorder.started_at,
             recorded_duration_ms=None,
         )
+        self._start_live()
+
+    def _start_live(self) -> None:
+        """Transcribe while recording when Settings ask for it (never fails the recording)."""
+        self.live_info = None
+        reason = live_transcription_available(self.config)
+        if reason is not None:
+            log.info("no transcription while recording: %s", reason)
+            return
+        live = self.create_live_transcriber()
+        try:
+            started = live.start()
+        except Exception:  # noqa: BLE001 - the recording must go on
+            log.exception("the live transcription did not start")
+            return
+        if started:
+            self.live = live
+        else:
+            self.live_info = live.info()
+
+    def create_live_transcriber(self) -> LiveTranscriber:
+        """The worker manager (tests replace it)."""
+        return LiveTranscriber(self.paths, self.config, config_file=self.config_file)
+
+    def _stop_live(self, recorded_ms: int) -> None:
+        live, self.live = self.live, None
+        if live is None:
+            return
+        try:
+            live.stop()
+        except Exception:  # noqa: BLE001 - saving the recording comes first
+            log.exception("the live transcription did not stop cleanly")
+        self.live_info = live.info(recorded_ms)
+
+    def live_tick(self) -> int | None:
+        """Every second while recording: lets the live transcription react to dropped
+        frames; returns how far it is behind (ms), ``None`` when it does not run."""
+        live, recorder = self.live, self.recorder
+        if live is None or recorder is None:
+            return None
+        live.observe_drops(recorder.dropped_ticks)
+        return live.lag_ms(recorder.elapsed_ms)
 
     def stop_recording(self) -> RecordingSummary:
         if self.recorder is None:
             raise ControllerError("not recording")
         if self.summary is None:
             self.summary = self.recorder.stop()
+            self._stop_live(self.summary.recorded_duration_ms)
         return self.summary
 
     def process(self) -> Path:
@@ -156,6 +205,7 @@ class SessionController:
         try:
             manifest = summary.to_manifest(self.config, self.platform.name)
             manifest.finished_at = now_iso()
+            manifest.live_transcription = self.live_info
             if summary.error:
                 manifest.notes.append(summary.error)
             write_manifest(self.paths.manifest_path(self.paths.work_dir), manifest)

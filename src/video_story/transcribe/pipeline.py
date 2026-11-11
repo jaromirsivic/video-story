@@ -34,6 +34,7 @@ from video_story.core.transcript import (
     drop_credit_hallucinations,
     is_credit_hallucination,
     normalize_segments,
+    read_transcript,
     write_transcript,
 )
 
@@ -89,6 +90,25 @@ def transcribing_message(last: Segment | None) -> str:
     return f"{TRANSCRIBING_MESSAGE}\n{format_timestamp(last.start_ms)[:-4]}  {text}"
 
 
+def resume_context(paths: SessionPaths, base: Path, start_ms: int) -> tuple[str | None, str | None]:
+    """``(language, initial_prompt)`` for continuing the stored, incomplete transcript at
+    ``start_ms``: its language stays (the transcription while recording fixed it). No
+    prompt is given (always ``None``), like in the live transcription: the text before
+    as prompt makes whisper return long segments (see :class:`.live.LiveParams`)."""
+    if start_ms <= 0:
+        return None, None
+    path = paths.transcript_json_path(base)
+    if not path.exists():
+        return None, None
+    try:
+        stored = read_transcript(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+    if stored.complete:
+        return None, None
+    return stored.language, None
+
+
 @dataclass
 class TranscriptionResult:
     transcript: Transcript
@@ -138,6 +158,8 @@ def transcribe_audio(
     progress: ProgressCallback | None = None,
     on_segment: SegmentCallback | None = None,
     backend: TranscriptionBackend | None = None,
+    language: str | None = None,
+    initial_prompt: str | None = None,
 ) -> TranscriptionResult:
     """Transcribe the audio in ``base_dir`` from ``start_ms`` on; nothing is written.
 
@@ -151,6 +173,9 @@ def transcribe_audio(
     reports ``0.0`` to :data:`PROGRESS_TRANSCRIBE_END`. The intermediate
     ``audio16k.wav`` is removed afterwards. A silent or empty recording yields a
     transcript with zero segments, not an error.
+
+    ``language`` (default: detect) and ``initial_prompt`` let a resumed transcription
+    continue like the part before it (see :func:`resume_context`).
     """
     base = Path(base_dir) if base_dir is not None else paths.work_dir
     audio16k = paths.audio_16k_path(base)
@@ -214,13 +239,17 @@ def transcribe_audio(
                 report(PROGRESS_CONVERT_END + span * fraction, transcribing_message(last))
 
             if start_ms < audio_duration_ms or audio_duration_ms == 0:
+                extra = {"initial_prompt": initial_prompt} if initial_prompt else {}
                 transcript = backend.transcribe(
                     audio16k,
-                    language="auto",
+                    language=language or "auto",
                     threads=config.whisper_threads,
                     progress=on_backend_progress if progress is not None else None,
                     on_segment=on_backend_segment if wants_feedback else None,
+                    **extra,
                 )
+                if language and not transcript.language:
+                    transcript.language = language
             else:
                 log.info("nothing left to transcribe after %d ms", start_ms)
         finally:
@@ -301,6 +330,8 @@ def stream_transcription(
     start_ms: int = 0,
     emit: EventCallback,
     backend: TranscriptionBackend | None = None,
+    language: str | None = None,
+    initial_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Transcribe from ``start_ms`` on, reporting events; returns the ``done`` event.
 
@@ -334,6 +365,8 @@ def stream_transcription(
         progress=on_progress,
         on_segment=on_segment,
         backend=backend,
+        language=language,
+        initial_prompt=initial_prompt,
     )
     done = {
         "event": "done",
@@ -356,6 +389,7 @@ __all__ = [
     "SegmentCallback",
     "TranscriptionResult",
     "missing_requirements",
+    "resume_context",
     "stream_transcription",
     "transcribe_audio",
     "transcribe_recording",

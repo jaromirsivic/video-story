@@ -15,3 +15,13 @@ def _no_automatic_archiving(monkeypatch):
     except ImportError:  # pragma: no cover - Qt missing
         return
     monkeypatch.setattr(window, "recordings_due_for_archive", lambda *_a, **_k: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_live_transcription(monkeypatch):
+    """Recordings that tests start must not run a real whisper worker while recording
+    (the developer's machine has the model). Tests of the live transcription patch
+    ``live_transcription_available`` back themselves."""
+    import video_story.host.controller as controller
+
+    monkeypatch.setattr(controller, "live_transcription_available", lambda _c: "disabled in tests")

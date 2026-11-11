@@ -191,6 +191,9 @@ class Manifest:
     # "capture_failed" or "recovered" (the window died; finished afterwards). None when
     # the user stopped it.
     stop_reason: str | None = None
+    # Transcription while recording (mode, threads, priority, windows, how far it got at
+    # Stop, ...; see host.live_transcription); None when it did not run.
+    live_transcription: dict[str, Any] | None = None
 
     @property
     def in_progress(self) -> bool:
@@ -231,6 +234,7 @@ class Manifest:
             "and two-finger touchpad gestures with the window, the element under the mouse "
             "and its content (at most max_content_chars, never password fields); times on "
             "the recording timeline, screen/x/y like the cursor in the frame sidecars",
+            "live_transcription": self.live_transcription,
             "keypoints": self.keypoints_to_dict(),
             "keypoints_note": "moments the user marked as important while recording "
             "(Keypoint button, Ctrl+Alt+K); the editor shows them as green lines and snaps "
@@ -286,6 +290,9 @@ class Manifest:
             else None,
             keypoints=_keypoints_from(data.get("keypoints")),
             stop_reason=data.get("stop_reason"),
+            live_transcription=data["live_transcription"]
+            if isinstance(data.get("live_transcription"), dict)
+            else None,
         )
 
 

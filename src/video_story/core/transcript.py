@@ -143,6 +143,36 @@ def normalize_segments(segments: list[Segment]) -> list[Segment]:
     return cleaned
 
 
+def merge_segments(
+    transcript: Transcript | None,
+    segments: list[Segment],
+    transcribed_ms: int,
+    language: str | None = None,
+) -> tuple[Transcript, list[Segment]]:
+    """``transcript`` (or an empty one) with ``segments`` added as an incomplete
+    transcript reaching ``transcribed_ms``; returns it and the segments that were new.
+
+    Used by the editor's background transcription and by the transcription while
+    recording; segments already stored and hallucinated credits are left out.
+    """
+    base = transcript or Transcript(language=None, segments=[], complete=False, transcribed_ms=0)
+    known = set(base.segments)
+    new = [s for s in drop_credit_hallucinations(normalize_segments(segments)) if s not in known]
+    reached = max(int(transcribed_ms), base.transcribed_ms or 0, *(s.end_ms for s in new))
+    merged = sorted([*base.segments, *new], key=lambda s: (s.start_ms, s.end_ms))
+    return (
+        Transcript(
+            language=language or base.language,
+            segments=merged,
+            model=base.model,
+            backend=base.backend,
+            complete=False,
+            transcribed_ms=reached,
+        ),
+        new,
+    )
+
+
 # Hallucinated credits -----------------------------------------------------------
 
 # Whisper was trained on subtitled video and sometimes ends (or fills a silence) with
@@ -195,6 +225,7 @@ __all__ = [
     "drop_credit_hallucinations",
     "format_segment_line",
     "is_credit_hallucination",
+    "merge_segments",
     "normalize_segments",
     "read_transcript",
     "transcript_status",

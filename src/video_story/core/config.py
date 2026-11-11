@@ -54,6 +54,9 @@ MODEL_FILE_NAME = "ggml-large-v3-turbo-q5_0.bin"
 
 ImageFormat = Literal["png", "jpeg"]
 WhisperBackend = Literal["pywhispercpp", "whisper-cli"]
+LiveTranscriptionMode = Literal["off", "light", "faster"]
+LIVE_TRANSCRIPTION_MODES = ("off", "light", "faster")
+LIVE_TRANSCRIPTION_DEFAULT = "light"
 
 
 class ConfigError(ValueError):
@@ -107,6 +110,9 @@ class Config:
     # Mouse actions plus everything about them: window titles, the elements under the
     # mouse and their content (at most 4096 characters, never password fields).
     mouse_actions: bool = True
+    # Transcribe while recording: "off" (only in the editor), "light" (low priority, a
+    # quarter of the CPUs) or "faster" (half of the CPUs, slightly below normal).
+    live_transcription: LiveTranscriptionMode = LIVE_TRANSCRIPTION_DEFAULT  # type: ignore[assignment]
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
     archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
     export_preset: str = EXPORT_PRESET_DEFAULT
@@ -225,6 +231,9 @@ def config_from_dict(data: dict[str, Any]) -> Config:
         audio_input=_optional_str(data, "audio_input"),
         computer_audio=_require_bool(data, "computer_audio", True),
         mouse_actions=_require_bool(data, "mouse_actions", True),
+        live_transcription=_choice(  # type: ignore[arg-type]
+            data, "live_transcription", LIVE_TRANSCRIPTION_MODES, LIVE_TRANSCRIPTION_DEFAULT
+        ),
         auto_stop_minutes=_require_int(
             data,
             "auto_stop_minutes",

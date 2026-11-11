@@ -37,6 +37,7 @@ from video_story.core.transcript import (
     Segment,
     Transcript,
     drop_credit_hallucinations,
+    merge_segments,
     normalize_segments,
     read_transcript,
     write_transcript,
@@ -340,22 +341,8 @@ class LoadedRecording:
         transcript (``complete`` false, ``transcribed_ms`` = how far whisper got) and
         written, so that an interrupted transcription resumes there. Returns the
         segments that were new."""
-        transcript = self.transcript or Transcript(
-            language=None, segments=[], complete=False, transcribed_ms=0
-        )
-        known = set(transcript.segments)
-        new = [
-            s for s in drop_credit_hallucinations(normalize_segments(segments)) if s not in known
-        ]
-        reached = max(
-            int(transcribed_ms),
-            transcript.transcribed_ms or 0,
-            *(s.end_ms for s in new),
-        )
-        merged = sorted([*transcript.segments, *new], key=lambda s: (s.start_ms, s.end_ms))
-        self._store_transcript(
-            replace(transcript, segments=merged, complete=False, transcribed_ms=reached)
-        )
+        updated, new = merge_segments(self.transcript, segments, transcribed_ms)
+        self._store_transcript(updated)
         return new
 
     def reset_transcript(self) -> None:

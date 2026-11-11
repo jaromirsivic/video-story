@@ -52,6 +52,7 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
     session_id = session_id or new_session_id(config.recording_folder)
     paths = SessionPaths(config.recording_folder, session_id)
     controller = SessionController(config, platform, paths)
+    controller.config_file = config_file
     if not status.supported:
         controller.fail(status.reason, code="UNSUPPORTED_PLATFORM")
         QMessageBox.critical(None, "Video Story", status.reason)

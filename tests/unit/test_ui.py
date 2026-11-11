@@ -499,9 +499,13 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     ]
     assert form.itemAt(5, form.ItemRole.LabelRole).widget().text() == "Computer Audio"
     assert form.itemAt(6, form.ItemRole.LabelRole).widget().text() == "Mouse"
-    assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
-    assert form.itemAt(8, form.ItemRole.LabelRole).widget().text() == "Archive After"
-    assert form.itemAt(9, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Live Transcription"
+    assert form.itemAt(8, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
+    assert form.itemAt(9, form.ItemRole.LabelRole).widget().text() == "Archive After"
+    assert form.itemAt(10, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert dialog.live_combo.currentData() == "light"  # the default
+    assert [dialog.live_combo.itemData(i) for i in range(3)] == ["off", "light", "faster"]
+    assert dialog.live_combo.itemText(1) == "Light – low CPU use (recommended)"
     assert dialog.computer_audio_check.isChecked()  # recorded by default
     assert dialog.mouse_check.isChecked()  # recorded by default
     assert dialog.interval_spin.value() == 500 and dialog.format_combo.currentData() == "jpeg"
@@ -519,6 +523,7 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     dialog.archive_after_spin.setValue(7)
     dialog.computer_audio_check.setChecked(False)
     dialog.mouse_check.setChecked(False)
+    dialog.live_combo.setCurrentIndex(2)
     dialog._save()
     assert dialog.result_config is not None
     assert dialog.result_config.capture_interval_ms == 1000
@@ -527,8 +532,17 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert dialog.result_config.archive_after_days == 7
     assert dialog.result_config.computer_audio is False
     assert dialog.result_config.mouse_actions is False
+    assert dialog.result_config.live_transcription == "faster"
     reloaded = cfg_mod.load_config()
     assert reloaded == dialog.result_config
+
+
+def test_settings_live_transcription_is_off_and_disabled_with_whisper_cli(qtbot, tmp_path):
+    dialog = SettingsDialog(Config(recording_folder=tmp_path, whisper_backend="whisper-cli"))
+    qtbot.addWidget(dialog)
+    assert dialog.live_combo.currentData() == "off"
+    assert not dialog.live_combo.isEnabled()
+    assert dialog.values()["live_transcription"] == "light"  # the stored value is kept
 
 
 def test_settings_delete_all_asks_and_keeps_current_session(qtbot, tmp_path: Path, monkeypatch):
@@ -723,3 +737,81 @@ def test_windows_hotkey_message_reaches_the_shortcut(qtbot):
     assert event_filter.nativeEventFilter(b"windows_generic_MSG", pointer)[0] is False
     keys._registered.clear()  # nothing to unregister
     keys.disable()
+
+
+def test_controller_transcribes_while_recording_and_saves_it(controller, monkeypatch):
+    """Record starts the live transcription; saving stops it and keeps its transcript."""
+    import sys as _sys
+    import time
+
+    import video_story.host.controller as ctl
+    from video_story.core.manifest import read_manifest
+    from video_story.core.transcript import read_transcript
+    from video_story.host.live_transcription import LiveTranscriber
+
+    event = {
+        "event": "committed",
+        "segments": [{"start_ms": 0, "end_ms": 2000, "text": "Dobrý den."}],
+        "transcribed_ms": 2500,
+        "language": "cs",
+        "start_ms": 0,
+        "end_ms": 2500,
+        "cut": "pause",
+        "speech": True,
+        "seconds": 1.0,
+    }
+    script = (
+        "import json, sys\n"
+        "print(json.dumps({'event': 'start', 'threads': 4, 'priority': 'background'}), "
+        "flush=True)\n"
+        f"print(json.dumps({event!r}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    monkeypatch.setattr(ctl, "live_transcription_available", lambda _c: None)
+    created: list[LiveTranscriber] = []
+
+    def create() -> LiveTranscriber:
+        live = LiveTranscriber(
+            controller.paths,
+            controller.config,
+            command=lambda _p, _m: [_sys.executable, "-c", script],
+        )
+        created.append(live)
+        return live
+
+    monkeypatch.setattr(controller, "create_live_transcriber", create)
+    controller.start_recording()
+    assert controller.live is created[0]
+    deadline = time.monotonic() + 10
+    while created[0].transcribed_ms < 2500 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    final_dir = controller.process()
+    assert controller.live is None and not created[0].running
+    transcript = read_transcript(controller.paths.transcript_json_path(final_dir))
+    assert not transcript.complete and transcript.transcribed_ms == 2500
+    assert [s.text for s in transcript.segments] == ["Dobrý den."]
+    manifest = read_manifest(controller.paths.manifest_path(final_dir))
+    assert manifest.live_transcription["windows"] == 1
+    assert manifest.live_transcription["priority"] == "background"
+
+
+def test_discard_stops_the_live_transcription(controller, monkeypatch):
+    import video_story.host.controller as ctl
+
+    stopped: list[bool] = []
+
+    class FakeLive:
+        def start(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            stopped.append(True)
+
+        def info(self, recorded_ms=None):
+            return {"mode": "light"}
+
+    monkeypatch.setattr(ctl, "live_transcription_available", lambda _c: None)
+    monkeypatch.setattr(controller, "create_live_transcriber", FakeLive)
+    controller.start_recording()
+    controller.discard()
+    assert stopped == [True] and controller.live is None

@@ -640,6 +640,11 @@ class ControlWindow(QWidget):
         remaining = max(0, self.controller.config.auto_stop_ms - recorder.elapsed_ms)
         keypoints = len(getattr(recorder, "keypoints", None) or ())
         suffix = f"  |  {keypoints} keypoint{'s' if keypoints != 1 else ''}" if keypoints else ""
+        live_tick = getattr(self.controller, "live_tick", None)
+        lag = live_tick() if live_tick is not None else None
+        if isinstance(lag, int):
+            # How far the transcription while recording is behind the recording.
+            suffix += f"  |  text −{format_timestamp(lag)[3:-4]}"
         self.status_label.setText(
             f"Recording {elapsed[:-4]}  |  auto stop in {format_timestamp(remaining)[:-4]}  |  "
             f"{len(recorder.screens)} screen(s), {recorder.frame_count} frames" + suffix

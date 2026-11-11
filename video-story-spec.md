@@ -1,6 +1,6 @@
 # Video Story – specifikace
 
-Stav: **platný popis aktuálního chování aplikace** (10. 11. 2026). Tento dokument se udržuje spolu s kódem; když se chování změní, mění se i tady. Nahrazuje původní zadání v1 a rozšíření v2 ([video-story-spec-v2.md](video-story-spec-v2.md), ponecháno jako historický záznam). Implementační plány ([implementation-plan.md](implementation-plan.md), [implementation-plan-editor.md](implementation-plan-editor.md), [implementation-plan-mouse.md](implementation-plan-mouse.md)) popisují, jak návrh vznikal, a tam, kde se s tímto dokumentem liší, neplatí. Ověření je v [tests/manual/acceptance.md](tests/manual/acceptance.md).
+Stav: **platný popis aktuálního chování aplikace** (11. 11. 2026). Tento dokument se udržuje spolu s kódem; když se chování změní, mění se i tady. Nahrazuje původní zadání v1 a rozšíření v2 ([video-story-spec-v2.md](video-story-spec-v2.md), ponecháno jako historický záznam). Implementační plány ([implementation-plan.md](implementation-plan.md), [implementation-plan-editor.md](implementation-plan-editor.md), [implementation-plan-mouse.md](implementation-plan-mouse.md), [implementation-plan-live-transcription.md](implementation-plan-live-transcription.md)) popisují, jak návrh vznikal, a tam, kde se s tímto dokumentem liší, neplatí. Ověření je v [tests/manual/acceptance.md](tests/manual/acceptance.md).
 
 ## 1. Účel
 
@@ -39,7 +39,7 @@ Po pokynu „Start Video Story“ agent spustí `run --detach` a otevře se mal�
 
 Klávesové zkratky Stop, Keypoint a Draw platí jen během nahrávání; tlačítka je ukazují v závorce za názvem i v tooltipu. Na Windows fungují v celém systému (ať je vpředu kterákoli aplikace, stisk do ní nedojde), na Linuxu a macOS jen když má fokus okno Video Story. Kombinaci, kterou už zabrala jiná aplikace, Video Story použije jen ve svých oknech. Na klávesnicích s AltGr ji Windows hlásí jako Ctrl+Alt, takže AltGr+S/K/D během nahrávání zkratku také spustí.
 
-Stavový řádek ukazuje uplynulý čas, čas do automatického zastavení, počet obrazovek, snímků a keypointů. Zavření okna před nahráváním ukončí relaci stavem `cancelled`.
+Stavový řádek ukazuje uplynulý čas, čas do automatického zastavení, počet obrazovek, snímků a keypointů a při přepisu během nahrávání (kap. 6) i to, o kolik přepis zaostává (`text −0:25`). Zavření okna před nahráváním ukončí relaci stavem `cancelled`.
 
 ## 5. Nastavení
 
@@ -54,6 +54,7 @@ Dialog **Settings** nabízí položky v tomto pořadí; ostatní klíče `config
 | Audio Input | `audio_input` | systémový výchozí vstup | – |
 | Computer Audio (Record computer audio) | `computer_audio` | zapnuto | zatím jen Windows; jinde zašedlé |
 | Mouse (Record mouse actions) | `mouse_actions` | zapnuto | zatím jen Windows; jinde zašedlé. Jeden přepínač pro všechno: akce myši, gesta touchpadu, titulky oken, prvky pod myší a jejich obsah |
+| Live Transcription | `live_transcription` | **Light – low CPU use (recommended)** | **Off – transcribe in the editor**, Light, **Faster – more CPU** (kap. 6); s backendem `whisper-cli` zašedlé (Off) |
 | Auto Stop Recording | `auto_stop_minutes` | 120 min | 1–1440 |
 | Archive After | `archive_after_days` | 30 dní | 1–3650 |
 | Recordings | – | **Open Folder**, **Delete All Recordings** (s potvrzením; relace otevřeného okna se nemaže) | – |
@@ -77,7 +78,12 @@ Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho re
   - titulek a proces okna jednou na okno (při změně titulku znovu).
   Hook myši i UI Automation běží ve dvou malých pomocných procesech, aby nezpomalovaly kurzor ani okno; skončí spolu s Video Story. Když něco z toho nejde (např. to zablokuje bezpečnostní politika), nahrává se dál bez toho a manifest to v sekci `mouse` řekne (jinak `null`); `doctor` ukáže, co jde.
 - **Keypointy:** okamžiky označené tlačítkem Keypoint (`Ctrl+Alt+K`); ukládají se do `manifest.json` hned při vložení.
-- **Manifest:** `manifest.json` vzniká při stisku Record (obrazovky, nastavení, čas začátku) a doplňuje se při uložení. Pole `stop_reason` říká, proč nahrávka skončila sama (`auto_stop`, `low_disk`, `capture_failed`, `recovered`), `frames.failed_grabs` počet nepořízených snímků.
+- **Přepis během nahrávání** (Live Transcription, výchozí Light): od stisku Record se řeč přepisuje průběžně, takže editoru po Stopu zbývá jen konec. Přepis běží v samostatném procesu se sníženou prioritou, aby nebrzdil práci ani nahrávání:
+  - **Light** – nejnižší priorita (Windows: background mode = procesor, disk i paměť až po všem ostatním; Linux `SCHED_IDLE`; macOS `PRIO_DARWIN_BG`), čtvrtina logických procesorů (2–8 vláken);
+  - **Faster** – priorita mírně pod normální, polovina procesorů (2–16 vláken);
+  - **Off** – přepisuje až editor.
+  Model, dekódování a mix stop (mikrofon + zvuk počítače) jsou stejné jako v editoru. Zvuk se bere po oknech do 30 s, která končí v pauze řeči (nejdřív v mixu, pak jen v mikrofonu, jinak natvrdo po 30 s, a pak se poslední, možná useknutý segment přepíše znovu v dalším okně). Okno bez řeči se whisperu nepředá. Jazyk se určí z prvního okna s řečí a pak zůstane pro celou nahrávku (delší pasáže v jiném jazyce se proto mohou přeložit). Dosavadní text se whisperu jako kontext (prompt) nepředává: měření ukázalo, že slova nezlepší a titulky slije do dlouhých bloků. Hotová okna se ukládají do `transcript.json`/`.txt` pracovní složky (`complete: false`, `transcribed_ms`). Když začnou vypadávat snímky, přepis si sám ubere polovinu vláken a po 2 minutách klidu je vrátí. Spadlý přepis se spustí znovu (nejvýš dvakrát); nahrávání tím nikdy neskončí. Na baterii se chová stejně jako na síti.
+- **Manifest:** `manifest.json` vzniká při stisku Record (obrazovky, nastavení, čas začátku) a doplňuje se při uložení. Pole `stop_reason` říká, proč nahrávka skončila sama (`auto_stop`, `low_disk`, `capture_failed`, `recovered`), `frames.failed_grabs` počet nepořízených snímků, `live_transcription` průběh přepisu během nahrávání (režim, vlákna, priorita, počet oken, kam se přepis dostal, chyba; jinak `null`).
 
 Obrazovka, kterou nejde sejmout (zamčený počítač, dialog UAC, odpojený monitor), nahrávání neukončí: po tu dobu pro ni snímky chybí a snímání se samo obnoví.
 
@@ -97,7 +103,7 @@ Nahrávání skončí samo ve třech případech a vždy stejně jako volbou Vid
 - na disku složky nahrávek zbývá **méně než 1 GB** – uživatel dostane hlášku, že je potřeba alespoň 1 GB volného místa, jinak nelze v nahrávání pokračovat;
 - nahrávku **už nejde zapisovat** nebo selže snímání – uživatel dostane hlášku s důvodem.
 
-V nahrávacím okně se nic nepřepisuje. Pokud se editor nepodaří otevřít, nahrávka zůstane uložená a relace skončí stavem `cancelled`.
+Přepis během nahrávání (kap. 6) se při ukončení nahrávání hned zastaví: rozpracované okno (nejvýš 30 s zvuku) se zahodí, hotová část se uloží s nahrávkou a editor na ni naváže. Při Discard se smaže s nahrávkou. Pokud se editor nepodaří otevřít, nahrávka zůstane uložená a relace skončí stavem `cancelled`.
 
 ## 8. Editor
 
@@ -118,7 +124,7 @@ Editor se otevře po nahrávání, nebo samostatně pokynem „Edit Video Story�
 - **Časová osa:** jedna stopa na obrazovku s miniaturami, jedna zvuková stopa, pod ní zamčená stopa **narration** (zámeček v hlavičce, poloviční výška zvukové stopy, nejde upravovat ani posouvat): obdélníček všude, kde titulek obsahuje text, v pauzách nic; od přiblížení 40 px/s ukazují obdélníčky text titulku zkrácený trojtečkou, najetí myší ukáže celý text, zoom `-`/posuvník/`+` u pravého okraje (bez tlačítka Fit; levý konec posuvníku je celá nahrávka, `Ctrl+0` tam skočí). Od náhledu ji odděluje tenká linka (táhlo rozdělovače). Kliknutí nebo tažení červené čáry po puštění tlačítka myši přesune pod ni i tmavý trojúhelník na pravítku (místo, odkud Play začne a kam se Stop vrací). Úchyty **In/Out** (nebo klávesy `I`/`O`; pole In, Out a délka ukazují `HH:MM:SS.ss`) nastavují crop společný pro všechny obrazovky; ukládá se do `crop.json` při každé změně a přichytává se ke keypointům. Kliknutí na stopu vybírá obrazovku pro náhled a export.
 - **Zvukové stopy:** v hlavičce zvukové stopy jsou za přepínačem roztažení tři ikony. **Mikrofon** a **reproduktor** zapínají a vypínají stopu mikrofonu a stopu zvuku počítače; obě jsou ve výchozím stavu zapnuté a zvuková stopa pak ukazuje i přehrává jejich součet (smíšenou vlnu). Vypnutá stopa má ikonu přeškrtnutou červeně; nahrávka bez zvuku počítače má reproduktor zašedlý a přeškrtnutý a nejde zapnout. Když jsou vypnuté obě, je ve stopě ticho. Volba se ukládá do `audio/tracks.json` a platí pro přehrávání, vlnu, přepis, Render i archivaci. Přepnutí stopy hned změní vlnu i zvuk a vzápětí se zeptá, jako by uživatel klikl na pero.
 - **Pero (nový přepis):** ikona pera píšícího na papír po potvrzení (okno „Transcribe again“: narration se smaže a vytvoří znovu přepisem aktuální zvukové stopy, opravy z Edit se ztratí; vypíše, zda je zahrnut mikrofon a zvuk počítače, a když není zahrnuto nic, že narration bude prázdná) smaže přepis a spustí přepis od začátku – i když předchozí přepis ještě běží (ten se ukončí). Bez potvrzení se nic nemění. Render a Process čekají na nový přepis. Archivovaná nahrávka ikony nemá.
-- **Přepis** běží na pozadí editoru (Whisper large-v3-turbo přes whisper.cpp, CPU, automatický jazyk). Zelená šipka pod stopou narration ukazuje postup (ve světlém motivu tmavší zelená) a odhad zbývajícího času, titulky přibývají průběžně. Zavření editoru přepis přeruší, příští výběr nahrávky naváže. Když přepis selže, tlačítko **Retry transcription** ho spustí znovu od místa, kde skončil. Halucinované titulkové kredity se zahazují.
+- **Přepis** běží na pozadí editoru (Whisper large-v3-turbo přes whisper.cpp, CPU, automatický jazyk). Zelená šipka pod stopou narration ukazuje postup (ve světlém motivu tmavší zelená) a odhad zbývajícího času, titulky přibývají průběžně. Když už část přepsalo nahrávací okno (kap. 6), editor přepisuje jen zbytek. Zavření editoru přepis přeruší, příští výběr nahrávky naváže. Navazující přepis převezme jazyk dosavadního přepisu. Když přepis selže, tlačítko **Retry transcription** ho spustí znovu od místa, kde skončil. Halucinované titulkové kredity se zahazují.
 - **Edit** opraví text titulku (časy zůstávají); změna se zapíše do `transcript.json` i `transcript.txt`.
 - **Instructions:** hlavní pokyny pro agenta k celé nahrávce, uložené v `instructions.txt`; šablony Draft Intent, Create Plan a Implement.
 - **Render:** export vybrané obrazovky a cropu do MP4 (H.264 + AAC, 24 fps, rozlišení obrazovky, kurzor dokreslen) a SRT vedle něj. Editor zůstává otevřený.
@@ -176,6 +182,7 @@ Další příkazy: `describe`, `mouse`, `status`, `sessions`, `transcribe`, `exp
 | Přepis selže | V editoru tlačítko Retry transcription; relace agenta trvá. |
 | Editor spadne | Relace skončí stavem `cancelled`; nahrávka i částečný přepis zůstávají. |
 | Chybí model nebo FFmpeg | Oznámí se při stisku Record; `video-story setup` je stáhne. |
+| Přepis během nahrávání nejde spustit nebo padá | Nahrává se dál; spadlý přepis se spustí znovu nejvýš dvakrát, pak se vzdá (manifest `live_transcription.error`). Editor přepíše, co chybí. Chybí-li model nebo FFmpeg, přepis během nahrávání vůbec neběží. |
 | Hook myši nebo UI Automation nejde spustit | Nahrává se bez nich; manifest to uvede v `mouse.error`, soubor v řádku `status`. Pomocný proces, který skončí nebo přestane posílat události, se spustí znovu (nejvýš třikrát). |
 
 ## 11. Uložení a archivace
@@ -185,7 +192,8 @@ Další příkazy: `describe`, `mouse`, `status`, `sessions`, `transcribe`, `exp
   .work/<id>/                 rozpracovaná nahrávka; trvale tu zůstává state.json, lock, ui.log
   <id>/                       uložená nahrávka (id = RRRRMMDD-HHMMSS)
     manifest.json, recording.log
-    transcript.txt, transcript.json     (complete false, dokud editor přepisuje)
+    transcript.txt, transcript.json     (complete false, dokud editor přepisuje; vznikají už během
+                                         nahrávání v .work/<id>, pokud běží Live Transcription)
     crop.json, instructions.txt         (jen pokud je uživatel nastavil)
     audio/audio.wav                     mikrofon
     audio/computer.wav                  zvuk počítače (Windows, pokud šel nahrát)
@@ -207,4 +215,5 @@ Nic se nemaže automaticky. Nahrávky starší než **Archive After** se při st
 - Zvuk a snímky nemají společné hodiny; odchylka bývá do půl sekundy.
 - Zvuk počítače se nahrává jen na Windows. Bez sluchátek zachytí mikrofon i zvuk z reproduktorů, takže ve smíšené stopě je zvuk počítače dvakrát (s malým zpožděním). Změna výchozího výstupního zařízení během nahrávání (připojená sluchátka) se do stopy nepromítne.
 - Myš se zaznamenává jen na Windows (rozhraní pro macOS a Linux je připravené, viz implementation-plan-mouse.md kap. 8). Windows zná pět tlačítek myši; další tlačítka si přemapuje software výrobce myši a jako tlačítka nedorazí. Posun a pinch na touchpadu se nad prohlížeči a moderními aplikacemi čtou jen z Precision Touchpadu; touchpad s vlastním ovladačem výrobce gesta nedá. Ve Firefoxu se místo odstavce v místě kliku čte viditelný text; aplikace bez UI Automation (např. Sublime Text) dají jen okno a proces. Prvky v oknech spuštěných jako správce Video Story bez práv správce nepřečte.
+- Přepis během nahrávání drží model Whisper v paměti (zhruba 1 GB RAM) po celou dobu nahrávání a vychází vždy z obou zvukových stop; přepnutí stopy v editoru ho zahodí a přepisuje se znovu od začátku. Přepis je jen na CPU.
 - Další otevřené body jsou v [video-story-review.md](video-story-review.md).

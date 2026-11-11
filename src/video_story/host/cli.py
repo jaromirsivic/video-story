@@ -353,7 +353,7 @@ def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
     usual error object on stderr with a non-zero exit code.
     """
     from video_story.host.runner import SessionError, resolve_session
-    from video_story.transcribe.pipeline import stream_transcription
+    from video_story.transcribe.pipeline import resume_context, stream_transcription
 
     cfg = _load(args)
     try:
@@ -367,8 +367,40 @@ def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
         sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 
+    start_ms = max(0, args.from_ms)
+    language, prompt = resume_context(paths, base, start_ms)
     return stream_transcription(
-        paths, cfg, base_dir=base, start_ms=max(0, args.from_ms), emit=emit_event
+        paths,
+        cfg,
+        base_dir=base,
+        start_ms=start_ms,
+        emit=emit_event,
+        language=language,
+        initial_prompt=prompt,
+    )
+
+
+def cmd_transcribe_live(args: argparse.Namespace) -> dict[str, Any]:
+    """Transcribe the growing audio of a recording in progress (the window's worker).
+
+    One JSON event per line on stdout (see :mod:`video_story.transcribe.live_worker`);
+    nothing is written to the recording. Ends when stdin closes or says ``stop``.
+    """
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.live_worker import run_live_worker
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    return run_live_worker(
+        paths, cfg, args.mode, emit=emit_event, stdin=sys.stdin, threads=args.threads
     )
 
 
@@ -519,6 +551,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     """Headless recording for development and integration tests (no window)."""
     from video_story.capture.recorder import Recorder
     from video_story.core.manifest import write_manifest
+    from video_story.host.live_transcription import LiveTranscriber, live_transcription_available
     from video_story.platform import get_platform
 
     cfg = _load(args)
@@ -526,6 +559,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         cfg = cfg.with_values(capture_interval_ms=args.interval)
     if args.folder:
         cfg = cfg.with_values(recording_folder=str(args.folder))
+    if args.live_transcription:
+        cfg = cfg.with_values(live_transcription=args.live_transcription)
     platform = get_platform()
     paths = SessionPaths(cfg.recording_folder, new_session_id(cfg.recording_folder))
     paths.create_work_dirs()
@@ -533,11 +568,23 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     try:
         recorder = Recorder(cfg, platform, paths, record_audio=not args.no_audio)
         recorder.start()
+        live = None
+        if not args.no_audio and live_transcription_available(cfg) is None:
+            live = LiveTranscriber(paths, cfg, config_file=_config_file(args))
+            if not live.start():
+                live = None
         deadline = time.monotonic() + args.seconds
+        next_tick = time.monotonic() + 1
         while time.monotonic() < deadline and recorder.running:
             time.sleep(0.05)
+            if live is not None and time.monotonic() >= next_tick:
+                next_tick += 1
+                live.observe_drops(recorder.dropped_ticks)
         summary = recorder.stop()
         manifest = summary.to_manifest(cfg, platform.name)
+        if live is not None:
+            live.stop()
+            manifest.live_transcription = live.info(summary.recorded_duration_ms)
         write_manifest(paths.manifest_path(paths.work_dir), manifest)
     finally:
         # The log file must be closed before the work directory is renamed (Windows).
@@ -554,6 +601,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "audio": summary.audio.__dict__ if summary.audio else None,
         "auto_stopped": summary.auto_stopped,
         "error": summary.error,
+        "failed_grabs": summary.failed_grabs,
+        "live_transcription": manifest.live_transcription,
     }
 
 
@@ -668,6 +717,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from-ms", type=int, default=0, help="resume at this time")
     p.set_defaults(func=cmd_transcribe_stream)
 
+    p = sub.add_parser("transcribe-live", help=argparse.SUPPRESS)  # internal: window worker
+    p.add_argument("directory", help="session id or work directory of a recording")
+    p.add_argument("--mode", choices=["light", "faster"], default="light")
+    p.add_argument("--threads", type=int, default=None, help="whisper threads (default: mode)")
+    p.set_defaults(func=cmd_transcribe_live)
+
     p = sub.add_parser("archive-stream", help=argparse.SUPPRESS)  # internal: editor worker
     p.add_argument("directory", help="session id or recording directory")
     p.add_argument("--stop-on-eof", action="store_true", help="stop once stdin is closed")
@@ -725,6 +780,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--folder", type=Path, help="recording folder (overrides config)")
     p.add_argument("--no-audio", action="store_true")
     p.add_argument("--keep-work", action="store_true", help="leave the recording in .work/")
+    p.add_argument(
+        "--live-transcription",
+        choices=["off", "light", "faster"],
+        help="transcribe while recording (overrides config)",
+    )
     p.set_defaults(func=cmd_record)
 
     return parser

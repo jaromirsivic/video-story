@@ -86,6 +86,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
         "ffmpeg",
         "model",
         "backend",
+        "live_transcription",
         "recording_folder",
         "config",
     }
@@ -94,6 +95,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
     assert "screen1 1920x1080 (primary)" in checks["screens"]["detail"] and platform.prepared
     assert "USB Mic" in checks["audio"]["detail"]
     assert checks["computer_audio"]["detail"] == "recorded from Speakers (loopback)"
+    assert checks["live_transcription"]["detail"].startswith("light: ")
     assert checks["ffmpeg"]["detail"].startswith("ffmpeg 7.1")
     assert "SHA-256 verified" in checks["model"]["detail"]
     assert report["ffmpeg"] == str(tmp_path / "ffmpeg")

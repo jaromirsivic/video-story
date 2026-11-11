@@ -43,6 +43,17 @@ from video_story.core.config import (
 
 log = logging.getLogger(__name__)
 
+LIVE_TRANSCRIPTION_CHOICES = (
+    ("off", "Off – transcribe in the editor"),
+    ("light", "Light – low CPU use (recommended)"),
+    ("faster", "Faster – more CPU"),
+)
+LIVE_TRANSCRIPTION_TOOLTIP = (
+    "Transcribes your speech while you record, so the editor has less left to do. Light "
+    "uses spare CPU only; Faster uses more CPU but still leaves room for your work. The "
+    "speech-to-text runs on this computer."
+)
+
 SYSTEM_DEFAULT_LABEL = "System default input"
 
 
@@ -141,6 +152,21 @@ class SettingsDialog(QDialog):
         if sys.platform != "win32":
             self.mouse_check.setEnabled(False)
         form.addRow("Mouse", self.mouse_check)
+
+        # 4d. Live Transcription: transcribe while recording
+        self.live_combo = QComboBox()
+        for value, label in LIVE_TRANSCRIPTION_CHOICES:
+            self.live_combo.addItem(label, value)
+        self.live_combo.setCurrentIndex(max(0, self.live_combo.findData(config.live_transcription)))
+        self.live_combo.setToolTip(LIVE_TRANSCRIPTION_TOOLTIP)
+        if config.whisper_backend != "pywhispercpp":
+            self.live_combo.setCurrentIndex(0)
+            self.live_combo.setEnabled(False)
+            self.live_combo.setToolTip(
+                "Transcribing while recording needs the built-in whisper backend "
+                '(whisper_backend "pywhispercpp"); with whisper-cli the editor transcribes.'
+            )
+        form.addRow("Live Transcription", self.live_combo)
 
         # 5. Auto Stop Recording
         self.auto_stop_spin = QSpinBox()
@@ -265,6 +291,8 @@ class SettingsDialog(QDialog):
 
     def values(self) -> dict[str, object]:
         data = self._config.to_json_dict()
+        if self.live_combo.isEnabled():
+            data["live_transcription"] = self.live_combo.currentData()
         data.update(
             {
                 "recording_folder": self.folder_edit.text().strip(),

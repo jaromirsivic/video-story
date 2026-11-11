@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+import numpy as np
+
 from video_story.core.config import Config, plugin_root
 from video_story.host.downloads import (
     DownloadError,
@@ -234,6 +236,48 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path | Sequence[Path], dst: Path) -> 
         raise FfmpegError(f"ffmpeg produced no audio for {names}: {tail or 'empty output'}")
 
 
+def resample_to_16k(ffmpeg: Path, samples: np.ndarray, rate: int) -> np.ndarray:
+    """Mono int16 ``samples`` at ``rate`` resampled to 16 kHz by ffmpeg through pipes
+    (the same resampler :func:`convert_to_16k_mono` uses, without temporary files)."""
+    data = np.asarray(samples, dtype=np.int16)
+    if rate == 16000 or len(data) == 0:
+        return data
+    cmd = [
+        str(ffmpeg),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(int(rate)),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=data.astype("<i2").tobytes(),
+            capture_output=True,
+            creationflags=_creation_flags(),
+        )
+    except OSError as exc:
+        raise FfmpegError(f"cannot run ffmpeg {ffmpeg}: {exc}") from exc
+    if proc.returncode != 0:
+        tail = "\n".join(proc.stderr.decode("utf-8", "replace").strip().splitlines()[-10:])
+        raise FfmpegError(f"ffmpeg failed with exit code {proc.returncode}: {tail}")
+    return np.frombuffer(proc.stdout, dtype="<i2").astype(np.int16)
+
+
 # Download ---------------------------------------------------------------------
 
 
@@ -425,5 +469,6 @@ __all__ = [
     "find_ffmpeg",
     "platform_tag",
     "resolve_btbn_source",
+    "resample_to_16k",
     "resolve_jvs_source",
 ]

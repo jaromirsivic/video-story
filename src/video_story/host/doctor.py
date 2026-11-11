@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -292,6 +293,20 @@ def check_backend(config: Config) -> Check:
     return Check("backend", True, detail)
 
 
+def check_live_transcription(config: Config) -> Check:
+    """Transcription while recording (never fails: the editor transcribes anyway)."""
+    mode = config.live_transcription
+    if mode == "off":
+        return Check("live_transcription", True, "switched off (transcribed in the editor)")
+    if config.whisper_backend != "pywhispercpp":
+        return Check("live_transcription", True, "not available with whisper-cli")
+    from video_story.transcribe.live import live_threads
+
+    threads = live_threads(mode, os.cpu_count())
+    priority = "background (idle) priority" if mode == "light" else "below normal priority"
+    return Check("live_transcription", True, f"{mode}: {threads} threads, {priority}")
+
+
 def check_recording_folder(config: Config) -> Check:
     folder = config.recording_folder
     try:
@@ -336,6 +351,7 @@ def run_doctor(config: Config, fix: bool = False, download_model: bool = False) 
     report.add(check_ffmpeg(config, fix, report))
     report.add(check_model(config, download_model, report))
     report.add(check_backend(config))
+    report.add(check_live_transcription(config))
     report.add(check_recording_folder(config))
     report.add(check_config(report))
     return report.to_dict()
