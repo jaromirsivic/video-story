@@ -58,7 +58,8 @@ While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks
 current moment as important (the button counts down 3, 2, 1 before the next one), and
 **Draw** (`Ctrl+Space` or `Ctrl+F1`) switches the drawing layer on and off (leaving it
 removes the shapes; the timeline shows them as `REMOVED`). While drawing, the user picks
-rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors, and **Sketch**
+rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors (Shift makes a
+square, a circle, a closed brush shape or connected lines), and **Sketch**
 (`S`) swaps every screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH
 off` in the timeline). The window can also be
 hidden to the system tray (a click on the tray icon shows it again). The user can press
@@ -143,7 +144,13 @@ line, ordered by time in milliseconds since the recording started:
   released, so the geometry is final. Ids count 1, 2, ... in the order the shapes were
   finished. `(drawn before the range)` marks a shape already on screen when the crop
   starts. Recordings made before shapes had ids say `seen <ms> to <ms>` instead of
-  press and release times.
+  press and release times. Drawn with Shift: `(square, Shift)`, `(circle, Shift)`,
+  `(closed shape, Shift)` - a brush stroke whose end joins its start, usually the user
+  circling an area they mean by "this" - and `(connected lines group g, segment n)` -
+  lines drawn one after another, each starting where the previous one ended (one route
+  or outline; read them in segment order). A line or an arrow drawn across screens is
+  stored as one piece per screen with the same `group` (`(... split at a screen edge,
+  group g)`); the arrow's head is on the piece whose tool is `arrow`.
 - `REMOVED` - shapes that disappeared (Undo, Clear, the eraser, or the drawing layer
   was closed). `RESTORED` - shapes the eraser removed that Undo brought back (same id
   and geometry as their `DRAW` line).
@@ -225,7 +232,8 @@ dialog here", the look of something). Skip the rest.
   repeated list of shapes (already in the timeline) by `drawing_ids`. Without it each
   frame carries `drawings`: every finished shape on screen with `id`, `tool`, `color`,
   `screen`, `started_ms`, `finished_ms` and `from`/`to` or `path` (points
-  `{screen, x, y}`).
+  `{screen, x, y}`), plus `shift`, `closed`, `group`, `segment` and `part_of` when they
+  apply (see `DRAW`).
 - Avoid `--screen all` and `--window` unless one image does not settle it; they list
   many frames.
 

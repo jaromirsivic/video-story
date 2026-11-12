@@ -207,10 +207,10 @@ def test_keyboard_shortcuts(overlay, qtbot):
     drag(window, [(30, 30), (40, 40)])
     qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_alt)  # Ctrl+Alt+C no longer clears
+    qtbot.keyClick(window, Qt.Key.Key_C)  # a plain C no longer clears
     assert len(overlay.shapes()) == 1
-    qtbot.keyClick(window, Qt.Key.Key_C)
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_alt)
     assert overlay.shapes() == []
     qtbot.keyClick(window, Qt.Key.Key_E)
     assert overlay.tool is Tool.ELLIPSE
@@ -225,7 +225,7 @@ def test_keyboard_shortcuts(overlay, qtbot):
 
 
 def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
-    """Esc / Ctrl+Z / C and the other keys are application-wide while drawing."""
+    """Esc / Ctrl+Z / Ctrl+Alt+C and the other keys are application-wide while drawing."""
     from PySide6.QtWidgets import QWidget
 
     other = QWidget()
@@ -237,7 +237,7 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     drag(window, [(10, 10), (40, 40)])
     drag(window, [(50, 50), (80, 80)])
     shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
-    assert set(shortcuts) == {"Esc", "Ctrl+Z", "C", "S", "R", "E", "L", "B", "A", "U"} | {
+    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Alt+C", "S", "R", "E", "L", "B", "A", "U"} | {
         str(n) for n in range(1, 10)
     }
     assert all(
@@ -246,7 +246,8 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     )
     qtbot.keyClick(other, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    qtbot.keyClick(other, Qt.Key.Key_C)
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    qtbot.keyClick(other, Qt.Key.Key_C, ctrl_alt)
     assert overlay.shapes() == []
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         qtbot.keyClick(other, Qt.Key.Key_Escape)
@@ -498,7 +499,7 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
     assert tools == ["(R)", "(E)", "(L)", "(B)", "(A)", "(U)"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
-    assert actions == ["Sketch (S)", "Undo (Ctrl+Z)", "Clear (C)"]
+    assert actions == ["Sketch (S)", "Undo (Ctrl+Z)", "Clear (Ctrl+Alt+C)"]
 
     # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
     start = toolbar.pos()

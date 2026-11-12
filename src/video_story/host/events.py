@@ -37,7 +37,13 @@ LEGEND = (
     "`frames --at <ms>`). SAY: speech with the cursor at its start and end. "
     "DRAW #id: a finished shape (pressed..released) with geometry in pixels of that "
     "screen's image and the frames before and after it; (on the sketch canvas): drawn "
-    "on the white canvas, not on the screen. REMOVED: shapes gone (Undo, Clear, the "
+    "on the white canvas, not on the screen. (square, Shift) / (circle, Shift): drawn "
+    "holding Shift on purpose; (closed shape, Shift): a brush stroke whose end joins its "
+    "start - usually the user circles an area meaning 'this'; (connected lines group g, "
+    "segment n): lines drawn one after another with Shift, each starting where the "
+    "previous one ended - one route or outline; (... split at a screen edge, group g): one "
+    "line or arrow that crosses screens, stored as one piece per screen (the arrow's head "
+    "is on the piece with tool arrow). REMOVED: shapes gone (Undo, Clear, the "
     "Eraser or the drawing layer closed). RESTORED: shapes back (Undo of an Eraser "
     "stroke). SKETCH on / off: every screen shows a plain white canvas instead of the "
     "screen - the user sketches an idea there. CLIPBOARD: text the user copied. CURSOR: the "
@@ -158,6 +164,27 @@ def _geometry(shape: dict[str, Any]) -> str:
         return f"from {_point(shape.get('from'))} to {_point(shape.get('to'))}"
     # rectangle, ellipse (its bounding box)
     return f"corners {_point(shape.get('from'))} {_point(shape.get('to'))}"
+
+
+def _shape_note(shape: dict[str, Any]) -> str:
+    """What Shift and splitting at screen edges made of a shape ("" for a plain one)."""
+    tool = shape.get("tool")
+    notes: list[str] = []
+    if shape.get("shift"):
+        kind = {"rectangle": "square", "ellipse": "circle", "brush": "closed shape"}.get(str(tool))
+        if kind:
+            notes.append(f"{kind}, Shift")
+    group, segment = shape.get("group"), shape.get("segment")
+    if isinstance(group, int):
+        if isinstance(segment, int):
+            notes.append(f"connected lines group {group}, segment {segment}")
+        elif shape.get("part_of") == "arrow":
+            notes.append(f"shaft of an arrow split at a screen edge, group {group}")
+        elif tool == "arrow":
+            notes.append(f"head part of an arrow split at a screen edge, group {group}")
+        else:
+            notes.append(f"part of a line split at a screen edge, group {group}")
+    return "".join(f" ({note})" for note in notes)
 
 
 def _zoom_text(entry: dict[str, Any]) -> str:
@@ -312,7 +339,7 @@ def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, 
                 released,
                 1,
                 f"{released} DRAW #{shape.label} {data.get('tool')} {data.get('color')} "
-                f"{data.get('screen')} {_geometry(data)}{zoom_note} "
+                f"{data.get('screen')} {_geometry(data)}{_shape_note(data)}{zoom_note} "
                 f"({times}; frames {frames}){early}",
             )
         )

@@ -26,9 +26,25 @@ background is reported for the frame sidecars (:meth:`DrawingOverlay.background`
 stored with every shape.
 
 Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
-``Ctrl+Z`` undo, ``C`` clear, ``S`` sketch/screen, ``R`` / ``E`` / ``L`` / ``B`` /
-``A`` / ``U`` select a tool, ``1``-``9`` a color. On the overlay windows also ``0``
-resets the zoom.
+``Ctrl+Z`` undo (nothing while Shift is held), ``Ctrl+Alt+C`` clear, ``S``
+sketch/screen, ``R`` / ``E`` / ``L`` / ``B`` / ``A`` / ``U`` select a tool, ``1``-``9``
+a color. On the overlay windows also ``0`` resets the zoom.
+
+Shift (left button only; the right-button arrow and the eraser ignore it): the
+rectangle becomes a square and the ellipse a circle while Shift is held; a brush
+stroke started with Shift held is a closed shape (its end joins its first point) that
+is finished by releasing Shift or the button. Lines: releasing the button with Shift
+held leaves the line's end following the cursor; every press while Shift is held ends
+it there and starts the next line from that point (connected lines, one ``group``);
+releasing Shift ends the line at once when no button is held, else at the button's
+release. Shift is read from the mouse events and polled while a shape is being drawn
+(the overlay need not have the keyboard focus).
+
+Lines and arrows can cross screens: while drawn they live in global coordinates in
+:class:`DrawingOverlay` and every window paints its part; when finished they are split
+at the screen edges into one shape per screen (the same ``group``; the pieces of an
+arrow without the head are lines with ``part_of: "arrow"``). Undo and the eraser treat
+the pieces of one split shape as one.
 
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
 once; the mouse wheel zooms that screen's picture in (up to 800 %) around the cursor
@@ -55,6 +71,7 @@ recorder reads them from its capture thread at every tick. A shape therefore ent
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -136,7 +153,8 @@ TOOL_ICON_INK = QColor("#000000")  # the toolbar has fixed light colors in every
 ERASER_TOLERANCE = 6.0  # on-screen pixels around a shape's line that the eraser hits
 SKETCH_COLOR = QColor("#FFFFFF")  # the sketch canvas
 UNDO_SHORTCUT = "Ctrl+Z"
-CLEAR_SHORTCUT = "C"
+CLEAR_SHORTCUT = "Ctrl+Alt+C"
+SHIFT_POLL_MS = 30  # how often Shift is polled while a shape is being drawn
 SKETCH_SHORTCUT = "S"
 SKETCH_LABEL = "Sketch"  # the button while the screens are shown (switches to sketch)
 SCREEN_LABEL = "Screen"  # the button while sketching (switches back to the screens)
@@ -161,10 +179,21 @@ class Background(StrEnum):
 DEFAULT_TOOL = Tool.RECTANGLE  # the tool selected when the overlay is created
 # Tool buttons, left to right: (tool, name, key, tooltip text).
 TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
-    (Tool.RECTANGLE, "Rectangle", "R", "drag from corner to corner"),
-    (Tool.ELLIPSE, "Ellipse", "E", "drag from corner to corner of its bounding box"),
-    (Tool.LINE, "Line", "L", "drag from start to end"),
-    (Tool.BRUSH, "Brush", "B", "freehand line"),
+    (Tool.RECTANGLE, "Rectangle", "R", "drag from corner to corner; Shift: a square"),
+    (
+        Tool.ELLIPSE,
+        "Ellipse",
+        "E",
+        "drag from corner to corner of its bounding box; Shift: a circle",
+    ),
+    (
+        Tool.LINE,
+        "Line",
+        "L",
+        "drag from start to end; release the button with Shift held for connected lines "
+        "(every click starts the next one, releasing Shift ends)",
+    ),
+    (Tool.BRUSH, "Brush", "B", "freehand line; hold Shift before pressing for a closed shape"),
     (Tool.ARROW, "Arrow", "A", "drag from tail to head"),
     (Tool.ERASER, "Eraser", "U", "drag across the line of a shape to remove it (Ctrl+Z undoes)"),
 )
@@ -181,6 +210,13 @@ class Shape:
     finished; 0 until then), ``started_ms`` / ``finished_ms`` (the press and the release
     on the recording timeline; ``None`` without a clock) and ``background`` (what it was
     finished on) are filled in by :class:`DrawingOverlay`.
+
+    ``shift``: drawn in a Shift mode (a square, a circle, a closed brush shape, one of
+    connected lines). ``group``: connected lines, and the pieces of a line or an arrow
+    split at screen edges, share it (``None`` otherwise); ``segment`` numbers the
+    connected lines 1, 2, ...; ``part_of`` is ``Tool.ARROW`` for the pieces of a split
+    arrow without its head. ``split`` (internal, not exported) is shared by the pieces of
+    one split shape, 0 for a shape that was not split.
     """
 
     tool: Tool
@@ -191,6 +227,16 @@ class Shape:
     started_ms: int | None = None
     finished_ms: int | None = None
     background: Background = Background.SCREEN
+    shift: bool = False
+    group: int | None = None
+    segment: int | None = None
+    part_of: Tool | None = None
+    split: int = 0
+
+    @property
+    def closed(self) -> bool:
+        """A brush stroke drawn with Shift: its end joins its first point."""
+        return self.tool is Tool.BRUSH and self.shift
 
     def is_degenerate(self) -> bool:
         if self.tool is Tool.BRUSH:
@@ -257,7 +303,60 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
     else:
         data["from"] = point(shape.points[0])
         data["to"] = point(shape.points[-1])
+    if shape.shift:
+        data["shift"] = True
+    if shape.closed:
+        data["closed"] = True
+    if shape.group is not None:
+        data["group"] = shape.group
+    if shape.segment is not None:
+        data["segment"] = shape.segment
+    if shape.part_of is not None:
+        data["part_of"] = str(shape.part_of)
     return data
+
+
+def constrain_square(start: QPointF, end: QPointF) -> QPointF:
+    """The corner opposite ``start`` of the square dragged towards ``end``.
+
+    The side is the larger of the two distances, so the square grows into the quadrant
+    of the cursor.
+    """
+    dx, dy = end.x() - start.x(), end.y() - start.y()
+    side = max(abs(dx), abs(dy))
+    return QPointF(start.x() + math.copysign(side, dx), start.y() + math.copysign(side, dy))
+
+
+def clip_segment(a: QPointF, b: QPointF, rect: QRectF) -> tuple[float, float] | None:
+    """The part of the segment ``a``-``b`` inside ``rect`` as parameters ``(t0, t1)``.
+
+    ``a + (b - a) * t`` for ``t0 <= t <= t1`` lies inside (Liang-Barsky); ``None`` when the
+    segment misses the rectangle or only touches it in a point.
+    """
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    t0, t1 = 0.0, 1.0
+    for p, q in (
+        (-dx, a.x() - rect.left()),
+        (dx, rect.right() - a.x()),
+        (-dy, a.y() - rect.top()),
+        (dy, rect.bottom() - a.y()),
+    ):
+        if p == 0:
+            if q < 0:
+                return None
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return None
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return None
+            t1 = min(t1, t)
+    if t1 < t0 or (t1 == t0 and (dx or dy)):
+        return None
+    return t0, t1
 
 
 def _arrow_head(tail: QPointF, head: QPointF) -> QPolygonF | None:
@@ -282,6 +381,8 @@ def paint_shape(painter: QPainter, shape: Shape) -> None:
     if shape.tool is Tool.BRUSH:
         if len(shape.points) == 1:
             painter.drawPoint(shape.points[0])
+        elif shape.closed:
+            painter.drawPolygon(QPolygonF(shape.points))  # no brush: the outline only
         else:
             painter.drawPolyline(QPolygonF(shape.points))
     elif shape.tool is Tool.RECTANGLE:
@@ -319,6 +420,8 @@ def shape_outline(shape: Shape) -> QPainterPath:
             path.lineTo(point)
         if len(points) == 1 or all(p == points[0] for p in points):
             path.lineTo(points[0] + QPointF(0.01, 0.0))  # a dot still has a line
+        elif shape.closed:
+            path.closeSubpath()  # the eraser also hits the joining stroke
     elif shape.tool is Tool.RECTANGLE:
         path.addRect(QRectF(points[0], points[-1]).normalized())
     elif shape.tool is Tool.ELLIPSE:
@@ -371,6 +474,10 @@ class _FloatingDrag:
     moved: bool = False  # False while it is still a click
 
 
+def _shift_in(event: QMouseEvent) -> bool:
+    return bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+
 def _overlay_window_flags() -> Qt.WindowType:
     flags = (
         Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -397,7 +504,12 @@ class OverlayWindow(QWidget):
         self._floating_drag = False  # a press on a floating window's spot moves that window
         self._erase_last: QPointF | None = None  # canvas point of an eraser drag so far
         self._erased: list[tuple[int, Shape]] = []  # (index, shape) removed by that drag
+        # Pieces of the erased split shapes that were on other windows (window, index, shape).
+        self._erased_other: list[tuple[OverlayWindow, int, Shape]] = []
+        self._raw_end: QPointF | None = None  # the cursor of a rectangle/ellipse drag
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Moves without a button reach the window too: connected lines follow the cursor.
+        self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.restore_cursor()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -557,19 +669,73 @@ class OverlayWindow(QWidget):
             index = next(i for i, s in enumerate(self._shapes) if s is shape)
             del self._shapes[index]
             self._erased.append((index, shape))
+            if shape.split:
+                # The other pieces of a line or arrow split at screen edges go with it.
+                self._erased_other.extend(self._controller._take_split_pieces(shape, self))
         self.update()
         self._controller._refresh_drawings()
 
     def _finish_erase(self) -> None:
         erased, self._erased = self._erased, []
+        other, self._erased_other = self._erased_other, []
         self._erase_last = None
         self._draw_button = Qt.MouseButton.NoButton
-        if erased:
-            self._controller._record_erase(self, erased)
+        if erased or other:
+            self._controller._record_erase(self, erased, other)
+
+    def _take_split(self, split: int) -> list[tuple[int, Shape]]:
+        """Remove the pieces of split shape ``split`` from this window: ``(index, shape)``."""
+        removed: list[tuple[int, Shape]] = []
+        index = 0
+        while index < len(self._shapes):
+            if self._shapes[index].split == split:
+                removed.append((index, self._shapes.pop(index)))
+            else:
+                index += 1
+        if removed:
+            self.update()
+            self._controller._refresh_drawings()
+        return removed
+
+    def _shaped_end(self, shape: Shape) -> QPointF:
+        """The dragged corner: the cursor, or the square's corner while Shift is held."""
+        end = self._raw_end if self._raw_end is not None else shape.points[-1]
+        if shape.tool in (Tool.RECTANGLE, Tool.ELLIPSE) and self._controller.shift_held:
+            return constrain_square(shape.points[0], end)
+        return QPointF(end)
+
+    def _on_shift_changed(self, held: bool) -> None:
+        """Shift went down or up while this window's shape is being dragged."""
+        shape = self._current
+        if shape is None:
+            return
+        if shape.tool in (Tool.RECTANGLE, Tool.ELLIPSE):
+            shape.shift = held  # a square / circle while held, free again when released
+            shape.points[-1] = self._shaped_end(shape)
+            self.update()
+        elif shape.closed and not held:
+            self._finish_current()  # releasing Shift finishes a closed brush shape
+
+    def _finish_current(self) -> None:
+        """Finish the dragged shape: store it, or drop it when it has no size."""
+        shape = self._current
+        if shape is None:
+            return
+        self._current = None
+        self._raw_end = None
+        self._draw_button = Qt.MouseButton.NoButton
+        shape.finished_ms = self._controller._now_ms()
+        if shape.is_degenerate():
+            self.update()
+            self._controller._refresh_drawings()
+        else:
+            self._controller._commit_shape(self, shape)
+        self._controller._update_shift_timer()
 
     def cancel_gesture(self) -> None:
         """Drop a drag in progress (the overlay is hidden before the button is released)."""
         self._floating_drag = False
+        self._raw_end = None
         if self._erase_last is not None:
             self._finish_erase()  # what the eraser removed so far stays removed (undoable)
         self._draw_button = Qt.MouseButton.NoButton
@@ -584,6 +750,7 @@ class OverlayWindow(QWidget):
     def clear_shapes(self) -> None:
         self._erase_last = None
         self._erased = []
+        self._erased_other = []
         if self._shapes or self._current is not None:
             self._shapes.clear()
             self._current = None
@@ -618,6 +785,9 @@ class OverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for shape in self.view_shapes():
             paint_shape(painter, shape)
+        span = self._controller._span_view_shape(self)
+        if span is not None:
+            paint_shape(painter, span)  # the line or arrow being drawn (maybe from elsewhere)
         painter.end()
 
     def event(self, event: QEvent) -> bool:
@@ -629,7 +799,13 @@ class OverlayWindow(QWidget):
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         steps = event.angleDelta().y() / 120.0
-        if not steps or not self.can_zoom() or self._current is not None or self.erasing:
+        if (
+            not steps
+            or not self.can_zoom()
+            or self._current is not None
+            or self.erasing
+            or self._controller._span is not None
+        ):
             event.ignore()
             return
         self.set_zoom(self._zoom * (ZOOM_STEP**steps), event.position())
@@ -637,11 +813,23 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         button = event.button()
+        controller = self._controller
+        if button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            controller._note_shift(_shift_in(event))  # may end connected lines
+        span = controller._span
+        if span is not None and span.waiting:
+            # Connected lines: a left press ends the line here and starts the next one;
+            # the other buttons do nothing meanwhile.
+            if button == Qt.MouseButton.LeftButton:
+                controller._chain_press(self, event.globalPosition())
+            event.accept()
+            return
         busy = (
             self._current is not None
             or self._floating_drag
             or self._pan_anchor is not None
             or self.erasing
+            or span is not None
         )
         if button == Qt.MouseButton.MiddleButton:
             if self._zoom > MIN_ZOOM and not busy:
@@ -668,22 +856,33 @@ class OverlayWindow(QWidget):
         self._controller._raise_floating()
         # The left button draws with the selected tool, the right button always an arrow.
         tool = self._controller.tool if button == Qt.MouseButton.LeftButton else Tool.ARROW
+        if tool in (Tool.LINE, Tool.ARROW):
+            # Lines and arrows are kept by the controller: they may cross screens.
+            controller._begin_span(self, tool, button, event.globalPosition())
+            event.accept()
+            return
         pos = self.to_canvas(event.position())
         self._draw_button = button
         if tool is Tool.ERASER:
             self._erased = []
+            self._erased_other = []
             self._erase_to(pos)  # a click right on a line removes that shape too
             event.accept()
             return
+        shift = controller.shift_held
         self._current = Shape(
             tool,
-            QColor(self._controller.color),
+            QColor(controller.color),
             [pos, pos],
             self.screen_index,
-            started_ms=self._controller._now_ms(),
+            started_ms=controller._now_ms(),
+            # A square / circle, or a closed brush shape (Shift must be down before the press).
+            shift=shift and tool in (Tool.RECTANGLE, Tool.ELLIPSE, Tool.BRUSH),
         )
+        self._raw_end = pos
         self.update()
-        self._controller._refresh_drawings()  # drawing_now: a shape is being drawn
+        controller._refresh_drawings()  # drawing_now: a shape is being drawn
+        controller._update_shift_timer()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -701,6 +900,13 @@ class OverlayWindow(QWidget):
             self._controller._drag_floating_to(event.globalPosition().toPoint())
             event.accept()
             return
+        controller = self._controller
+        if controller._span is not None:
+            # A line or an arrow, dragged here or (connected lines) followed from any screen.
+            controller._move_span(event.globalPosition())
+            controller._note_shift(_shift_in(event))  # releasing Shift may end the lines
+            event.accept()
+            return
         if self.erasing:
             if event.buttons() & self._draw_button:
                 self._erase_to(self.to_canvas(event.position()))
@@ -711,11 +917,16 @@ class OverlayWindow(QWidget):
         if self._current is None or not (event.buttons() & self._draw_button):
             event.ignore()
             return
+        controller._note_shift(_shift_in(event))  # may finish a closed brush shape
+        if self._current is None:
+            event.accept()
+            return
         pos = self.to_canvas(event.position())
         if self._current.tool is Tool.BRUSH:
             self._current.points.append(pos)
         else:
-            self._current.points[-1] = pos
+            self._raw_end = pos
+            self._current.points[-1] = self._shaped_end(self._current)
         # Only the screen changes: the sidecars describe the shape once it is finished.
         self.update()
         event.accept()
@@ -736,24 +947,29 @@ class OverlayWindow(QWidget):
             self._finish_erase()
             event.accept()
             return
+        controller = self._controller
+        span = controller._span
+        if span is not None and not span.waiting and event.button() == span.button:
+            controller._move_span(event.globalPosition())
+            controller._release_span(_shift_in(event))
+            event.accept()
+            return
         if self._current is None or event.button() != self._draw_button:
             event.ignore()
             return
+        controller._note_shift(_shift_in(event))  # may finish a closed brush shape
         shape = self._current
-        self._current = None
-        self._draw_button = Qt.MouseButton.NoButton
+        if shape is None:
+            event.accept()
+            return
         pos = self.to_canvas(event.position())
         if shape.tool is Tool.BRUSH:
             if pos != shape.points[-1]:
                 shape.points.append(pos)
         else:
-            shape.points[-1] = pos
-        shape.finished_ms = self._controller._now_ms()
-        if shape.is_degenerate():
-            self.update()
-            self._controller._refresh_drawings()
-        else:
-            self._controller._commit_shape(self, shape)
+            self._raw_end = pos
+            shape.points[-1] = self._shaped_end(shape)
+        self._finish_current()
         event.accept()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
@@ -767,13 +983,16 @@ class OverlayWindow(QWidget):
         modifiers = event.modifiers()
         ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         plain = not ctrl and not alt
         letter = chr(key) if ord("A") <= key <= ord("Z") else ""
-        if key == Qt.Key.Key_Escape:
+        if key == Qt.Key.Key_Shift:
+            self._controller._note_shift(True)
+        elif key == Qt.Key.Key_Escape:
             self._controller._user_close()
-        elif key == Qt.Key.Key_Z and ctrl:
+        elif key == Qt.Key.Key_Z and ctrl and not alt and not shift:
             self._controller.undo()
-        elif letter == CLEAR_SHORTCUT and plain:
+        elif key == Qt.Key.Key_C and ctrl and alt and not shift:
             self._controller.clear()
         elif letter == SKETCH_SHORTCUT and plain:
             self._controller.toggle_sketch()
@@ -787,6 +1006,13 @@ class OverlayWindow(QWidget):
             super().keyPressEvent(event)
             return
         event.accept()
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
+            self._controller._note_shift(False)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Alt+F4 and similar: leave drawing mode like Esc instead of destroying the window.
@@ -1033,12 +1259,32 @@ class OverlayToolbar(QWidget):
 
 @dataclass
 class _Action:
-    """One undoable step: ``shape`` drawn on ``window``, or the ``erased`` (index, shape)
-    pairs one eraser drag removed from it."""
+    """One undoable step: the shapes ``added`` (one, or the pieces of a line or an arrow
+    split at screen edges), or the ``(window, index, shape)`` entries one eraser drag
+    removed (in the order they were removed)."""
 
-    window: OverlayWindow
-    shape: Shape | None = None
-    erased: list[tuple[int, Shape]] = field(default_factory=list)
+    added: list[tuple[OverlayWindow, Shape]] = field(default_factory=list)
+    erased: list[tuple[OverlayWindow, int, Shape]] = field(default_factory=list)
+
+
+@dataclass
+class _Span:
+    """A line or an arrow being drawn, in global coordinates (it may cross screens)."""
+
+    tool: Tool  # LINE or ARROW
+    color: QColor
+    start: QPointF
+    end: QPointF
+    window: OverlayWindow  # where it was started (the screen ``drawing_now`` reports)
+    button: Qt.MouseButton  # the button dragging it; NoButton while connected lines wait
+    started_ms: int | None
+    group: int | None = None  # set for connected lines (from the second line on)
+    segment: int = 1
+
+    @property
+    def waiting(self) -> bool:
+        """Connected lines: the end follows the cursor without a button."""
+        return self.button == Qt.MouseButton.NoButton
 
 
 _ERASER_CURSOR: QCursor | None = None
@@ -1104,6 +1350,17 @@ class DrawingOverlay(QObject):
         self._zoom: list[dict[str, object]] = []
         self._clock: Callable[[], int] | None = None
         self._next_id = 0  # id of the last finished shape
+        self._next_group = 0  # the last group of connected lines / split shapes
+        self._next_split = 0  # the last split shape
+        self._span: _Span | None = None  # the line or arrow being drawn
+        self._shift = False  # Shift as last seen (mouse events, key events, polling)
+        # Where Shift is polled while a shape is being drawn (replaceable in tests).
+        self._shift_source: Callable[[], Qt.KeyboardModifier] = (
+            QGuiApplication.queryKeyboardModifiers
+        )
+        self._shift_timer = QTimer(self)
+        self._shift_timer.setInterval(SHIFT_POLL_MS)
+        self._shift_timer.timeout.connect(self._poll_shift)
 
     # -- public API ---------------------------------------------------------------
 
@@ -1136,6 +1393,11 @@ class DrawingOverlay(QObject):
 
     def is_visible(self) -> bool:
         return self._visible
+
+    @property
+    def shift_held(self) -> bool:
+        """Shift as last seen by the overlay (it is polled while a shape is drawn)."""
+        return self._shift
 
     def keep_above(self, window: QWidget) -> None:
         """Keep ``window`` (e.g. the control window) above the overlay while it is shown.
@@ -1208,6 +1470,7 @@ class DrawingOverlay(QObject):
             window.cancel_gesture()
             window.hide()
             window.set_snapshot(None)  # a fresh picture is grabbed at the next show()
+        self._cancel_span()
         self._refresh_drawings()
 
     def close(self) -> None:
@@ -1219,22 +1482,40 @@ class DrawingOverlay(QObject):
             self._shortcuts = []
 
     def clear(self) -> None:
+        self._cancel_span()
         for window in self._windows:
             window.clear_shapes()
         self._history.clear()
 
     def undo(self) -> None:
-        """Take back the last step: remove the last shape drawn, or bring back every
-        shape the last eraser drag removed (same id, same place in the drawing order)."""
+        """Take back the last step: remove the last shape drawn (every piece of a split
+        line or arrow), or bring back every shape the last eraser drag removed (same id,
+        same place in the drawing order). Nothing while Shift is held."""
+        if self._shift_source() & Qt.KeyboardModifier.ShiftModifier:
+            return  # Ctrl+Z in the middle of a Shift action makes no sense
         while self._history:
             action = self._history.pop()
             if action.erased:
-                action.window.restore_shapes(action.erased)
+                per_window: list[tuple[OverlayWindow, list[tuple[int, Shape]]]] = []
+                for window, index, shape in action.erased:
+                    for known, entries in per_window:
+                        if known is window:
+                            entries.append((index, shape))
+                            break
+                    else:
+                        per_window.append((window, [(index, shape)]))
+                for window, entries in per_window:
+                    window.restore_shapes(entries)
                 return
-            if action.shape is not None and action.window.remove_shape(action.shape):
+            removed = False
+            for window, shape in action.added:
+                removed = window.remove_shape(shape) or removed
+            if removed:
                 return
 
     def set_tool(self, tool: Tool) -> None:
+        if self._span is not None and self._span.waiting:
+            self._cancel_span()  # another tool ends connected lines
         self._tool = Tool(tool)
         if self._toolbar is not None:
             self._toolbar.set_tool(self._tool)
@@ -1364,6 +1645,8 @@ class DrawingOverlay(QObject):
         return None
 
     def _destroy_windows(self) -> None:
+        self._span = None
+        self._shift_timer.stop()
         for window in self._windows:
             window.hide()
             window.deleteLater()
@@ -1382,20 +1665,217 @@ class DrawingOverlay(QObject):
             return None
 
     def _commit_shape(self, window: OverlayWindow, shape: Shape) -> None:
-        if not shape.id:
-            self._next_id += 1
-            shape.id = self._next_id
-        if shape.finished_ms is None:
-            shape.finished_ms = self._now_ms()
-        if shape.started_ms is None:
-            shape.started_ms = shape.finished_ms
-        shape.background = Background.SKETCH if self._sketch else Background.SCREEN
-        window.add_shape(shape)
-        self._history.append(_Action(window, shape=shape))
+        self._commit_shapes([(window, shape)])
 
-    def _record_erase(self, window: OverlayWindow, erased: list[tuple[int, Shape]]) -> None:
-        """One eraser drag removed ``erased`` from ``window``: one undoable step."""
-        self._history.append(_Action(window, erased=list(erased)))
+    def _commit_shapes(self, parts: list[tuple[OverlayWindow, Shape]]) -> None:
+        """Store finished shapes (one, or the pieces of a split one): one undoable step."""
+        for window, shape in parts:
+            if not shape.id:
+                self._next_id += 1
+                shape.id = self._next_id
+            if shape.finished_ms is None:
+                shape.finished_ms = self._now_ms()
+            if shape.started_ms is None:
+                shape.started_ms = shape.finished_ms
+            shape.background = Background.SKETCH if self._sketch else Background.SCREEN
+            window.add_shape(shape)
+        if parts:
+            self._history.append(_Action(added=list(parts)))
+
+    def _record_erase(
+        self,
+        window: OverlayWindow,
+        erased: list[tuple[int, Shape]],
+        other: list[tuple[OverlayWindow, int, Shape]] | None = None,
+    ) -> None:
+        """One eraser drag removed ``erased`` from ``window`` (and the ``other`` pieces of
+        split shapes from other windows): one undoable step."""
+        entries = [(window, index, shape) for index, shape in erased] + list(other or [])
+        self._history.append(_Action(erased=entries))
+
+    def _take_split_pieces(
+        self, shape: Shape, origin: OverlayWindow
+    ) -> list[tuple[OverlayWindow, int, Shape]]:
+        """Remove the pieces of ``shape``'s split shape from the windows other than ``origin``."""
+        taken: list[tuple[OverlayWindow, int, Shape]] = []
+        for window in self._windows:
+            if window is not origin:
+                taken.extend(
+                    (window, index, piece) for index, piece in window._take_split(shape.split)
+                )
+        return taken
+
+    # -- Shift ----------------------------------------------------------------------
+
+    def _note_shift(self, held: bool) -> None:
+        """Shift is ``held`` (seen in a mouse or key event, or polled)."""
+        if held == self._shift:
+            return
+        self._shift = held
+        for window in list(self._windows):
+            window._on_shift_changed(held)
+        span = self._span
+        if span is not None and span.waiting and not held:
+            self._finish_span()  # releasing Shift without a button ends connected lines
+
+    def _poll_shift(self) -> None:
+        self._note_shift(bool(self._shift_source() & Qt.KeyboardModifier.ShiftModifier))
+        self._update_shift_timer()
+
+    def _update_shift_timer(self) -> None:
+        """Poll Shift only while a shape is being drawn (the overlay may lack the focus)."""
+        active = self._span is not None or any(w.current_shape is not None for w in self._windows)
+        if active and not self._shift_timer.isActive():
+            self._shift_timer.start()
+        elif not active and self._shift_timer.isActive():
+            self._shift_timer.stop()
+
+    # -- lines and arrows (they may cross screens) ------------------------------------
+
+    def _begin_span(
+        self, window: OverlayWindow, tool: Tool, button: Qt.MouseButton, global_pos: QPointF
+    ) -> None:
+        start = QPointF(global_pos)
+        self._span = _Span(
+            tool, QColor(self._color), start, QPointF(start), window, button, self._now_ms()
+        )
+        self._span_changed()
+
+    def _move_span(self, global_pos: QPointF) -> None:
+        if self._span is None:
+            return
+        self._span.end = QPointF(global_pos)
+        for window in self._windows:
+            window.update()  # only the screens change; the sidecars get the finished shape
+
+    def _release_span(self, shift: bool) -> None:
+        """The button dragging the line or arrow was released (the end is up to date)."""
+        span = self._span
+        if span is None:
+            return
+        if shift and span.tool is Tool.LINE and span.button == Qt.MouseButton.LeftButton:
+            span.button = Qt.MouseButton.NoButton  # connected lines: the end follows the cursor
+            self._note_shift(True)
+            return
+        self._finish_span()
+
+    def _chain_press(self, window: OverlayWindow, global_pos: QPointF) -> None:
+        """A left press while connected lines wait: end the line here, start the next."""
+        span = self._span
+        if span is None:
+            return
+        span.end = QPointF(global_pos)
+        pieces = self._span_pieces(span)
+        if not pieces:
+            span.button = Qt.MouseButton.LeftButton  # a press on the start: nothing to end
+            self._span_changed()
+            return
+        if span.group is None:
+            self._next_group += 1
+            span.group = self._next_group
+        now = self._now_ms()  # the end of this line is the start of the next one
+        self._commit_span(span, pieces, now)
+        start = QPointF(span.end)
+        self._span = _Span(
+            Tool.LINE,
+            QColor(span.color),
+            start,
+            QPointF(start),
+            window,
+            Qt.MouseButton.LeftButton,
+            now,
+            group=span.group,
+            segment=span.segment + 1,
+        )
+        self._span_changed()
+
+    def _finish_span(self) -> None:
+        span, self._span = self._span, None
+        if span is None:
+            return
+        pieces = self._span_pieces(span)
+        if pieces:
+            self._commit_span(span, pieces, self._now_ms())
+        self._span_changed()
+
+    def _cancel_span(self) -> None:
+        """Drop the line or arrow being drawn (the lines already finished stay)."""
+        if self._span is None:
+            return
+        self._span = None
+        self._span_changed()
+
+    def _span_changed(self) -> None:
+        for window in self._windows:
+            window.update()
+        self._refresh_drawings()
+        self._update_shift_timer()
+
+    def _span_pieces(self, span: _Span) -> list[tuple[OverlayWindow, QPointF, QPointF]]:
+        """The parts of ``span`` on every screen, from its start to its end, as canvas points
+        of that screen's window (cut at the screen edges; parts over no screen are lost)."""
+        found: list[tuple[float, OverlayWindow, QPointF, QPointF]] = []
+        for window in self._windows:
+            a = QPointF(window.mapFromGlobal(span.start))
+            b = QPointF(window.mapFromGlobal(span.end))
+            clipped = clip_segment(a, b, QRectF(window.rect()))
+            if clipped is None:
+                continue
+            t0, t1 = clipped
+            first = window.to_canvas(a + (b - a) * t0)
+            last = window.to_canvas(a + (b - a) * t1)
+            if (last - first).manhattanLength() < 1.0:
+                continue
+            found.append((t0, window, first, last))
+        found.sort(key=lambda entry: entry[0])
+        return [(window, first, last) for _t, window, first, last in found]
+
+    def _commit_span(
+        self,
+        span: _Span,
+        pieces: list[tuple[OverlayWindow, QPointF, QPointF]],
+        finished: int | None,
+    ) -> None:
+        """Store ``span`` as one shape per screen it crosses (one undoable step)."""
+        connected = span.group is not None
+        group = span.group
+        split = 0
+        if len(pieces) > 1:
+            self._next_split += 1
+            split = self._next_split
+            if group is None:
+                self._next_group += 1
+                group = self._next_group
+        parts: list[tuple[OverlayWindow, Shape]] = []
+        for index, (window, first, last) in enumerate(pieces):
+            head = span.tool is Tool.ARROW and index == len(pieces) - 1
+            shape = Shape(
+                Tool.ARROW if head else Tool.LINE,
+                QColor(span.color),
+                [first, last],
+                window.screen_index,
+                started_ms=span.started_ms,
+                finished_ms=finished,
+                shift=connected,
+                group=group,
+                segment=span.segment if connected else None,
+                part_of=Tool.ARROW if span.tool is Tool.ARROW and not head else None,
+                split=split,
+            )
+            parts.append((window, shape))
+        self._commit_shapes(parts)
+
+    def _span_view_shape(self, window: OverlayWindow) -> Shape | None:
+        """The line or arrow being drawn in ``window``'s view coordinates (for painting)."""
+        span = self._span
+        if span is None:
+            return None
+        return Shape(
+            span.tool,
+            span.color,
+            [QPointF(window.mapFromGlobal(span.start)), QPointF(window.mapFromGlobal(span.end))],
+            window.screen_index,
+        )
 
     def _refresh_drawings(self) -> None:
         if not self._visible or not self._screens:
@@ -1421,6 +1901,8 @@ class DrawingOverlay(QObject):
                 if shape.points:
                     result.append(shape_to_json(shape, screen, ratio))
             current = window.current_shape
+            if current is None and self._span is not None and self._span.window is window:
+                current = Shape(self._span.tool, self._span.color, started_ms=self._span.started_ms)
             if current is not None and drawing_now is None:
                 drawing_now = {
                     "tool": str(current.tool),
@@ -1504,8 +1986,8 @@ class DrawingOverlay(QObject):
     def _create_shortcuts(self, parent: QWidget) -> None:
         """Drawing shortcuts for every Video Story window (enabled while shown).
 
-        Esc close, Ctrl+Z undo, C clear, S sketch/screen, R / E / L / B / A / U select a
-        tool and 1-9 a palette color.
+        Esc close, Ctrl+Z undo, Ctrl+Alt+C clear, S sketch/screen, R / E / L / B / A / U
+        select a tool and 1-9 a palette color.
         """
         bindings: list[tuple[QKeySequence, object]] = [
             (QKeySequence(Qt.Key.Key_Escape), self._user_close),
@@ -1547,6 +2029,8 @@ __all__ = [
     "OverlayWindow",
     "Shape",
     "Tool",
+    "clip_segment",
+    "constrain_square",
     "erase_hits",
     "paint_shape",
     "shape_outline",

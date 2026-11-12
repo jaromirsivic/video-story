@@ -251,6 +251,49 @@ def test_ellipse_and_line_geometry(tmp_path: Path):
     assert "1400 DRAW #2 line #000000 screen1 from 10,20 to 70,80 (pressed 1300" in text
 
 
+def test_shift_shapes_connected_lines_and_split_arrows(tmp_path: Path):
+    square = {**shape("rectangle", 1, 900), "shift": True}
+    circle = {**shape("ellipse", 2, 1400), "shift": True}
+    closed = {
+        **shape("brush", 3, 1900),
+        "shift": True,
+        "closed": True,
+        "path": [{"screen": "screen1", "x": x, "y": y} for x, y in ((5, 5), (25, 5), (25, 25))],
+    }
+    first = {**shape("line", 4, 2400), "shift": True, "group": 1, "segment": 1}
+    second = {**shape("line", 5, 2900), "shift": True, "group": 1, "segment": 2}
+    shaft = {**shape("line", 6, 3400), "group": 2, "part_of": "arrow"}
+    head = {**shape("arrow", 7, 3400), "group": 2, "screen": "screen2"}
+    split_line = {**shape("line", 8, 3900), "group": 3}
+    plain = shape("rectangle", 9, 4400)
+    drawn = [square, circle, closed, first, second, shaft, head, split_line, plain]
+    ticks = {
+        t: {"drawings": [d for d in drawn if d["finished_ms"] < t]} for t in range(500, 6001, 500)
+    }
+    text = build_timeline(make_recording(tmp_path, ticks))["timeline"]
+    assert "DRAW #1 rectangle #000000 screen1 corners 10,20 70,80 (square, Shift) (pressed" in text
+    assert "DRAW #2 ellipse #000000 screen1 corners 10,20 70,80 (circle, Shift) (pressed" in text
+    assert "path in the sidecar) (closed shape, Shift) (pressed" in text
+    assert (
+        "DRAW #4 line #000000 screen1 from 10,20 to 70,80 (connected lines group 1, segment 1)"
+        in text
+    )
+    assert (
+        "DRAW #5 line #000000 screen1 from 10,20 to 70,80 (connected lines group 1, segment 2)"
+        in text
+    )
+    assert (
+        "DRAW #6 line #000000 screen1 from 10,20 to 70,80 "
+        "(shaft of an arrow split at a screen edge, group 2)" in text
+    )
+    assert (
+        "DRAW #7 arrow #000000 screen2 tail 10,20 head 70,80 "
+        "(head part of an arrow split at a screen edge, group 2)" in text
+    )
+    assert "(part of a line split at a screen edge, group 3)" in text
+    assert "DRAW #9 rectangle #000000 screen1 corners 10,20 70,80 (pressed" in text
+
+
 def test_sketch_on_off_and_shapes_on_the_canvas(tmp_path: Path):
     on_screen = shape("rectangle", 1, 900)
     on_canvas = shape("arrow", 2, 2400, background="sketch")
