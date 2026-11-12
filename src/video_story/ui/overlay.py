@@ -2,30 +2,40 @@
 
 One frameless, translucent, always-on-top window is created per connected screen so
 the user can draw annotations (brush strokes, rectangles, arrows) anywhere on the
-desktop. The windows are real, visible top-level windows that accept mouse input, so
-the drawing is part of the composited screen and therefore shows up in screenshots
-taken by ``mss``. Drawing is a mode of its own: while the overlay is shown, clicks do
-not reach the applications below it.
+desktop (rectangles, ellipses, lines, brush strokes, arrows). The windows are real,
+visible top-level windows that accept mouse input, so the drawing is part of the
+composited screen and therefore shows up in screenshots taken by ``mss``. Drawing is a
+mode of its own: while the overlay is shown, clicks do not reach the applications
+below it.
 
 A small floating toolbar (top-left of the primary screen at first; drag its title bar
 to move it whatever tool is selected, the cross closes drawing mode; black outline,
-always sized to its contents) offers Undo / Clear / Close on the first row, the tools
-Rect / Arrow / Brush (rectangle is the default) on the second and the 8-color palette
-in two rows of four below; every button names its shortcut in brackets. The left mouse
-button draws with the selected tool, the right mouse button always draws an arrow.
-Other windows (the control window) can be kept above the overlay with
-:meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
+always sized to its contents) offers Sketch/Screen / Undo / Clear on the first row, the
+tools Rectangle / Ellipse / Line / Brush / Arrow / Eraser (icon and key only; rectangle
+is the default) on the second and the 9-color palette in one row below; every button
+names its shortcut in brackets. The left mouse button draws with the selected tool (the
+eraser removes every shape whose line it touches or crosses; Undo brings them back),
+the right mouse button always draws an arrow. Other windows (the control window) can
+be kept above the overlay with :meth:`DrawingOverlay.keep_above`; like the toolbar
+they stay movable and clickable.
+
+Sketch: the Sketch/Screen button (``S``) switches the background of every screen
+between the screens as they are (the default whenever drawing mode is entered) and a
+plain white canvas to sketch on; the shapes stay where they are either way. The
+background is reported for the frame sidecars (:meth:`DrawingOverlay.background`) and
+stored with every shape.
 
 Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
-``Ctrl+Z`` undo, ``Ctrl+Alt+C`` clear, ``R`` / ``A`` / ``B`` select a tool, ``1``-``8``
-a color. On the overlay windows also ``0`` resets the zoom.
+``Ctrl+Z`` undo, ``C`` clear, ``S`` sketch/screen, ``R`` / ``E`` / ``L`` / ``B`` /
+``A`` / ``U`` select a tool, ``1``-``9`` a color. On the overlay windows also ``0``
+resets the zoom.
 
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
 once; the mouse wheel zooms that screen's picture in (up to 800 %) around the cursor
 and back out to 100 %, and the middle mouse button pans while zoomed. At 100 % the live
 desktop shows through; zoomed, the frozen picture is shown magnified (and that is what
-the recording captures). Shapes stay attached to the picture and keep their on-screen
-stroke width.
+the recording captures). On the sketch canvas the zoom works the same way on white.
+Shapes stay attached to the picture and keep their on-screen stroke width.
 
 All geometry is kept in Qt logical "canvas" coordinates of the window the shape was
 drawn in (the unzoomed screen); Qt maps them to physical pixels per screen (Windows
@@ -66,11 +76,14 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QContextMenuEvent,
+    QCursor,
     QGuiApplication,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
     QPainter,
+    QPainterPath,
+    QPainterPathStroker,
     QPaintEvent,
     QPen,
     QPixmap,
@@ -96,7 +109,14 @@ from PySide6.QtWidgets import (
 
 from video_story.core.screens import Screen
 
-from .icons import arrow_icon, draw_icon, rectangle_icon
+from .icons import (
+    arrow_icon,
+    draw_icon,
+    ellipse_icon,
+    eraser_icon,
+    line_icon,
+    rectangle_icon,
+)
 from .palette import DEFAULT_COLOR, PALETTE, PaletteColor
 
 log = logging.getLogger(__name__)
@@ -110,27 +130,45 @@ MIN_ZOOM = 1.0
 MAX_ZOOM = 8.0  # 800 %
 ZOOM_STEP = 1.25  # zoom factor per wheel notch (120 units of angle delta)
 TOOLBAR_RAISE_DELAYS_MS = (0, 150)  # re-raise the toolbar after window activation settles
-PALETTE_COLUMNS = 8  # the 8 colors are shown in one row
-TOOL_ICON_SIZE = 18  # logical pixels of the Rect / Arrow / Brush icons
+PALETTE_COLUMNS = 9  # the 9 colors are shown in one row
+TOOL_ICON_SIZE = 18  # logical pixels of the tool icons
 TOOL_ICON_INK = QColor("#000000")  # the toolbar has fixed light colors in every theme
-# Keyboard shortcut shown in brackets on every toolbar button (by button label).
-TOOLBAR_SHORTCUTS = {
-    "Undo": "Ctrl+Z",
-    "Clear": "Ctrl+Alt+C",
-    "Close": "Esc",
-    "Rect": "R",
-    "Arrow": "A",
-    "Brush": "B",
-}
+ERASER_TOLERANCE = 6.0  # on-screen pixels around a shape's line that the eraser hits
+SKETCH_COLOR = QColor("#FFFFFF")  # the sketch canvas
+UNDO_SHORTCUT = "Ctrl+Z"
+CLEAR_SHORTCUT = "C"
+SKETCH_SHORTCUT = "S"
+SKETCH_LABEL = "Sketch"  # the button while the screens are shown (switches to sketch)
+SCREEN_LABEL = "Screen"  # the button while sketching (switches back to the screens)
 
 
 class Tool(StrEnum):
     BRUSH = "brush"
     RECTANGLE = "rectangle"
+    ELLIPSE = "ellipse"
+    LINE = "line"
     ARROW = "arrow"
+    ERASER = "eraser"  # removes shapes; never a shape itself
+
+
+class Background(StrEnum):
+    """What the shapes are drawn on: the screens as they are, or the white canvas."""
+
+    SCREEN = "screen"
+    SKETCH = "sketch"
 
 
 DEFAULT_TOOL = Tool.RECTANGLE  # the tool selected when the overlay is created
+# Tool buttons, left to right: (tool, name, key, tooltip text).
+TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
+    (Tool.RECTANGLE, "Rectangle", "R", "drag from corner to corner"),
+    (Tool.ELLIPSE, "Ellipse", "E", "drag from corner to corner of its bounding box"),
+    (Tool.LINE, "Line", "L", "drag from start to end"),
+    (Tool.BRUSH, "Brush", "B", "freehand line"),
+    (Tool.ARROW, "Arrow", "A", "drag from tail to head"),
+    (Tool.ERASER, "Eraser", "U", "drag across the line of a shape to remove it (Ctrl+Z undoes)"),
+)
+TOOL_KEYS = {key: tool for tool, _name, key, _tip in TOOL_BUTTONS}
 
 
 @dataclass
@@ -138,10 +176,11 @@ class Shape:
     """One drawn annotation in the logical coordinates of its overlay window.
 
     ``points`` holds the polyline for a brush stroke and ``[start, end]`` for a
-    rectangle (two opposite corners) or an arrow (tail, head). ``id`` (1, 2, ... in the
-    order the shapes were finished; 0 until then) and ``started_ms`` / ``finished_ms``
-    (the press and the release on the recording timeline; ``None`` without a clock)
-    are filled in by :class:`DrawingOverlay`.
+    rectangle or an ellipse (two opposite corners of the bounding box), a line (start,
+    end) or an arrow (tail, head). ``id`` (1, 2, ... in the order the shapes were
+    finished; 0 until then), ``started_ms`` / ``finished_ms`` (the press and the release
+    on the recording timeline; ``None`` without a clock) and ``background`` (what it was
+    finished on) are filled in by :class:`DrawingOverlay`.
     """
 
     tool: Tool
@@ -151,6 +190,7 @@ class Shape:
     id: int = 0
     started_ms: int | None = None
     finished_ms: int | None = None
+    background: Background = Background.SCREEN
 
     def is_degenerate(self) -> bool:
         if self.tool is Tool.BRUSH:
@@ -184,10 +224,12 @@ def _screen_for_window(qscreen: QScreen, screens: list[Screen]) -> Screen | None
 def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> dict[str, object]:
     """Describe one shape in pixels of ``screen``'s image (origin top-left).
 
-    Rectangles and arrows carry ``from`` and ``to`` (two opposite corners, or tail and
-    head); brush strokes carry ``path``. Every point is ``{screen, x, y}`` like the
-    cursor entry of a sidecar. ``id``, ``started_ms`` and ``finished_ms`` say which
-    shape it is and when it was drawn (press and release on the recording timeline).
+    Rectangles, ellipses, lines and arrows carry ``from`` and ``to`` (two opposite
+    corners of the bounding box, start and end, or tail and head); brush strokes carry
+    ``path``. Every point is ``{screen, x, y}`` like the cursor entry of a sidecar.
+    ``id``, ``started_ms`` and ``finished_ms`` say which shape it is and when it was
+    drawn (press and release on the recording timeline); ``background`` whether it was
+    drawn on the screens (``screen``) or on the white sketch canvas (``sketch``).
     """
 
     def point(p: QPointF) -> dict[str, object]:
@@ -203,6 +245,7 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
         "stroke_width": round(STROKE_WIDTH * device_pixel_ratio),
         "started_ms": shape.started_ms,
         "finished_ms": shape.finished_ms,
+        "background": str(shape.background),
     }
     if shape.tool is Tool.BRUSH:
         path: list[dict[str, object]] = []
@@ -243,6 +286,10 @@ def paint_shape(painter: QPainter, shape: Shape) -> None:
             painter.drawPolyline(QPolygonF(shape.points))
     elif shape.tool is Tool.RECTANGLE:
         painter.drawRect(QRectF(shape.points[0], shape.points[-1]).normalized())
+    elif shape.tool is Tool.ELLIPSE:
+        painter.drawEllipse(QRectF(shape.points[0], shape.points[-1]).normalized())
+    elif shape.tool is Tool.LINE:
+        painter.drawLine(QLineF(shape.points[0], shape.points[-1]))
     elif shape.tool is Tool.ARROW:
         tail, head = shape.points[0], shape.points[-1]
         polygon = _arrow_head(tail, head)
@@ -254,6 +301,64 @@ def paint_shape(painter: QPainter, shape: Shape) -> None:
         painter.drawLine(shaft)
         painter.setBrush(QBrush(shape.color))
         painter.drawPolygon(polygon)
+
+
+def shape_outline(shape: Shape) -> QPainterPath:
+    """The line of ``shape`` as an unfilled path (canvas coordinates): what the eraser hits.
+
+    Rectangles and ellipses are their outlines only, so a stroke inside one leaves it
+    alone; an arrow includes its head; a brush stroke is its polyline.
+    """
+    path = QPainterPath()
+    points = shape.points
+    if not points:
+        return path
+    if shape.tool is Tool.BRUSH:
+        path.moveTo(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
+        if len(points) == 1 or all(p == points[0] for p in points):
+            path.lineTo(points[0] + QPointF(0.01, 0.0))  # a dot still has a line
+    elif shape.tool is Tool.RECTANGLE:
+        path.addRect(QRectF(points[0], points[-1]).normalized())
+    elif shape.tool is Tool.ELLIPSE:
+        path.addEllipse(QRectF(points[0], points[-1]).normalized())
+    else:  # line, arrow
+        path.moveTo(points[0])
+        path.lineTo(points[-1])
+        if shape.tool is Tool.ARROW:
+            head = _arrow_head(points[0], points[-1])
+            if head is not None:
+                path.addPolygon(head)
+                path.closeSubpath()
+    return path
+
+
+def _stroked(path: QPainterPath, width: float) -> QPainterPath:
+    stroker = QPainterPathStroker()
+    stroker.setWidth(max(width, 0.01))
+    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return stroker.createStroke(path)
+
+
+def erase_hits(shapes: list[Shape], start: QPointF, end: QPointF, reach: float) -> list[Shape]:
+    """The shapes whose line the eraser segment ``start``-``end`` touches or crosses.
+
+    ``reach`` is the half width of the band around every shape's line that counts as a
+    hit (canvas units): half the painted stroke plus the eraser's tolerance.
+    """
+    segment = QPainterPath(start)
+    segment.lineTo(end if end != start else start + QPointF(0.01, 0.0))
+    eraser = _stroked(segment, 1.0)
+    hits: list[Shape] = []
+    for shape in shapes:
+        if shape.is_degenerate():
+            continue
+        band = _stroked(shape_outline(shape), 2.0 * reach)
+        if band.intersects(eraser):
+            hits.append(shape)
+    return hits
 
 
 @dataclass
@@ -290,11 +395,24 @@ class OverlayWindow(QWidget):
         self._pan_anchor: tuple[QPointF, QPointF] | None = None  # (view press, offset)
         self._draw_button = Qt.MouseButton.NoButton  # the button dragging self._current
         self._floating_drag = False  # a press on a floating window's spot moves that window
+        self._erase_last: QPointF | None = None  # canvas point of an eraser drag so far
+        self._erased: list[tuple[int, Shape]] = []  # (index, shape) removed by that drag
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.restore_cursor()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setWindowTitle(f"Video Story drawing overlay {screen_index + 1}")
+
+    def restore_cursor(self) -> None:
+        """The cursor of the selected tool: a cross, or the eraser's circle."""
+        if self._controller.tool is Tool.ERASER:
+            self.setCursor(_eraser_cursor())
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    @property
+    def erasing(self) -> bool:
+        return self._erase_last is not None
 
     # -- shapes -------------------------------------------------------------------
 
@@ -375,13 +493,17 @@ class OverlayWindow(QWidget):
     def has_snapshot(self) -> bool:
         return self._snapshot is not None
 
+    def can_zoom(self) -> bool:
+        """Zooming needs a picture to magnify: the screen grab, or the white sketch canvas."""
+        return self._snapshot is not None or self._controller.sketch
+
     def reset_zoom(self) -> None:
         self.set_zoom(MIN_ZOOM)
 
     def set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
         """Zoom to ``zoom`` keeping the canvas point under ``anchor`` (view coords) in place."""
         zoom = min(max(zoom, MIN_ZOOM), MAX_ZOOM)
-        if self._snapshot is None:
+        if not self.can_zoom():
             zoom = MIN_ZOOM
         if anchor is None:
             anchor = QPointF(self.width() / 2, self.height() / 2)
@@ -390,7 +512,7 @@ class OverlayWindow(QWidget):
         self._set_offset(QPointF(fixed.x() - anchor.x() / zoom, fixed.y() - anchor.y() / zoom))
         if zoom == MIN_ZOOM and self._pan_anchor is not None:
             self._pan_anchor = None
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.restore_cursor()
         self.update()
         self._controller._refresh_drawings()
 
@@ -405,27 +527,63 @@ class OverlayWindow(QWidget):
         self.update()
         self._controller._refresh_drawings()
 
-    def pop_shape(self) -> Shape | None:
-        if not self._shapes:
-            return None
-        shape = self._shapes.pop()
+    def remove_shape(self, shape: Shape) -> bool:
+        """Take ``shape`` (this very object) off the window; False when it is not here."""
+        for index, candidate in enumerate(self._shapes):
+            if candidate is shape:
+                del self._shapes[index]
+                self.update()
+                self._controller._refresh_drawings()
+                return True
+        return False
+
+    def restore_shapes(self, removed: list[tuple[int, Shape]]) -> None:
+        """Put back shapes removed as ``(index, shape)`` in that order (the eraser's undo)."""
+        for index, shape in reversed(removed):
+            self._shapes.insert(min(index, len(self._shapes)), shape)
+        if removed:
+            self.update()
+            self._controller._refresh_drawings()
+
+    def _erase_to(self, pos: QPointF) -> None:
+        """Remove every shape whose line the eraser crossed from the last point to ``pos``."""
+        start = self._erase_last if self._erase_last is not None else pos
+        self._erase_last = pos
+        reach = (STROKE_WIDTH / 2 + ERASER_TOLERANCE) / self._zoom
+        hits = erase_hits(self._shapes, start, pos, reach)
+        if not hits:
+            return
+        for shape in hits:
+            index = next(i for i, s in enumerate(self._shapes) if s is shape)
+            del self._shapes[index]
+            self._erased.append((index, shape))
         self.update()
         self._controller._refresh_drawings()
-        return shape
+
+    def _finish_erase(self) -> None:
+        erased, self._erased = self._erased, []
+        self._erase_last = None
+        self._draw_button = Qt.MouseButton.NoButton
+        if erased:
+            self._controller._record_erase(self, erased)
 
     def cancel_gesture(self) -> None:
         """Drop a drag in progress (the overlay is hidden before the button is released)."""
         self._floating_drag = False
+        if self._erase_last is not None:
+            self._finish_erase()  # what the eraser removed so far stays removed (undoable)
         self._draw_button = Qt.MouseButton.NoButton
         if self._pan_anchor is not None:
             self._pan_anchor = None
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.restore_cursor()
         if self._current is not None:
             self._current = None
             self.update()
             self._controller._refresh_drawings()
 
     def clear_shapes(self) -> None:
+        self._erase_last = None
+        self._erased = []
         if self._shapes or self._current is not None:
             self._shapes.clear()
             self._current = None
@@ -442,7 +600,10 @@ class OverlayWindow(QWidget):
         # 1/255 keeps every pixel "owned" by the overlay while being invisible to the
         # eye and to screen capture (at most +-1 on a channel).
         painter.fillRect(self.rect(), HIT_TEST_FILL)
-        if self._zoom > MIN_ZOOM and self._snapshot is not None:
+        if self._controller.sketch:
+            # Sketch: a plain white canvas hides the screen (zoomed or not).
+            painter.fillRect(self.rect(), SKETCH_COLOR)
+        elif self._zoom > MIN_ZOOM and self._snapshot is not None:
             # Zoomed: show the frozen picture magnified, with crisp (unsmoothed) pixels.
             scale_x = self._snapshot.width() / max(1, self.width())
             scale_y = self._snapshot.height() / max(1, self.height())
@@ -468,7 +629,7 @@ class OverlayWindow(QWidget):
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         steps = event.angleDelta().y() / 120.0
-        if not steps or self._snapshot is None or self._current is not None:
+        if not steps or not self.can_zoom() or self._current is not None or self.erasing:
             event.ignore()
             return
         self.set_zoom(self._zoom * (ZOOM_STEP**steps), event.position())
@@ -476,7 +637,12 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         button = event.button()
-        busy = self._current is not None or self._floating_drag or self._pan_anchor is not None
+        busy = (
+            self._current is not None
+            or self._floating_drag
+            or self._pan_anchor is not None
+            or self.erasing
+        )
         if button == Qt.MouseButton.MiddleButton:
             if self._zoom > MIN_ZOOM and not busy:
                 self._pan_anchor = (event.position(), QPointF(self._offset))
@@ -504,6 +670,11 @@ class OverlayWindow(QWidget):
         tool = self._controller.tool if button == Qt.MouseButton.LeftButton else Tool.ARROW
         pos = self.to_canvas(event.position())
         self._draw_button = button
+        if tool is Tool.ERASER:
+            self._erased = []
+            self._erase_to(pos)  # a click right on a line removes that shape too
+            event.accept()
+            return
         self._current = Shape(
             tool,
             QColor(self._controller.color),
@@ -530,6 +701,13 @@ class OverlayWindow(QWidget):
             self._controller._drag_floating_to(event.globalPosition().toPoint())
             event.accept()
             return
+        if self.erasing:
+            if event.buttons() & self._draw_button:
+                self._erase_to(self.to_canvas(event.position()))
+                event.accept()
+            else:
+                event.ignore()
+            return
         if self._current is None or not (event.buttons() & self._draw_button):
             event.ignore()
             return
@@ -545,12 +723,17 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_anchor is not None:
             self._pan_anchor = None
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.restore_cursor()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._floating_drag:
             self._floating_drag = False
             self._controller._end_floating_drag(event.globalPosition().toPoint())
+            event.accept()
+            return
+        if self.erasing and event.button() == self._draw_button:
+            self._erase_to(self.to_canvas(event.position()))
+            self._finish_erase()
             event.accept()
             return
         if self._current is None or event.button() != self._draw_button:
@@ -577,28 +760,28 @@ class OverlayWindow(QWidget):
         event.accept()  # the right button draws arrows; there is no context menu
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        # Esc, Ctrl+Z and Ctrl+Alt+C are application-wide shortcuts of the controller
-        # (they work whichever Video Story window has the focus); they are handled here
-        # too in case a key event reaches the overlay without passing the shortcut map.
+        # The shortcuts are application-wide shortcuts of the controller (they work
+        # whichever Video Story window has the focus); they are handled here too in case
+        # a key event reaches the overlay without passing the shortcut map.
         key = event.key()
         modifiers = event.modifiers()
         ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        plain = not ctrl and not alt
+        letter = chr(key) if ord("A") <= key <= ord("Z") else ""
         if key == Qt.Key.Key_Escape:
             self._controller._user_close()
         elif key == Qt.Key.Key_Z and ctrl:
             self._controller.undo()
-        elif key == Qt.Key.Key_C and ctrl and alt:
+        elif letter == CLEAR_SHORTCUT and plain:
             self._controller.clear()
-        elif key == Qt.Key.Key_B and not ctrl:
-            self._controller.set_tool(Tool.BRUSH)
-        elif key == Qt.Key.Key_R and not ctrl:
-            self._controller.set_tool(Tool.RECTANGLE)
-        elif key == Qt.Key.Key_A and not ctrl:
-            self._controller.set_tool(Tool.ARROW)
-        elif key == Qt.Key.Key_0 and not ctrl:
+        elif letter == SKETCH_SHORTCUT and plain:
+            self._controller.toggle_sketch()
+        elif letter in TOOL_KEYS and plain:
+            self._controller.set_tool(TOOL_KEYS[letter])
+        elif key == Qt.Key.Key_0 and plain:
             self.reset_zoom()
-        elif Qt.Key.Key_1 <= key < Qt.Key.Key_1 + len(PALETTE) and not ctrl:
+        elif Qt.Key.Key_1 <= key < Qt.Key.Key_1 + len(PALETTE) and plain:
             self._controller.set_color(PALETTE[key - Qt.Key.Key_1])
         else:
             super().keyPressEvent(event)
@@ -615,10 +798,11 @@ class OverlayWindow(QWidget):
 
 
 class OverlayToolbar(QWidget):
-    """Floating tool window with tools, palette and Undo / Clear / Close."""
+    """Floating tool window: Sketch/Screen / Undo / Clear, the tools and the palette."""
 
     tool_selected = Signal(object)  # Tool
     color_selected = Signal(object)  # PaletteColor
+    sketch_requested = Signal()
     undo_requested = Signal()
     clear_requested = Signal()
     close_requested = Signal()
@@ -699,52 +883,44 @@ class OverlayToolbar(QWidget):
         root.setSpacing(4)
         outer.addLayout(root)
 
-        # Every button shows its keyboard shortcut in brackets after its text.
-        # Row 1: Undo / Clear / Close; row 2: Rect / Arrow / Brush (same column widths).
+        # Every button shows its keyboard shortcut in brackets (the tools only that).
+        # Row 1: Sketch/Screen / Undo / Clear, each two columns wide; row 2: the six
+        # tools, one column each.
         buttons = QGridLayout()
         buttons.setSpacing(4)
-        for column, (label, tip, signal) in enumerate(
-            (
-                ("Undo", "Undo the last shape", self.undo_requested),
-                ("Clear", "Remove all drawings", self.clear_requested),
-                ("Close", "Leave drawing mode (removes all drawings)", self.close_requested),
-            )
+        self.sketch_button = QPushButton(self)
+        self.set_sketch(False)
+        actions: list[tuple[QPushButton, Signal]] = [(self.sketch_button, self.sketch_requested)]
+        for label, shortcut, tip, signal in (
+            ("Undo", UNDO_SHORTCUT, "Undo the last shape or eraser stroke", self.undo_requested),
+            ("Clear", CLEAR_SHORTCUT, "Remove all drawings", self.clear_requested),
         ):
-            button = QPushButton(label, self)
-            button.setToolTip(tip)
+            button = QPushButton(f"{label} ({shortcut})", self)
+            button.setToolTip(f"{tip} ({shortcut})")
+            actions.append((button, signal))
+        for column, (button, signal) in enumerate(actions):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(signal.emit)
-            buttons.addWidget(button, 0, column)
+            buttons.addWidget(button, 0, 2 * column, 1, 2)
+        icons = {
+            Tool.RECTANGLE: rectangle_icon,
+            Tool.ELLIPSE: ellipse_icon,
+            Tool.LINE: line_icon,
+            Tool.BRUSH: draw_icon,
+            Tool.ARROW: arrow_icon,
+            Tool.ERASER: eraser_icon,
+        }
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for column, (tool, label, tip, icon) in enumerate(
-            (
-                (
-                    Tool.RECTANGLE,
-                    "Rect",
-                    "Rectangle: drag from corner to corner",
-                    rectangle_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
-                ),
-                (
-                    Tool.ARROW,
-                    "Arrow",
-                    "Arrow: drag from tail to head; the right mouse button always draws an arrow",
-                    arrow_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
-                ),
-                (
-                    Tool.BRUSH,
-                    "Brush",
-                    "Brush: freehand line",
-                    draw_icon(TOOL_ICON_SIZE, TOOL_ICON_INK),
-                ),
-            )
-        ):
+        for column, (tool, name, key, tip) in enumerate(TOOL_BUTTONS):
             button = QToolButton(self)
-            button.setText(label)
-            button.setIcon(icon)
+            button.setText(f"({key})")
+            button.setIcon(icons[tool](TOOL_ICON_SIZE, TOOL_ICON_INK))
             button.setIconSize(QSize(TOOL_ICON_SIZE, TOOL_ICON_SIZE))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            button.setToolTip(tip)
+            button.setToolTip(
+                f"{name} ({key}): {tip}; the right mouse button always draws an arrow"
+            )
             button.setCheckable(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -752,24 +928,20 @@ class OverlayToolbar(QWidget):
             group.addButton(button)
             buttons.addWidget(button, 1, column)
             self._tool_buttons[tool] = button
-        for button in self.findChildren(QAbstractButton):
-            if button is self.close_cross:
-                continue
-            name = button.text()
-            shortcut = TOOLBAR_SHORTCUTS[name]
-            button.setText(f"{name} ({shortcut})")
-            button.setToolTip(f"{button.toolTip()} ({shortcut})")
-        widest = max(
-            b.sizeHint().width()
-            for b in self.findChildren(QAbstractButton)
-            if b is not self.close_cross
-        )
-        for column in range(3):
+        # Equal columns: wide enough for every tool and for half of every action button
+        # (the Sketch button with either of its texts).
+        widest_tool = max(b.sizeHint().width() for b in self._tool_buttons.values())
+        widest_action = max(b.sizeHint().width() for b, _signal in actions)
+        self.set_sketch(True)
+        widest_action = max(widest_action, self.sketch_button.sizeHint().width())
+        self.set_sketch(False)
+        column_width = max(widest_tool, (widest_action - buttons.spacing() + 1) // 2)
+        for column in range(len(TOOL_BUTTONS)):
             buttons.setColumnStretch(column, 1)
-            buttons.setColumnMinimumWidth(column, widest)  # three equal columns
+            buttons.setColumnMinimumWidth(column, column_width)
         root.addLayout(buttons)
 
-        # The palette: one row of eight swatches, each labelled with its number key.
+        # The palette: one row of nine swatches, each labelled with its number key.
         grid = QGridLayout()
         grid.setSpacing(4)
         for index, entry in enumerate(PALETTE):
@@ -830,6 +1002,21 @@ class OverlayToolbar(QWidget):
         if not button.isChecked():
             button.setChecked(True)
 
+    def set_sketch(self, sketch: bool) -> None:
+        """The button names what a click switches to: Sketch on the screens, Screen while
+        sketching."""
+        if sketch:
+            self.sketch_button.setText(f"{SCREEN_LABEL} ({SKETCH_SHORTCUT})")
+            self.sketch_button.setToolTip(
+                f"Show the screens again instead of the white canvas ({SKETCH_SHORTCUT}); "
+                "the drawings stay"
+            )
+        else:
+            self.sketch_button.setText(f"{SKETCH_LABEL} ({SKETCH_SHORTCUT})")
+            self.sketch_button.setToolTip(
+                f"Sketch on a white canvas on every screen ({SKETCH_SHORTCUT}); the drawings stay"
+            )
+
     def set_color(self, hex_value: str) -> None:
         self._current_hex = hex_value.upper()
         for swatch_hex, swatch in self._swatches.items():
@@ -842,6 +1029,40 @@ class OverlayToolbar(QWidget):
                 f"QToolButton {{ background: {swatch_hex}; color: {text}; border: {border};"
                 " font-weight: bold; padding: 0px; }"
             )
+
+
+@dataclass
+class _Action:
+    """One undoable step: ``shape`` drawn on ``window``, or the ``erased`` (index, shape)
+    pairs one eraser drag removed from it."""
+
+    window: OverlayWindow
+    shape: Shape | None = None
+    erased: list[tuple[int, Shape]] = field(default_factory=list)
+
+
+_ERASER_CURSOR: QCursor | None = None
+
+
+def _eraser_cursor() -> QCursor:
+    """A small circle the size of the eraser's reach, centred on the hot spot."""
+    global _ERASER_CURSOR
+    if _ERASER_CURSOR is None:
+        radius = round(STROKE_WIDTH / 2 + ERASER_TOLERANCE)
+        size = 2 * radius + 4
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        center = QPointF(size / 2, size / 2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#FFFFFF"), 3.0))
+        painter.drawEllipse(center, radius, radius)
+        painter.setPen(QPen(QColor("#000000"), 1.5))
+        painter.drawEllipse(center, radius, radius)
+        painter.end()
+        _ERASER_CURSOR = QCursor(pixmap, size // 2, size // 2)
+    return _ERASER_CURSOR
 
 
 def _is_dark(hex_value: str) -> bool:
@@ -857,8 +1078,8 @@ class DrawingOverlay(QObject):
     Create it after ``QApplication``. :meth:`show` opens one window per screen (and
     rebuilds them if the number of screens changed since the last show); :meth:`hide`
     keeps the drawings for the next :meth:`show`; :meth:`close` destroys everything.
-    ``closed`` is emitted only when the user leaves drawing mode (Esc, Close button,
-    Alt+F4), never for :meth:`hide` / :meth:`close` called from code.
+    ``closed`` is emitted only when the user leaves drawing mode (Esc, the toolbar's
+    cross, Alt+F4), never for :meth:`hide` / :meth:`close` called from code.
     """
 
     closed = Signal()
@@ -868,8 +1089,10 @@ class DrawingOverlay(QObject):
         self._tool = DEFAULT_TOOL
         self._palette_color: PaletteColor | None = DEFAULT_COLOR
         self._color = QColor(DEFAULT_COLOR.hex)
+        self._sketch = False  # the white canvas instead of the screens
         self._windows: list[OverlayWindow] = []
-        self._history: list[OverlayWindow] = []  # window of each committed shape, in order
+        # What Undo takes back, oldest first: a shape drawn, or what one eraser drag removed.
+        self._history: list[_Action] = []
         self._toolbar: OverlayToolbar | None = None
         self._keep_above: list[QWidget] = []  # other windows kept above the overlay
         self._floating: _FloatingDrag | None = None
@@ -891,6 +1114,21 @@ class DrawingOverlay(QObject):
     @property
     def color(self) -> QColor:
         return QColor(self._color)
+
+    @property
+    def sketch(self) -> bool:
+        """True while every screen shows the white sketch canvas instead of the screen."""
+        return self._sketch
+
+    def background(self) -> str | None:
+        """``"screen"`` or ``"sketch"`` while drawing, ``None`` while the overlay is hidden.
+
+        Read by the recorder from its capture thread for the frame sidecars (a plain
+        attribute read, like :meth:`drawings`).
+        """
+        if not self._visible:
+            return None
+        return str(Background.SKETCH if self._sketch else Background.SCREEN)
 
     @property
     def windows(self) -> list[OverlayWindow]:
@@ -927,6 +1165,8 @@ class DrawingOverlay(QObject):
             self._destroy_windows()
             self._windows = [OverlayWindow(self, index) for index in range(len(screens))]
         if not self._visible:
+            # Every drawing session starts on the screens (the Sketch button).
+            self._set_sketch_state(False)
             # Grab every screen before the overlay covers it: the picture to zoom into.
             for window, screen in zip(self._windows, screens, strict=True):
                 window.set_snapshot(self._grab_screen(screen))
@@ -960,6 +1200,7 @@ class DrawingOverlay(QObject):
         self._visible = False
         self._enable_shortcuts(False)
         self._floating = None
+        self._set_sketch_state(False)
         if self._toolbar is not None:
             self._toolbar.end_drag()
             self._toolbar.hide()
@@ -983,15 +1224,45 @@ class DrawingOverlay(QObject):
         self._history.clear()
 
     def undo(self) -> None:
+        """Take back the last step: remove the last shape drawn, or bring back every
+        shape the last eraser drag removed (same id, same place in the drawing order)."""
         while self._history:
-            window = self._history.pop()
-            if window.pop_shape() is not None:
+            action = self._history.pop()
+            if action.erased:
+                action.window.restore_shapes(action.erased)
+                return
+            if action.shape is not None and action.window.remove_shape(action.shape):
                 return
 
     def set_tool(self, tool: Tool) -> None:
         self._tool = Tool(tool)
         if self._toolbar is not None:
             self._toolbar.set_tool(self._tool)
+        for window in self._windows:
+            if not window.erasing and window._pan_anchor is None:
+                window.restore_cursor()
+
+    def set_sketch(self, sketch: bool) -> None:
+        """Show the white sketch canvas (``True``) or the screens on every screen.
+
+        Nothing is removed: the shapes stay where they are on either background.
+        """
+        if not self._visible or sketch == self._sketch:
+            return
+        self._set_sketch_state(sketch)
+        for window in self._windows:
+            if not window.can_zoom():
+                window.reset_zoom()  # back on a screen that could not be grabbed
+            window.update()
+        self._refresh_drawings()
+
+    def toggle_sketch(self) -> None:
+        self.set_sketch(not self._sketch)
+
+    def _set_sketch_state(self, sketch: bool) -> None:
+        self._sketch = sketch
+        if self._toolbar is not None:
+            self._toolbar.set_sketch(sketch)
 
     def set_color(self, color: QColor | PaletteColor | str) -> None:
         if isinstance(color, PaletteColor):
@@ -1069,11 +1340,13 @@ class DrawingOverlay(QObject):
             toolbar = OverlayToolbar()
             toolbar.tool_selected.connect(self.set_tool)
             toolbar.color_selected.connect(self.set_color)
+            toolbar.sketch_requested.connect(self.toggle_sketch)
             toolbar.undo_requested.connect(self.undo)
             toolbar.clear_requested.connect(self.clear)
             toolbar.close_requested.connect(self._user_close)
             toolbar.set_tool(self._tool)
             toolbar.set_color(self._color.name().upper())
+            toolbar.set_sketch(self._sketch)
             self._create_shortcuts(toolbar)
             self._toolbar = toolbar
         return self._toolbar
@@ -1116,8 +1389,13 @@ class DrawingOverlay(QObject):
             shape.finished_ms = self._now_ms()
         if shape.started_ms is None:
             shape.started_ms = shape.finished_ms
+        shape.background = Background.SKETCH if self._sketch else Background.SCREEN
         window.add_shape(shape)
-        self._history.append(window)
+        self._history.append(_Action(window, shape=shape))
+
+    def _record_erase(self, window: OverlayWindow, erased: list[tuple[int, Shape]]) -> None:
+        """One eraser drag removed ``erased`` from ``window``: one undoable step."""
+        self._history.append(_Action(window, erased=list(erased)))
 
     def _refresh_drawings(self) -> None:
         if not self._visible or not self._screens:
@@ -1226,17 +1504,17 @@ class DrawingOverlay(QObject):
     def _create_shortcuts(self, parent: QWidget) -> None:
         """Drawing shortcuts for every Video Story window (enabled while shown).
 
-        Esc close, Ctrl+Z undo, Ctrl+Alt+C clear, R / A / B select a tool and
-        1-8 a palette color.
+        Esc close, Ctrl+Z undo, C clear, S sketch/screen, R / E / L / B / A / U select a
+        tool and 1-9 a palette color.
         """
         bindings: list[tuple[QKeySequence, object]] = [
             (QKeySequence(Qt.Key.Key_Escape), self._user_close),
-            (QKeySequence("Ctrl+Z"), self.undo),
-            (QKeySequence("Ctrl+Alt+C"), self.clear),
-            (QKeySequence("R"), lambda: self.set_tool(Tool.RECTANGLE)),
-            (QKeySequence("A"), lambda: self.set_tool(Tool.ARROW)),
-            (QKeySequence("B"), lambda: self.set_tool(Tool.BRUSH)),
+            (QKeySequence(UNDO_SHORTCUT), self.undo),
+            (QKeySequence(CLEAR_SHORTCUT), self.clear),
+            (QKeySequence(SKETCH_SHORTCUT), self.toggle_sketch),
         ]
+        for key, tool in TOOL_KEYS.items():
+            bindings.append((QKeySequence(key), lambda t=tool: self.set_tool(t)))
         for index, entry in enumerate(PALETTE):
             bindings.append((QKeySequence(str(index + 1)), lambda e=entry: self.set_color(e)))
         for sequence, slot in bindings:
@@ -1260,13 +1538,17 @@ class DrawingOverlay(QObject):
 __all__ = [
     "ARROW_HEAD_LENGTH",
     "DEFAULT_TOOL",
+    "ERASER_TOLERANCE",
     "MAX_ZOOM",
     "STROKE_WIDTH",
+    "Background",
     "DrawingOverlay",
     "OverlayToolbar",
     "OverlayWindow",
     "Shape",
     "Tool",
+    "erase_hits",
     "paint_shape",
+    "shape_outline",
     "shape_to_json",
 ]

@@ -10,7 +10,7 @@ the frame sidecars of the next tick.
 Keyboard shortcuts while recording (shown in brackets on the buttons and in their
 tooltips; system-wide on Windows, see :mod:`video_story.ui.hotkeys`): Ctrl+Alt+S Stop,
 Ctrl+Alt+K Keypoint, Ctrl+Space or Ctrl+F1 Draw. Leaving drawing mode - Esc, the Draw
-shortcut or button again, the toolbar's Close - also clears what was drawn, so the next
+shortcut or button again, the toolbar's cross - also clears what was drawn, so the next
 drawing starts on an empty screen.
 
 Two small icon buttons follow Draw: the light / dark theme of the window (the editor's
@@ -684,6 +684,7 @@ class ControlWindow(QWidget):
         drawings = getattr(self._overlay, "drawings", None)
         drawing_now = getattr(self._overlay, "drawing_now", None)
         zoom = getattr(self._overlay, "zoom", None)
+        background = getattr(self._overlay, "background", None)
         if set_screens is not None:
             set_screens(list(getattr(recorder, "screens", [])))
         clock = getattr(recorder, "clock", None)
@@ -696,6 +697,8 @@ class ControlWindow(QWidget):
             recorder.drawing_now_provider = drawing_now
         if zoom is not None:
             recorder.zoom_provider = zoom
+        if background is not None:
+            recorder.background_provider = background
 
     def _share_drawing_windows(self) -> None:
         """Tell the recorder which windows are the drawing layer (a click there is drawing,
@@ -712,7 +715,7 @@ class ControlWindow(QWidget):
         recorder.drawing_windows = handles
 
     def _overlay_closed(self) -> None:
-        """The user left drawing mode on the overlay (Esc, Close, the cross)."""
+        """The user left drawing mode on the overlay (Esc, the toolbar's cross)."""
         self._clear_overlay()
         self.draw_button.blockSignals(True)
         self.draw_button.setChecked(False)

@@ -97,10 +97,11 @@ def overlay(qtbot):
     overlay.close()
 
 
-def test_palette_has_16_unique_colors_and_red_first():
-    assert len(PALETTE) == 8
-    assert len({c.hex.upper() for c in PALETTE}) == 8
-    assert len({c.name for c in PALETTE}) == 8
+def test_palette_has_9_unique_colors_red_first_black_last():
+    assert len(PALETTE) == 9
+    assert len({c.hex.upper() for c in PALETTE}) == 9
+    assert len({c.name for c in PALETTE}) == 9
+    assert PALETTE[-1] == PaletteColor("Black", "#000000")
     assert PALETTE[0] == DEFAULT_COLOR == PaletteColor("Red", "#FF0000")
     assert DEFAULT_COLOR.rgb == (255, 0, 0)
     for entry in PALETTE:
@@ -206,15 +207,25 @@ def test_keyboard_shortcuts(overlay, qtbot):
     drag(window, [(30, 30), (40, 40)])
     qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    qtbot.keyClick(window, Qt.Key.Key_C)  # plain C no longer clears (too easy to hit)
-    assert len(overlay.shapes()) == 1
     ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_alt)
+    qtbot.keyClick(window, Qt.Key.Key_C, ctrl_alt)  # Ctrl+Alt+C no longer clears
+    assert len(overlay.shapes()) == 1
+    qtbot.keyClick(window, Qt.Key.Key_C)
     assert overlay.shapes() == []
+    qtbot.keyClick(window, Qt.Key.Key_E)
+    assert overlay.tool is Tool.ELLIPSE
+    qtbot.keyClick(window, Qt.Key.Key_L)
+    assert overlay.tool is Tool.LINE
+    qtbot.keyClick(window, Qt.Key.Key_U)
+    assert overlay.tool is Tool.ERASER
+    qtbot.keyClick(window, Qt.Key.Key_S)
+    assert overlay.sketch
+    qtbot.keyClick(window, Qt.Key.Key_S)
+    assert not overlay.sketch
 
 
 def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
-    """Esc / Ctrl+Z / Ctrl+Alt+C are application-wide while the overlay is shown."""
+    """Esc / Ctrl+Z / C and the other keys are application-wide while drawing."""
     from PySide6.QtWidgets import QWidget
 
     other = QWidget()
@@ -226,8 +237,8 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     drag(window, [(10, 10), (40, 40)])
     drag(window, [(50, 50), (80, 80)])
     shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
-    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Alt+C", "R", "A", "B"} | {
-        str(n) for n in range(1, 9)
+    assert set(shortcuts) == {"Esc", "Ctrl+Z", "C", "S", "R", "E", "L", "B", "A", "U"} | {
+        str(n) for n in range(1, 10)
     }
     assert all(
         s.context() == Qt.ShortcutContext.ApplicationShortcut and s.isEnabled()
@@ -235,8 +246,7 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     )
     qtbot.keyClick(other, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert len(overlay.shapes()) == 1
-    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-    qtbot.keyClick(other, Qt.Key.Key_C, ctrl_alt)
+    qtbot.keyClick(other, Qt.Key.Key_C)
     assert overlay.shapes() == []
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         qtbot.keyClick(other, Qt.Key.Key_Escape)
@@ -247,7 +257,7 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
 def test_right_button_always_draws_an_arrow(overlay):
     window = overlay.windows[0]
     right = Qt.MouseButton.RightButton
-    for tool in (Tool.RECTANGLE, Tool.BRUSH, Tool.ARROW):
+    for tool in (Tool.RECTANGLE, Tool.BRUSH, Tool.ARROW, Tool.ERASER):
         overlay.set_tool(tool)
         _mouse(window, QEvent.Type.MouseButtonPress, QPoint(100, 100), True, right)
         _mouse(window, QEvent.Type.MouseMove, QPoint(150, 120), True, right)
@@ -258,7 +268,7 @@ def test_right_button_always_draws_an_arrow(overlay):
         _mouse(window, QEvent.Type.MouseButtonRelease, QPoint(200, 160), False, right)
         assert overlay.tool is tool  # the selected tool is left alone
     shapes = overlay.shapes()
-    assert [s.tool for s in shapes] == [Tool.ARROW] * 3
+    assert [s.tool for s in shapes] == [Tool.ARROW] * 4
     assert all(s.points == [QPointF(100, 100), QPointF(200, 160)] for s in shapes)
     # The left button still draws with the selected tool.
     overlay.set_tool(Tool.RECTANGLE)
@@ -486,9 +496,9 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     assert toolbar is not None
     toolbar.move(QGuiApplication.primaryScreen().geometry().topLeft() + QPoint(16, 16))
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
-    assert tools == ["Rect (R)", "Arrow (A)", "Brush (B)"]
+    assert tools == ["(R)", "(E)", "(L)", "(B)", "(A)", "(U)"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
-    assert actions == ["Undo (Ctrl+Z)", "Clear (Ctrl+Alt+C)", "Close (Esc)"]
+    assert actions == ["Sketch (S)", "Undo (Ctrl+Z)", "Clear (C)"]
 
     # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
     start = toolbar.pos()
@@ -513,7 +523,7 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     overlay.show()
     assert toolbar.pos() == start + QPoint(150, 90)
 
-    # The cross leaves drawing mode like Close.
+    # The cross leaves drawing mode (there is no Close button any more).
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         toolbar.close_cross.click()
     assert not overlay.is_visible()
@@ -536,22 +546,26 @@ def test_press_on_toolbar_spot_moves_toolbar_instead_of_drawing(overlay):
 
 
 def test_toolbar_layout_rows_and_outline(overlay):
-    """Undo/Clear/Close above Rect/Arrow/Brush (with icons), one row of 8 colors below."""
+    """Sketch/Undo/Clear above the six tools (icons), one row of 9 colors below."""
     from PySide6.QtWidgets import QPushButton
 
     toolbar = overlay._toolbar
     actions = toolbar.findChildren(QPushButton)
-    tools = [toolbar._tool_buttons[t] for t in (Tool.RECTANGLE, Tool.ARROW, Tool.BRUSH)]
+    order = (Tool.RECTANGLE, Tool.ELLIPSE, Tool.LINE, Tool.BRUSH, Tool.ARROW, Tool.ERASER)
+    tools = [toolbar._tool_buttons[t] for t in order]
     assert len({b.y() for b in actions}) == 1 and len({b.y() for b in tools}) == 1
     assert actions[0].y() < tools[0].y()
-    assert [b.x() for b in actions] == [b.x() for b in tools]  # same columns
+    # Every action button spans two tool columns.
+    assert [b.x() for b in actions] == [tools[i].x() for i in (0, 2, 4)]
+    assert [b.x() for b in tools] == sorted(b.x() for b in tools)
     swatches = list(toolbar._swatches.values())
-    assert [s.text() for s in swatches] == [str(n) for n in range(1, 9)]
+    assert [s.text() for s in swatches] == [str(n) for n in range(1, 10)]
     rows = sorted({s.y() for s in swatches})
     assert len(rows) == 1 and rows[0] > tools[0].y()
     assert [s.x() for s in swatches] == sorted(s.x() for s in swatches)
     assert all(not b.icon().isNull() for b in tools)
-    assert len({b.icon().cacheKey() for b in tools}) == 3
+    assert len({b.icon().cacheKey() for b in tools}) == 6
+    assert all(b.toolTip() for b in tools)
     assert "border: 2px solid #000000" in toolbar.styleSheet()
 
 
@@ -658,3 +672,140 @@ def test_hide_resets_zoom(overlay):
     window.set_zoom(3.0)
     overlay.hide()
     assert window.zoom == 1.0 and not window.has_snapshot()
+
+
+def test_ellipse_and_line_shapes_and_json(overlay):
+    overlay.set_screens(_recorded_screens())
+    window = overlay.windows[0]
+    dpr = QGuiApplication.screens()[0].devicePixelRatio()
+    overlay.set_tool(Tool.ELLIPSE)
+    drag(window, [(100, 100), (150, 130), (200, 160)])
+    overlay.set_tool(Tool.LINE)
+    drag(window, [(300, 300), (310, 320), (400, 350)])
+    overlay.set_tool(Tool.ELLIPSE)
+    drag(window, [(500, 500), (500, 500)])  # no size: nothing drawn
+    ellipse, line = overlay.shapes()
+    assert ellipse.tool is Tool.ELLIPSE and ellipse.points == [QPointF(100, 100), QPointF(200, 160)]
+    assert line.tool is Tool.LINE and line.points == [QPointF(300, 300), QPointF(400, 350)]
+    data = overlay.drawings()
+    assert [d["tool"] for d in data] == ["ellipse", "line"]
+    assert data[0]["to"] == {"screen": "screen1", "x": round(200 * dpr), "y": round(160 * dpr)}
+    assert data[1]["from"] == {"screen": "screen1", "x": round(300 * dpr), "y": round(300 * dpr)}
+    assert all(d["background"] == "screen" for d in data)
+
+
+def _draw_samples(overlay, window):
+    """A rectangle, an ellipse and a brush stroke, side by side."""
+    overlay.set_tool(Tool.RECTANGLE)
+    drag(window, [(100, 100), (300, 300)])
+    overlay.set_tool(Tool.ELLIPSE)
+    drag(window, [(400, 100), (600, 300)])
+    overlay.set_tool(Tool.BRUSH)
+    drag(window, [(100, 400), (200, 450), (300, 400)])
+
+
+def test_eraser_removes_only_shapes_whose_line_it_touches(overlay):
+    window = overlay.windows[0]
+    _draw_samples(overlay, window)
+    overlay.set_tool(Tool.ERASER)
+    assert window.cursor().shape() == Qt.CursorShape.BitmapCursor
+    drag(window, [(150, 150), (250, 250)])  # inside the rectangle: nothing
+    drag(window, [(480, 180), (520, 220)])  # inside the ellipse: nothing
+    drag(window, [(700, 700), (800, 800)])  # nowhere near: nothing
+    assert [s.tool for s in overlay.shapes()] == [Tool.RECTANGLE, Tool.ELLIPSE, Tool.BRUSH]
+    drag(window, [(150, 150), (150, 350)])  # across the bottom edge of the rectangle
+    assert [s.tool for s in overlay.shapes()] == [Tool.ELLIPSE, Tool.BRUSH]
+    drag(window, [(200, 500), (200, 420)])  # across the brush stroke
+    drag(window, [(500, 50), (500, 94)])  # 6 px above the ellipse: within reach
+    assert overlay.shapes() == []
+    overlay.set_tool(Tool.RECTANGLE)
+    assert window.cursor().shape() == Qt.CursorShape.CrossCursor
+
+
+def test_one_eraser_drag_removes_several_and_undo_brings_them_back(overlay):
+    overlay.set_screens(_recorded_screens())
+    window = overlay.windows[0]
+    _draw_samples(overlay, window)
+    ids = [d["id"] for d in overlay.drawings()]
+    overlay.set_tool(Tool.ERASER)
+    drag(window, [(50, 200), (350, 200), (700, 200)])  # one drag through rect and ellipse
+    assert [s.tool for s in overlay.shapes()] == [Tool.BRUSH]
+    overlay.undo()  # the whole drag comes back, same ids, same order
+    assert [d["id"] for d in overlay.drawings()] == ids
+    overlay.undo()  # then Undo removes the last shape drawn again
+    assert [s.tool for s in overlay.shapes()] == [Tool.RECTANGLE, Tool.ELLIPSE]
+    # Erasing a shape and undoing twice: the erase, then the shape itself.
+    drag(window, [(400, 200), (420, 200)])  # touches the ellipse's left edge
+    assert [s.tool for s in overlay.shapes()] == [Tool.RECTANGLE]
+    overlay.undo()
+    overlay.undo()
+    assert [s.tool for s in overlay.shapes()] == [Tool.RECTANGLE]
+
+
+def test_eraser_works_per_screen_and_with_zoom(overlay):
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.LINE)
+    drag(window, [(100, 100), (300, 100)])
+    window.set_snapshot(_snapshot(window))
+    window.set_zoom(4.0, QPointF(0, 0))  # canvas (100, 100) is now at view (400, 400)
+    overlay.set_tool(Tool.ERASER)
+    # 30 view px below the line = 7.5 canvas px: out of the eraser's on-screen reach.
+    drag(window, [(500, 430), (700, 430)])
+    assert len(overlay.shapes()) == 1
+    drag(window, [(500, 405), (700, 405)])  # 5 view px below: hit
+    assert overlay.shapes() == []
+
+
+def test_hiding_mid_erase_keeps_the_erase_undoable(overlay):
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.RECTANGLE)
+    drag(window, [(100, 100), (300, 300)])
+    overlay.set_tool(Tool.ERASER)
+    _mouse(window, QEvent.Type.MouseButtonPress, QPoint(150, 50), True)
+    _mouse(window, QEvent.Type.MouseMove, QPoint(150, 150), True)
+    assert overlay.shapes() == []
+    overlay.hide()
+    overlay.show()
+    overlay.undo()
+    assert len(overlay.shapes()) == 1
+
+
+def test_sketch_switches_background_and_keeps_shapes(overlay, qtbot):
+    overlay.set_screens(_recorded_screens())
+    window = overlay.windows[0]
+    toolbar = overlay._toolbar
+    assert overlay.background() == "screen" and not overlay.sketch
+    assert toolbar.sketch_button.text() == "Sketch (S)"
+    drag(window, [(10, 10), (60, 60)])  # on the screen
+    toolbar.sketch_button.click()
+    assert overlay.sketch and overlay.background() == "sketch"
+    assert toolbar.sketch_button.text() == "Screen (S)"
+    assert len(overlay.shapes()) == 1  # switching removes nothing
+    drag(window, [(100, 100), (160, 160)])  # on the canvas
+    assert [d["background"] for d in overlay.drawings()] == ["screen", "sketch"]
+
+    # The canvas is opaque white (the screen does not show through); shapes on top.
+    image = window.grab().toImage()
+    assert image.pixelColor(400, 400) == QColor("#FFFFFF")
+    assert image.pixelColor(60, 35) == QColor("#FF0000")
+
+    # Zoom works on the canvas without a screen picture.
+    window.set_snapshot(None)
+    _wheel(window, QPoint(100, 100), 2)
+    assert window.zoom > 1.0
+    overlay.undo()  # undo is unaffected by the background
+    assert len(overlay.shapes()) == 1
+    overlay.toggle_sketch()
+    assert not overlay.sketch and toolbar.sketch_button.text() == "Sketch (S)"
+    assert window.zoom == 1.0  # no screen picture to zoom into here
+    assert len(overlay.shapes()) == 1
+    image = window.grab().toImage()
+    assert image.pixelColor(400, 400).alpha() < 10  # see-through again
+
+    # Every drawing session starts on the screens.
+    overlay.toggle_sketch()
+    overlay.hide()
+    assert overlay.background() is None
+    overlay.show()
+    assert not overlay.sketch and overlay.background() == "screen"
+    assert toolbar.sketch_button.text() == "Sketch (S)"

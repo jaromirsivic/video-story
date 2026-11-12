@@ -152,3 +152,42 @@ def _assert_window_receives_input(window, screen: Screen, dpr: float) -> None:
             f"{screen.id}: window under ({point.x}, {point.y}) is {root!r}, "
             f"expected overlay {int(window.winId())}"
         )
+
+
+def test_sketch_canvas_is_white_in_captured_frames(overlay: DrawingOverlay, qtbot) -> None:
+    """Sketch: every screen is captured as a white canvas with the shapes on top."""
+    overlay.show()
+    qtbot.wait(200)
+    red = QColor("#FF0000")
+    for index in range(len(overlay.windows)):
+        overlay.add_shape(
+            Shape(
+                Tool.BRUSH, red, [QPointF(STROKE_X0, STROKE_Y), QPointF(STROKE_X1, STROKE_Y)], index
+            )
+        )
+    overlay.set_sketch(True)
+    assert overlay.background() == "sketch"
+    qtbot.wait(300)
+
+    platform = get_platform()
+    screens = assign_screen_ids(platform.list_screens())
+    checked = 0
+    with ScreenGrabber() as grabber:
+        for screen in screens:
+            qscreen = _match_qscreen(screen)
+            if qscreen is None:
+                continue
+            dpr = qscreen.devicePixelRatio()
+            image = frame_to_image(grabber.grab(screen)).convert("RGB")
+
+            def px(lx: float, ly: float, image=image, dpr=dpr) -> tuple[int, int, int]:
+                return image.getpixel((round(lx * dpr), round(ly * dpr)))
+
+            # Away from the stroke, the toolbar (top left) and the windows kept above.
+            for x in _samples_x(STROKE_X0, STROKE_X1):
+                assert px(x, STROKE_Y + 120) == (255, 255, 255), f"{screen.id} at x={x}"
+                assert _is_red(px(x, STROKE_Y)), f"{screen.id}: stroke at x={x}"
+            checked += 1
+    assert checked >= 1, "no screen could be matched between Qt and the platform layer"
+    overlay.set_sketch(False)
+    assert len(overlay.shapes()) == len(overlay.windows)  # switching removed nothing

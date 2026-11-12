@@ -173,6 +173,7 @@ class RecordingSummary:
 DrawingsProvider = Callable[[], list[dict[str, Any]]]
 DrawingNowProvider = Callable[[], dict[str, Any] | None]
 ClipboardProvider = Callable[[], str | None]
+BackgroundProvider = Callable[[], str | None]
 KEYPOINT_MIN_GAP_MS = 3000  # a keypoint can follow the previous one after three seconds
 
 
@@ -184,6 +185,7 @@ class _Tick:
     drawings: list[dict[str, Any]] = field(default_factory=list)
     drawing_now: dict[str, Any] | None = None
     zoom: list[dict[str, Any]] = field(default_factory=list)
+    background: str | None = None
     clipboard: str | None = None
 
 
@@ -237,6 +239,10 @@ class Recorder:
         # Same for the zoom of the drawing canvas (ui.overlay.DrawingOverlay.zoom):
         # which screens show a magnified region, stored in the sidecars as ``zoom``.
         self.zoom_provider: DrawingsProvider | None = None
+        # What the drawing layer shows behind the shapes (ui.overlay.DrawingOverlay.
+        # background): "screen", "sketch" (the white canvas) or None while not drawing;
+        # stored in the sidecars as ``background``.
+        self.background_provider: BackgroundProvider | None = None
         # The text clipboard (ui.clipboard.ClipboardTracker.take): a text the user copied
         # since the previous tick (at most 65535 characters, "..." when cut), stored as
         # ``clipboard`` in the sidecars of this tick only; None (null) in every other tick.
@@ -677,6 +683,12 @@ class Recorder:
                 tick.zoom = list(zoom_provider())
             except Exception:  # pragma: no cover - never let zoom data stop capture
                 log.exception("zoom provider failed")
+        background_provider = self.background_provider
+        if background_provider is not None:
+            try:
+                tick.background = background_provider()
+            except Exception:  # pragma: no cover - never let drawing data stop capture
+                log.exception("background provider failed")
         tick.frames = self._grab_screens(grabber)
         clipboard_provider = self.clipboard_provider
         if clipboard_provider is not None and tick.frames:
@@ -704,6 +716,7 @@ class Recorder:
                 "drawings": tick.drawings,
                 "drawing_now": tick.drawing_now,
                 "zoom": tick.zoom,
+                "background": tick.background,
                 "clipboard": tick.clipboard,
                 "captured_at": now_iso(),
             }

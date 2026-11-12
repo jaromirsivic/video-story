@@ -177,6 +177,50 @@ def arrow_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+def ellipse_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """An outlined circle: the Ellipse drawing tool."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(QPen(ink, max(1.5, s * 0.10)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
+
+    return QIcon(_pixmap(size, draw))
+
+
+def line_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A plain diagonal line (bottom left to top right): the Line drawing tool."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = QPen(ink, max(1.5, s * 0.10))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(QPointF(s * 0.16, s * 0.84), QPointF(s * 0.84, s * 0.16))
+
+    return QIcon(_pixmap(size, draw))
+
+
+def eraser_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A tilted eraser block (filled tip, outlined body): the Eraser drawing tool."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.translate(s / 2, s / 2)
+        p.rotate(-40)
+        pen = QPen(ink, max(1.2, s * 0.08))
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        body = QRectF(-s * 0.40, -s * 0.18, s * 0.80, s * 0.36)
+        p.drawRoundedRect(body, s * 0.05, s * 0.05)
+        p.setBrush(ink)
+        p.drawRoundedRect(QRectF(-s * 0.40, -s * 0.18, s * 0.30, s * 0.36), s * 0.05, s * 0.05)
+
+    return QIcon(_pixmap(size, draw))
+
+
 def process_icon(size: int = 24) -> QIcon:
     """A white check mark on a green disc: finish and process the recording."""
 

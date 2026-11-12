@@ -57,7 +57,10 @@ such a recording into the editor's list, but it is not yours to act on). For
 While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks the
 current moment as important (the button counts down 3, 2, 1 before the next one), and
 **Draw** (`Ctrl+Space` or `Ctrl+F1`) switches the drawing layer on and off (leaving it
-removes the shapes; the timeline shows them as `REMOVED`). The window can also be
+removes the shapes; the timeline shows them as `REMOVED`). While drawing, the user picks
+rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors, and **Sketch**
+(`S`) swaps every screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH
+off` in the timeline). The window can also be
 hidden to the system tray (a click on the tray icon shows it again). The user can press
 **Stop** (`Ctrl+Alt+S`), then choose **Video Editor** (the default: the editor opens at once and
 transcribes while the user crops - the green arrow under the narration track says
@@ -107,7 +110,11 @@ line, ordered by time in milliseconds since the recording started:
 0 START cursor screen1 2208,202
 15360-20140 SAY The Instructions button down here. [cursor screen1 654,1545 -> screen1 2238,300]
 24000 DRAW #1 rectangle #FF0000 screen1 corners 2118,1434 2334,1494 (pressed 22400, released 24000; frames before 22001, after 24500)
-32500 REMOVED #1 (last seen 32000: Undo, Clear or the drawing layer closed)
+26000 SKETCH on: every screen shows a plain white canvas, the user sketches on it instead of drawing on the screen
+27500 DRAW #2 ellipse #000000 screen1 corners 400,300 900,700 (on the sketch canvas) (pressed 26800, released 27500; frames before 26500, after 28000)
+29000 SKETCH off (the screens again; sketching since 26000)
+32500 REMOVED #1 (last seen 32000: Undo, Clear, Eraser or the drawing layer closed)
+33500 RESTORED #1 (gone at 32500, back by Undo of an Eraser stroke; same shapes as drawn)
 43000 CLIPBOARD "Say what you want to get out of this recording, ..." (225 chars)
 51000 CURSOR -> screen2 412,388
 60000 KEYPOINT 1
@@ -125,17 +132,27 @@ line, ordered by time in milliseconds since the recording started:
   end. The text keeps the spoken language; do not translate or clean it up silently,
   quote it when you need to confirm what was said. "Here", "this" and "that" usually
   mean the cursor position or a shape drawn around that time.
-- `DRAW #id` is a finished shape: `tool` (`rectangle`, `arrow`, `brush`), color, screen
-  and geometry in pixels of that screen's image, origin top-left - `corners` (two
-  opposite corners) of a rectangle, `tail`/`head` of an arrow, `bbox` of a brush stroke
-  (its full `path` is in the sidecar). `pressed`/`released` are the mouse press and
+- `DRAW #id` is a finished shape: `tool` (`rectangle`, `ellipse`, `line`, `brush`,
+  `arrow`), color, screen and geometry in pixels of that screen's image, origin top-left
+  - `corners` (two opposite corners) of a rectangle or of an ellipse's bounding box,
+  `from`/`to` of a line, `tail`/`head` of an arrow, `bbox` of a brush stroke (its full
+  `path` is in the sidecar). `(on the sketch canvas)` marks a shape drawn on the white
+  canvas (see `SKETCH`), not on the screen. `pressed`/`released` are the mouse press and
   release; `frames before` is the last frame without the shape, `frames after` the
   first one showing it. A shape enters the timeline only once the mouse button is
   released, so the geometry is final. Ids count 1, 2, ... in the order the shapes were
   finished. `(drawn before the range)` marks a shape already on screen when the crop
   starts. Recordings made before shapes had ids say `seen <ms> to <ms>` instead of
   press and release times.
-- `REMOVED` - shapes that disappeared (Undo, Clear, or the drawing layer was closed).
+- `REMOVED` - shapes that disappeared (Undo, Clear, the eraser, or the drawing layer
+  was closed). `RESTORED` - shapes the eraser removed that Undo brought back (same id
+  and geometry as their `DRAW` line).
+- `SKETCH on` / `SKETCH off` - while drawing, the user switched every screen to a plain
+  white canvas and back (the shapes stay on either background). In between the user is
+  sketching an idea - a layout, a diagram, a flow - not pointing at something on the
+  screen, and the frames show only the canvas with the shapes; what was on the screen
+  is in the frames before `SKETCH on`. Each frame says it as `background` (`screen`,
+  `sketch`, or null while not drawing), each shape as `background` in the sidecar.
 - `CLIPBOARD` - text the user copied (Ctrl+C) just before that moment, cut after 200
   characters; `frames --at <ms>` returns the whole text in `clipboard` (texts over 65535
   characters end with `...`; what was in the clipboard before the recording is never
@@ -204,7 +221,7 @@ dialog here", the look of something). Skip the rest.
   one) and the cursor screen the `SAY` line names (or `--screen cursor`).
 - The frame returned is the latest one at or before `--at`. Each entry has `image`
   (open it with your image viewing tool), `sidecar`, `cursor` `{screen, x, y}` (pixels
-  of that image), `drawing_now`, `zoom` and `clipboard`; `--no-drawings` replaces the
+  of that image), `drawing_now`, `zoom`, `background` and `clipboard`; `--no-drawings` replaces the
   repeated list of shapes (already in the timeline) by `drawing_ids`. Without it each
   frame carries `drawings`: every finished shape on screen with `id`, `tool`, `color`,
   `screen`, `started_ms`, `finished_ms` and `from`/`to` or `path` (points

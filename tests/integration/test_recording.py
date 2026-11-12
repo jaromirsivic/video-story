@@ -58,6 +58,7 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         assert sidecar["screen"] == parsed.screen_id and sidecar["time_ms"] == parsed.time_ms
         assert sidecar["drawings"] == []  # no overlay in a headless recording
         assert sidecar["zoom"] == []
+        assert sidecar["background"] is None  # not drawing
         cursor = sidecar["cursor"]
         if cursor is not None:
             assert cursor["screen"] in screens

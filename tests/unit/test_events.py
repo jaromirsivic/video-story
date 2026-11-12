@@ -59,6 +59,7 @@ def make_recording(
                 "drawings": extra.get("drawings", []),
                 "drawing_now": None,
                 "zoom": extra.get("zoom", []),
+                "background": extra.get("background"),
                 "clipboard": extra.get("clipboard"),
             }
             (frames / frame_filename(t, sid, "png")).write_bytes(b"\x89PNG")
@@ -113,9 +114,11 @@ def test_timeline_merges_speech_shapes_clipboard_cursor_and_keypoints(tmp_path: 
     assert result["counts"] == {
         "shapes": 1,
         "removed": 1,
+        "restored": 0,
         "clipboard": 1,
         "cursor_moves": 1,
         "zoom": 0,
+        "sketch": 0,
         "keypoints": 1,
         "speech": 2,
     }
@@ -127,7 +130,7 @@ def test_timeline_merges_speech_shapes_clipboard_cursor_and_keypoints(tmp_path: 
         "(pressed 1200, released 1400; frames before 1000, after 1500)",
         "1800 KEYPOINT 1",
         '2000 CLIPBOARD "copied text"',
-        "2500 REMOVED #1 (last seen 2000: Undo, Clear or the drawing layer closed)",
+        "2500 REMOVED #1 (last seen 2000: Undo, Clear, Eraser or the drawing layer closed)",
         "2500 CURSOR -> screen2 5,6",
     ]
 
@@ -224,3 +227,90 @@ def test_frames_without_drawings_lists_ids_only(tmp_path: Path):
     for frame in slim["frames"] + slim["window"]["screen1"]:
         assert "drawings" not in frame
     assert slim["frames"][0]["drawing_ids"] == [3]
+
+
+def shape(tool: str, shape_id: int, end: int, background: str = "screen") -> dict:
+    return {
+        "id": shape_id,
+        "tool": tool,
+        "color": "#000000",
+        "screen": "screen1",
+        "started_ms": end - 100,
+        "finished_ms": end,
+        "background": background,
+        "from": {"screen": "screen1", "x": 10, "y": 20},
+        "to": {"screen": "screen1", "x": 70, "y": 80},
+    }
+
+
+def test_ellipse_and_line_geometry(tmp_path: Path):
+    ellipse, line = shape("ellipse", 1, 900), shape("line", 2, 1400)
+    ticks = {1000: {"drawings": [ellipse]}, 1500: {"drawings": [ellipse, line]}}
+    text = build_timeline(make_recording(tmp_path, ticks))["timeline"]
+    assert "900 DRAW #1 ellipse #000000 screen1 corners 10,20 70,80 (pressed 800" in text
+    assert "1400 DRAW #2 line #000000 screen1 from 10,20 to 70,80 (pressed 1300" in text
+
+
+def test_sketch_on_off_and_shapes_on_the_canvas(tmp_path: Path):
+    on_screen = shape("rectangle", 1, 900)
+    on_canvas = shape("arrow", 2, 2400, background="sketch")
+    ticks: dict[int, dict] = {500: {"background": "screen"}}
+    ticks[1000] = {"background": "screen", "drawings": [on_screen]}
+    for t in (1500, 2000):
+        ticks[t] = {"background": "sketch", "drawings": [on_screen]}
+    ticks[2500] = {"background": "sketch", "drawings": [on_screen, on_canvas]}
+    ticks[3000] = {"background": "screen", "drawings": [on_screen, on_canvas]}
+    ticks[3500] = {"background": "sketch", "drawings": [on_screen, on_canvas]}
+    # 4000 onwards: the drawing layer is closed (no background, no drawings).
+    result = build_timeline(make_recording(tmp_path, ticks))
+    text = result["timeline"]
+    assert (
+        "1500 SKETCH on: every screen shows a plain white canvas, the user sketches on it "
+        "instead of drawing on the screen" in text
+    )
+    assert "900 DRAW #1 rectangle #000000 screen1 corners 10,20 70,80 (pressed" in text
+    assert "(on the sketch canvas)" not in next(x for x in lines(result) if "DRAW #1" in x)
+    assert "2400 DRAW #2 arrow #000000 screen1 tail 10,20 head 70,80 (on the sketch canvas)" in text
+    assert "3000 SKETCH off (the screens again; sketching since 1500)" in text
+    assert "3500 SKETCH on" in text
+    assert "4000 SKETCH off (drawing layer closed; sketching since 3500)" in text
+    assert result["counts"]["sketch"] == 2
+
+    # A range opening while sketching says so.
+    cropped = build_timeline(make_recording(tmp_path / "b", ticks), 1700, 2200)
+    assert (
+        "1700 SKETCH on: every screen shows a plain white canvas, the user sketches on it "
+        "instead of drawing on the screen (switched on before the range)" in cropped["timeline"]
+    )
+
+
+def test_eraser_removal_and_undo_restore(tmp_path: Path):
+    a, b, c = shape("rectangle", 1, 400), shape("ellipse", 2, 600), shape("brush", 3, 800)
+    c = {k: v for k, v in c.items() if k not in ("from", "to")}
+    c["path"] = [{"screen": "screen1", "x": 1, "y": 1}, {"screen": "screen1", "x": 9, "y": 9}]
+    ticks = {
+        1000: {"drawings": [a, b, c]},
+        1500: {"drawings": [c]},  # one eraser stroke took #1 and #2
+        2000: {"drawings": [a, b, c]},  # Undo brought them back
+        2500: {"drawings": [a, b, c]},
+    }
+    result = build_timeline(make_recording(tmp_path, ticks))
+    text = result["timeline"]
+    assert (
+        "1500 REMOVED #1 #2 (last seen 1000: Undo, Clear, Eraser or the drawing layer closed)"
+        in text
+    )
+    assert (
+        "2000 RESTORED #1 #2 (gone at 1500, back by Undo of an Eraser stroke; same shapes as drawn)"
+        in text
+    )
+    assert [x for x in lines(result) if " DRAW " in x][0].startswith("400 DRAW #1 rectangle")
+    assert sum(" DRAW " in x for x in lines(result)) == 3  # restored shapes are not drawn again
+    assert result["counts"]["restored"] == 2
+
+
+def test_frames_report_the_background(tmp_path: Path):
+    paths = make_recording(tmp_path, {1000: {"background": "sketch"}})
+    found = frames_at(paths, 1000, "screen1")
+    assert found["frames"][0]["background"] == "sketch"
+    assert frames_at(paths, 2000, "screen1")["frames"][0]["background"] is None

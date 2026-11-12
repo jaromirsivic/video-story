@@ -1,16 +1,17 @@
 """Text timeline of a recording: speech and screen events in one compact list.
 
 Agents read this before any screenshot. It merges the transcript segments with what
-the frame sidecars say happened on screen - shapes drawn and removed, text copied,
-the cursor moving to another screen, zoomed screens - the keypoints of the manifest
+the frame sidecars say happened on screen - shapes drawn, removed and restored, the
+white sketch canvas switched on and off, text copied, the cursor moving to another
+screen, zoomed screens - the keypoints of the manifest
 and, when it was recorded, what the user did with the mouse in other applications
 (:mod:`video_story.host.mouse_timeline`), all on the recording timeline (milliseconds
 since the start). Every event
 names the frame times worth fetching (``frames --at <ms>``), so the agent opens only
 the few images the words and the geometry cannot answer.
 
-Drawings, cursor, zoom and clipboard are the same in every sidecar of a tick, so one
-sidecar per tick is read (the first screen that has a frame then).
+Drawings, background, cursor, zoom and clipboard are the same in every sidecar of a
+tick, so one sidecar per tick is read (the first screen that has a frame then).
 """
 
 from __future__ import annotations
@@ -35,8 +36,11 @@ LEGEND = (
     "One event per line, times in ms since the recording start (use them with "
     "`frames --at <ms>`). SAY: speech with the cursor at its start and end. "
     "DRAW #id: a finished shape (pressed..released) with geometry in pixels of that "
-    "screen's image and the frames before and after it. REMOVED: shapes gone (Undo, "
-    "Clear or the drawing layer closed). CLIPBOARD: text the user copied. CURSOR: the "
+    "screen's image and the frames before and after it; (on the sketch canvas): drawn "
+    "on the white canvas, not on the screen. REMOVED: shapes gone (Undo, Clear, the "
+    "Eraser or the drawing layer closed). RESTORED: shapes back (Undo of an Eraser "
+    "stroke). SKETCH on / off: every screen shows a plain white canvas instead of the "
+    "screen - the user sketches an idea there. CLIPBOARD: text the user copied. CURSOR: the "
     "cursor moved to another screen. ZOOM: a screen shown magnified (coordinates are "
     "then in pixels of the zoomed image). KEYPOINT: a moment the user marked."
 )
@@ -150,6 +154,9 @@ def _geometry(shape: dict[str, Any]) -> str:
         )
     if tool == "arrow":
         return f"tail {_point(shape.get('from'))} head {_point(shape.get('to'))}"
+    if tool == "line":
+        return f"from {_point(shape.get('from'))} to {_point(shape.get('to'))}"
+    # rectangle, ellipse (its bounding box)
     return f"corners {_point(shape.get('from'))} {_point(shape.get('to'))}"
 
 
@@ -215,17 +222,23 @@ def _same_stroke(old: dict[str, Any], new: dict[str, Any]) -> bool:
     )
 
 
-def _track_shapes(ticks: _Ticks) -> tuple[list[_Shape], list[tuple[int, int, list[int]]]]:
-    """Every shape seen in the loaded ticks and the removals ``(time, last_seen, labels)``.
+_Changes = list[tuple[int, int, list[int]]]  # (time, previous tick, labels)
 
-    Shapes with an ``id`` are exact. Older recordings stored a shape while it was being
-    dragged: a shape that replaces one of the same tool, color, screen and starting
-    point within one tick is the same shape growing, not a new one.
+
+def _track_shapes(ticks: _Ticks) -> tuple[list[_Shape], _Changes, _Changes]:
+    """Every shape seen in the loaded ticks, the removals and the restorations.
+
+    Removals and restorations are ``(time, previous tick, labels)``. Shapes with an
+    ``id`` are exact; one that comes back with the same id after it was gone was
+    restored (Undo of an eraser stroke). Older recordings stored a shape while it was
+    being dragged: a shape that replaces one of the same tool, color, screen and
+    starting point within one tick is the same shape growing, not a new one.
     """
     shapes: list[_Shape] = []
     known: dict[tuple[str, Any], _Shape] = {}
     present: dict[tuple[str, Any], _Shape] = {}
-    removals: list[tuple[int, int, list[int]]] = []
+    removals: _Changes = []
+    restorations: _Changes = []
     next_label = 0
     previous_ms: int | None = None
     for time_ms, sidecar in zip(ticks.times, ticks.data, strict=True):
@@ -233,8 +246,11 @@ def _track_shapes(ticks: _Ticks) -> tuple[list[_Shape], list[tuple[int, int, lis
         gone = [k for k in present if k not in current]
         continued: set[tuple[str, Any]] = set()
         now: dict[tuple[str, Any], _Shape] = {}
+        restored: list[int] = []
         for key, shape in current.items():
             record = present.get(key) or (known.get(key) if key[0] == "id" else None)
+            if record is not None and key not in present:
+                restored.append(record.label)
             if record is None and key[0] == "sig":
                 for old in gone:
                     if old not in continued and _same_stroke(present[old].data, shape):
@@ -257,13 +273,15 @@ def _track_shapes(ticks: _Ticks) -> tuple[list[_Shape], list[tuple[int, int, lis
         removed = [present[k].label for k in gone if k not in continued]
         if removed and previous_ms is not None:
             removals.append((time_ms, previous_ms, removed))
+        if restored and previous_ms is not None:
+            restorations.append((time_ms, previous_ms, sorted(restored)))
         present = now
         previous_ms = time_ms
-    return shapes, removals
+    return shapes, removals, restorations
 
 
 def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, int]]:
-    shapes, removals = _track_shapes(ticks)
+    shapes, removals, restorations = _track_shapes(ticks)
     events: list[_Event] = []
     count = 0
     for shape in shapes:
@@ -286,6 +304,8 @@ def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, 
         state = ticks.at(after) or {}
         zoomed = {z.get("screen") for z in state.get("zoom") or [] if isinstance(z, dict)}
         zoom_note = " (zoomed view)" if data.get("screen") in zoomed else ""
+        if data.get("background") == "sketch":
+            zoom_note += " (on the sketch canvas)"
         early = " (drawn before the range)" if released < window.start_ms else ""
         events.append(
             _Event(
@@ -305,18 +325,33 @@ def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, 
                 _Event(
                     time_ms,
                     2,
-                    f"{time_ms} REMOVED {ids} (last seen {last_seen}: Undo, Clear or the "
-                    "drawing layer closed)",
+                    f"{time_ms} REMOVED {ids} (last seen {last_seen}: Undo, Clear, Eraser "
+                    "or the drawing layer closed)",
                 )
             )
             removed_count += len(labels)
-    return events, {"shapes": count, "removed": removed_count}
+    restored_count = 0
+    for time_ms, last_seen, labels in restorations:
+        if window.start_ms <= time_ms <= window.end_ms:
+            ids = " ".join(f"#{label}" for label in labels)
+            events.append(
+                _Event(
+                    time_ms,
+                    2,
+                    f"{time_ms} RESTORED {ids} (gone at {last_seen}, back by Undo of an "
+                    "Eraser stroke; same shapes as drawn)",
+                )
+            )
+            restored_count += len(labels)
+    return events, {"shapes": count, "removed": removed_count, "restored": restored_count}
 
 
 def _screen_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, int]]:
-    """Shapes, clipboard, cursor screen changes and zoom inside ``window``."""
+    """Shapes, sketch canvas, clipboard, cursor screen changes and zoom in ``window``."""
     events, counts = _shape_events(ticks, window)
-    counts.update({"clipboard": 0, "cursor_moves": 0, "zoom": 0})
+    counts.update({"clipboard": 0, "cursor_moves": 0, "zoom": 0, "sketch": 0})
+    sketching = False
+    sketch_since: int | None = None
     cursor_screen: str | None = None
     zoomed: dict[str, dict[str, Any]] = {}
     zoom_since: dict[str, int] = {}
@@ -326,6 +361,32 @@ def _screen_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str,
         return window.start_ms <= time_ms <= window.end_ms
 
     for time_ms, sidecar in zip(ticks.times, ticks.data, strict=True):
+        background = sidecar.get("background")
+        if background == "sketch" and not sketching:
+            at = max(time_ms, window.start_ms)
+            if at <= window.end_ms:
+                early = " (switched on before the range)" if opening and time_ms < at else ""
+                events.append(
+                    _Event(
+                        at,
+                        1,
+                        f"{at} SKETCH on: every screen shows a plain white canvas, the user "
+                        f"sketches on it instead of drawing on the screen{early}",
+                    )
+                )
+                counts["sketch"] += 1
+            sketching, sketch_since = True, time_ms
+        elif background != "sketch" and sketching:
+            if in_range(time_ms):
+                how = "the screens again" if background == "screen" else "drawing layer closed"
+                events.append(
+                    _Event(
+                        time_ms,
+                        1,
+                        f"{time_ms} SKETCH off ({how}; sketching since {sketch_since})",
+                    )
+                )
+            sketching = False
         clip = sidecar.get("clipboard")
         if isinstance(clip, str) and not opening and in_range(time_ms):
             events.append(_Event(time_ms, 3, f"{time_ms} CLIPBOARD {_excerpt(clip)}"))

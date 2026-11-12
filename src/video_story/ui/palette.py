@@ -1,4 +1,4 @@
-"""Drawing palette: 8 high-contrast colors for the on-screen overlay.
+"""Drawing palette: 9 high-contrast colors for the on-screen overlay (keys 1-9).
 
 The palette is plain Python (no Qt) so that it can be validated and listed without a
 GUI. The first entry is the default drawing color (red).
@@ -31,6 +31,7 @@ PALETTE: list[PaletteColor] = [
     PaletteColor("Blue", "#0055FF"),
     PaletteColor("Magenta", "#FF00FF"),
     PaletteColor("White", "#FFFFFF"),
+    PaletteColor("Black", "#000000"),
 ]
 
 DEFAULT_COLOR: PaletteColor = PALETTE[0]

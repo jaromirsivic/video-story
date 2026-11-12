@@ -253,6 +253,7 @@ class FrameRef:
         drawings: list[Any] = []  # finished shapes (released mouse button)
         drawing_now: dict[str, Any] | None = None  # the shape being drawn, no geometry
         zoom: list[Any] = []
+        background: str | None = None  # "screen" / "sketch" while drawing, else None
         clipboard: str | None = None  # text copied during the recording (see ui.clipboard)
         try:
             data = json.loads(self.sidecar.read_text(encoding="utf-8"))
@@ -267,6 +268,9 @@ class FrameRef:
             raw_zoom = data.get("zoom")
             if isinstance(raw_zoom, list):
                 zoom = raw_zoom
+            raw_background = data.get("background")
+            if isinstance(raw_background, str):
+                background = raw_background
             raw_clipboard = data.get("clipboard")
             if isinstance(raw_clipboard, str):
                 clipboard = raw_clipboard
@@ -281,6 +285,7 @@ class FrameRef:
             "drawings": drawings,
             "drawing_now": drawing_now,
             "zoom": zoom,
+            "background": background,
             "clipboard": clipboard,
         }
         if not include_drawings:
