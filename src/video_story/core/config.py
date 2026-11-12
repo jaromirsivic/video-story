@@ -41,6 +41,12 @@ ARCHIVE_AFTER_MIN_DAYS = 1
 ARCHIVE_AFTER_MAX_DAYS = 3650
 ARCHIVE_AFTER_DEFAULT_DAYS = 30
 
+# Ctrl while drawing snaps points to a grid with this spacing (logical pixels); the grid
+# is shown on the white sketch canvas.
+DRAWING_GRID_MIN_PX = 8
+DRAWING_GRID_MAX_PX = 128
+DRAWING_GRID_DEFAULT_PX = 16
+
 EXPORT_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow")
 EXPORT_PRESET_DEFAULT = "medium"
 EXPORT_CRF_DEFAULT = 18
@@ -115,6 +121,7 @@ class Config:
     live_transcription: LiveTranscriptionMode = LIVE_TRANSCRIPTION_DEFAULT  # type: ignore[assignment]
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
     archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
+    drawing_grid_px: int = DRAWING_GRID_DEFAULT_PX
     export_preset: str = EXPORT_PRESET_DEFAULT
     export_crf: int = EXPORT_CRF_DEFAULT
     export_audio_bitrate_k: int = EXPORT_AUDIO_BITRATE_K_DEFAULT
@@ -247,6 +254,13 @@ def config_from_dict(data: dict[str, Any]) -> Config:
             ARCHIVE_AFTER_MIN_DAYS,
             ARCHIVE_AFTER_MAX_DAYS,
             ARCHIVE_AFTER_DEFAULT_DAYS,
+        ),
+        drawing_grid_px=_require_int(
+            data,
+            "drawing_grid_px",
+            DRAWING_GRID_MIN_PX,
+            DRAWING_GRID_MAX_PX,
+            DRAWING_GRID_DEFAULT_PX,
         ),
         export_preset=_choice(data, "export_preset", EXPORT_PRESETS, EXPORT_PRESET_DEFAULT),
         export_crf=_require_int(data, "export_crf", 0, 51, EXPORT_CRF_DEFAULT),

@@ -216,9 +216,7 @@ def test_brush_with_shift_before_the_press_is_closed(overlay, keyboard):
     keyboard.shift = True
     drag(window, [(100, 100), (300, 100), (300, 300)], shift=True)
     keyboard.shift = False
-    press(window, (500, 100))  # Shift only during the stroke: an open stroke
-    move(window, (600, 100), held=LEFT, shift=True)
-    release(window, (600, 200), shift=True)
+    drag(window, [(500, 100), (600, 100), (600, 200)])  # no Shift: an open stroke
     closed, open_stroke = overlay.shapes()
     assert closed.closed and not open_stroke.closed
     data = overlay.drawings()
@@ -248,6 +246,46 @@ def test_releasing_shift_finishes_a_closed_brush_shape(overlay, keyboard):
     move(window, (120, 260), held=LEFT)
     release(window, (120, 260))  # the button's release draws nothing more
     assert overlay.shapes() == [shape]
+
+
+def test_shift_pressed_during_a_brush_stroke_closes_it_at_once(overlay, keyboard):
+    overlay.set_screens(_screens())
+    now = [1000]
+    overlay.set_clock(lambda: now[0])
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.BRUSH)
+    press(window, (100, 100))
+    move(window, (300, 100), held=LEFT)
+    move(window, (300, 300), held=LEFT)
+    assert not window.current_shape.closed
+    now[0] = 1500
+    keyboard.shift = True
+    move(window, (310, 300), held=LEFT, shift=True)  # Shift down mid-stroke
+    shape = window.current_shape
+    assert shape.closed and shape.closed_ms == 1500
+    # The end joins the start right away, while the button is still held.
+    image = window.grab().toImage()
+    assert image.pixelColor(205, 200) == QColor("#FF0000")
+    move(window, (320, 320), held=LEFT, shift=True)
+    keyboard.shift = False
+    move(window, (330, 330), held=LEFT)  # releasing Shift finishes it, as if held from the press
+    assert window.current_shape is None
+    (finished,) = overlay.shapes()
+    assert finished.closed and _points(finished)[-1] == (320, 320)
+    data = overlay.drawings()[0]
+    assert data["closed"] is True and data["closed_ms"] == 1500 and data["shift"] is True
+
+
+def test_shift_pressed_during_a_brush_stroke_and_the_button_released_first(overlay, keyboard):
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.BRUSH)
+    press(window, (100, 100))
+    move(window, (300, 100), held=LEFT)
+    keyboard.shift = True
+    move(window, (300, 300), held=LEFT, shift=True)
+    release(window, (300, 300), shift=True)  # the button's release finishes it closed
+    (shape,) = overlay.shapes()
+    assert shape.closed
 
 
 # -- connected lines -----------------------------------------------------------------------
@@ -294,6 +332,29 @@ def test_connected_lines(overlay, keyboard):
     keyboard.shift = False
     overlay.undo()
     assert len(overlay.shapes()) == 2
+
+
+def test_eraser_removes_all_connected_lines_and_undo_brings_them_back(overlay, keyboard):
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.LINE)
+    drag(window, [(100, 400), (300, 400)])  # a separate line stays
+    keyboard.shift = True
+    press(window, (100, 100), shift=True)
+    release(window, (200, 100), shift=True)
+    for point in ((200, 100), (200, 200), (300, 200)):
+        move(window, point, shift=True)
+        press(window, point, shift=True)
+        release(window, point, shift=True)
+    keyboard.shift = False
+    overlay._poll_shift()
+    lone, *chain = overlay.shapes()
+    assert len(chain) == 3 and {s.group for s in chain} == {chain[0].group}
+    overlay.set_tool(Tool.ERASER)
+    drag(window, [(190, 150), (210, 150)])  # across the middle line only
+    assert overlay.shapes() == [lone]
+    overlay.undo()  # one step brings back the whole group, in its order
+    assert overlay.shapes() == [lone, *chain]
+    assert [s.id for s in overlay.shapes()] == [lone.id] + [s.id for s in chain]
 
 
 def test_shift_pressed_during_a_line_drag_goes_on_and_shift_up_ends_it(overlay, keyboard):
@@ -411,3 +472,11 @@ def test_connected_lines_go_on_on_another_screen(overlay, keyboard, qtbot):
     assert _points(c) == [(100, 100), (100, 300)]
     assert a.group == b.group == c.group and [a.segment, b.segment, c.segment] == [1, 1, 2]
     assert a.split == b.split != 0 and c.split == 0
+
+    # The eraser on the last line (second screen only) removes the whole group on both
+    # screens; Undo brings every piece back.
+    overlay.set_tool(Tool.ERASER)
+    drag(second, [(90, 200), (110, 200)])
+    assert overlay.shapes() == []
+    overlay.undo()
+    assert overlay.shapes() == [a, b, c]

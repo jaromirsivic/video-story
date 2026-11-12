@@ -57,6 +57,7 @@ def _record(
         return queue.pop(0) if queue else None
 
     recorder.clipboard_provider = provider
+    recorder.grid_provider = lambda: {"screen1": 16}
     recorder.start()
     deadline = time.monotonic() + 3.0
     while recorder.frame_count < 6 and time.monotonic() < deadline:
@@ -91,6 +92,7 @@ def test_sidecars_store_the_clipboard_once_and_the_manifest_the_keypoints(tmp_pa
     assert all(v is None for v in values if v != "copied text")
     assert "clipboard" in sidecars[0] and sidecars[0]["drawings"] == []
     assert all(s["drawing_now"] is None for s in sidecars)  # no overlay connected
+    assert all(s["grid"] == 16 for s in sidecars)  # Ctrl held: that screen's grid spacing
     manifest = read_manifest(paths.manifest_path(final))
     assert manifest.keypoints == sorted(keypoints) and len(manifest.keypoints) == 2
     raw = json.loads(paths.manifest_path(final).read_text(encoding="utf-8"))

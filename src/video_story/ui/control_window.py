@@ -554,6 +554,7 @@ class ControlWindow(QWidget):
         )
         if dialog.exec() and dialog.result_config is not None:
             self.controller.config = dialog.result_config
+            self._apply_drawing_grid()
             self.status_label.setText("Settings saved. Press Record to start.")
 
     # Theme ------------------------------------------------------------------
@@ -651,6 +652,7 @@ class ControlWindow(QWidget):
             if self._overlay is None and self._overlay_factory is not None:
                 try:
                     self._overlay = self._overlay_factory()
+                    self._apply_drawing_grid()
                     closed = getattr(self._overlay, "closed", None)
                     if closed is not None:
                         closed.connect(self._overlay_closed)
@@ -674,6 +676,12 @@ class ControlWindow(QWidget):
             self._overlay.hide()  # type: ignore[attr-defined]
             self._clear_overlay()
 
+    def _apply_drawing_grid(self) -> None:
+        """The grid spacing Ctrl snaps to while drawing (Settings > Drawing Grid)."""
+        set_grid_size = getattr(self._overlay, "set_grid_size", None)
+        if set_grid_size is not None:
+            set_grid_size(self.controller.config.drawing_grid_px)
+
     def _connect_overlay_to_recorder(self) -> None:
         """Let the recorder store the drawings in every frame sidecar."""
         recorder = self.controller.recorder
@@ -685,6 +693,7 @@ class ControlWindow(QWidget):
         drawing_now = getattr(self._overlay, "drawing_now", None)
         zoom = getattr(self._overlay, "zoom", None)
         background = getattr(self._overlay, "background", None)
+        grid = getattr(self._overlay, "grid", None)
         if set_screens is not None:
             set_screens(list(getattr(recorder, "screens", [])))
         clock = getattr(recorder, "clock", None)
@@ -699,6 +708,8 @@ class ControlWindow(QWidget):
             recorder.zoom_provider = zoom
         if background is not None:
             recorder.background_provider = background
+        if grid is not None:
+            recorder.grid_provider = grid
 
     def _share_drawing_windows(self) -> None:
         """Tell the recorder which windows are the drawing layer (a click there is drawing,

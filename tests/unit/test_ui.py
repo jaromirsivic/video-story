@@ -502,7 +502,10 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert form.itemAt(7, form.ItemRole.LabelRole).widget().text() == "Live Transcription"
     assert form.itemAt(8, form.ItemRole.LabelRole).widget().text() == "Auto Stop Recording"
     assert form.itemAt(9, form.ItemRole.LabelRole).widget().text() == "Archive After"
-    assert form.itemAt(10, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert form.itemAt(10, form.ItemRole.LabelRole).widget().text() == "Drawing Grid"
+    assert form.itemAt(11, form.ItemRole.LabelRole).widget().text() == "Recordings"
+    assert dialog.grid_spin.value() == 16
+    assert dialog.grid_spin.minimum() == 8 and dialog.grid_spin.maximum() == 128
     assert dialog.live_combo.currentData() == "light"  # the default
     assert [dialog.live_combo.itemData(i) for i in range(3)] == ["off", "light", "faster"]
     assert dialog.live_combo.itemText(1) == "Light – low CPU use (recommended)"
@@ -521,6 +524,7 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     dialog.quality_spin.setValue(20)
     dialog.auto_stop_spin.setValue(45)
     dialog.archive_after_spin.setValue(7)
+    dialog.grid_spin.setValue(21)  # any number, not only multiples of 8
     dialog.computer_audio_check.setChecked(False)
     dialog.mouse_check.setChecked(False)
     dialog.live_combo.setCurrentIndex(2)
@@ -530,6 +534,7 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert dialog.result_config.image_format == "jpeg" and dialog.result_config.jpeg_quality == 20
     assert dialog.result_config.auto_stop_minutes == 45
     assert dialog.result_config.archive_after_days == 7
+    assert dialog.result_config.drawing_grid_px == 21
     assert dialog.result_config.computer_audio is False
     assert dialog.result_config.mouse_actions is False
     assert dialog.result_config.live_transcription == "faster"

@@ -33,6 +33,8 @@ from video_story.core.config import (
     AUTO_STOP_MIN_MINUTES,
     CAPTURE_INTERVAL_MAX_MS,
     CAPTURE_INTERVAL_MIN_MS,
+    DRAWING_GRID_MAX_PX,
+    DRAWING_GRID_MIN_PX,
     JPEG_QUALITY_MAX,
     JPEG_QUALITY_MIN,
     Config,
@@ -190,7 +192,18 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Archive After", self.archive_after_spin)
 
-        # 7. Recordings: open the folder (recordings are deleted in the editor)
+        # 7. Drawing Grid: Ctrl while drawing snaps to it (shown on the sketch canvas)
+        self.grid_spin = QSpinBox()
+        self.grid_spin.setRange(DRAWING_GRID_MIN_PX, DRAWING_GRID_MAX_PX)
+        self.grid_spin.setSuffix(" px")
+        self.grid_spin.setValue(config.drawing_grid_px)
+        self.grid_spin.setToolTip(
+            "Holding Ctrl while drawing snaps rectangles, ellipses, lines and arrows to a "
+            "grid with this spacing; the grid is shown on the white Sketch canvas"
+        )
+        form.addRow("Drawing Grid", self.grid_spin)
+
+        # 8. Recordings: open the folder (recordings are deleted in the editor)
         self.open_folder_button = QPushButton("Open Folder")
         self.open_folder_button.setToolTip("Open the recording folder in the file manager")
         self.open_folder_button.clicked.connect(self._open_folder)
@@ -276,6 +289,7 @@ class SettingsDialog(QDialog):
                 "mouse_actions": self.mouse_check.isChecked(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
                 "archive_after_days": self.archive_after_spin.value(),
+                "drawing_grid_px": self.grid_spin.value(),
             }
         )
         return data

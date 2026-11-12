@@ -1,8 +1,9 @@
 """Text timeline of a recording: speech and screen events in one compact list.
 
 Agents read this before any screenshot. It merges the transcript segments with what
-the frame sidecars say happened on screen - shapes drawn, removed and restored, the
-white sketch canvas switched on and off, text copied, the cursor moving to another
+the frame sidecars say happened on screen - shapes drawn, removed and restored, shapes
+started but never finished, the white sketch canvas switched on and off, Ctrl held to
+snap to the grid, text copied, the cursor moving to another
 screen, zoomed screens - the keypoints of the manifest
 and, when it was recorded, what the user did with the mouse in other applications
 (:mod:`video_story.host.mouse_timeline`), all on the recording timeline (milliseconds
@@ -31,6 +32,8 @@ from video_story.host.mouse_timeline import MOUSE_MODES, mouse_detail, mouse_eve
 from video_story.host.runner import FrameIndex, SessionError, archive_info
 
 CLIPBOARD_EXCERPT_CHARS = 200
+# Ctrl held this briefly without a snapped shape is a shortcut (Ctrl+Z, ...), not snapping.
+GRID_MIN_MS = 1000
 
 LEGEND = (
     "One event per line, times in ms since the recording start (use them with "
@@ -39,14 +42,21 @@ LEGEND = (
     "screen's image and the frames before and after it; (on the sketch canvas): drawn "
     "on the white canvas, not on the screen. (square, Shift) / (circle, Shift): drawn "
     "holding Shift on purpose; (closed shape, Shift): a brush stroke whose end joins its "
-    "start - usually the user circles an area meaning 'this'; (connected lines group g, "
+    "start - usually the user circles an area meaning 'this' (Shift from <ms>: closed only "
+    "then, in the middle of the stroke); (snapped to the N px grid, Ctrl): its points lie "
+    "on the grid on purpose; (connected lines group g, "
     "segment n): lines drawn one after another with Shift, each starting where the "
     "previous one ended - one route or outline; (... split at a screen edge, group g): one "
     "line or arrow that crosses screens, stored as one piece per screen (the arrow's head "
-    "is on the piece with tool arrow). REMOVED: shapes gone (Undo, Clear, the "
+    "is on the piece with tool arrow). Connected lines get one DRAW line per segment as "
+    "soon as the click ends it, so they interleave with the speech. DRAWING: a shape "
+    "pressed in the range that is not finished there (cut by the range end, or cancelled). "
+    "REMOVED: shapes gone (Undo, Clear, the "
     "Eraser or the drawing layer closed). RESTORED: shapes back (Undo of an Eraser "
     "stroke). SKETCH on / off: every screen shows a plain white canvas instead of the "
-    "screen - the user sketches an idea there. CLIPBOARD: text the user copied. CURSOR: the "
+    "screen - the user sketches an idea there. GRID on / off: Ctrl held while drawing, "
+    "points snap to a grid (shown on the sketch canvas only). "
+    "CLIPBOARD: text the user copied. CURSOR: the "
     "cursor moved to another screen. ZOOM: a screen shown magnified (coordinates are "
     "then in pixels of the zoomed image). KEYPOINT: a moment the user marked."
 )
@@ -167,13 +177,18 @@ def _geometry(shape: dict[str, Any]) -> str:
 
 
 def _shape_note(shape: dict[str, Any]) -> str:
-    """What Shift and splitting at screen edges made of a shape ("" for a plain one)."""
+    """What Shift, Ctrl and splitting at screen edges made of a shape ("" for a plain one)."""
     tool = shape.get("tool")
     notes: list[str] = []
     if shape.get("shift"):
         kind = {"rectangle": "square", "ellipse": "circle", "brush": "closed shape"}.get(str(tool))
-        if kind:
+        if kind == "closed shape" and isinstance(shape.get("closed_ms"), int):
+            notes.append(f"closed shape, Shift from {shape['closed_ms']}")
+        elif kind:
             notes.append(f"{kind}, Shift")
+    grid = shape.get("grid")
+    if isinstance(grid, int):
+        notes.append(f"snapped to the {grid} px grid, Ctrl")
     group, segment = shape.get("group"), shape.get("segment")
     if isinstance(group, int):
         if isinstance(segment, int):
@@ -370,13 +385,123 @@ def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, 
                 )
             )
             restored_count += len(labels)
-    return events, {"shapes": count, "removed": removed_count, "restored": restored_count}
+    unfinished = _unfinished_events(ticks, window, shapes)
+    events.extend(unfinished)
+    return events, {
+        "shapes": count,
+        "removed": removed_count,
+        "restored": restored_count,
+        "unfinished": len(unfinished),
+    }
+
+
+def _unfinished_events(ticks: _Ticks, window: Crop, shapes: list[_Shape]) -> list[_Event]:
+    """``DRAWING`` lines: shapes the sidecars show being drawn (``drawing_now``) in the
+    range that were never finished there - cut by the end of the range, or cancelled
+    (Esc, the drawing layer closed, a click without size)."""
+    finished: dict[int, int] = {}  # started_ms -> finished_ms of the finished shapes
+    for shape in shapes:
+        started, done = shape.data.get("started_ms"), shape.data.get("finished_ms")
+        if isinstance(started, int) and isinstance(done, int):
+            finished[started] = min(done, finished.get(started, done))
+    events: list[_Event] = []
+    current: dict[str, Any] | None = None
+    seen_in_range = False
+
+    def close(at: int | None) -> None:
+        if current is None or not seen_in_range:
+            return
+        started = current["started_ms"]
+        what = (
+            f"DRAWING {current.get('tool')} {current.get('color')} {current.get('screen')} "
+            f"(pressed {started}"
+        )
+        done = finished.get(started)
+        if done is not None and done <= window.end_ms:
+            return  # finished: its DRAW line says everything
+        if done is not None:
+            text = f"{what}, released {done} after the range end)"
+            events.append(_Event(window.end_ms, 1, f"{window.end_ms} {text}"))
+        elif at is None or at > window.end_ms:
+            text = f"{what}, not finished at the range end)"
+            events.append(_Event(window.end_ms, 1, f"{window.end_ms} {text}"))
+        else:
+            text = (
+                f"{what}, never finished: cancelled with Esc, the drawing layer closed, "
+                "or a click without size)"
+            )
+            events.append(_Event(at, 1, f"{at} {text}"))
+
+    for time_ms, sidecar in zip(ticks.times, ticks.data, strict=True):
+        now = sidecar.get("drawing_now")
+        started = now.get("started_ms") if isinstance(now, dict) else None
+        if not isinstance(started, int):
+            now = None
+        if current is not None and (now is None or now["started_ms"] != current["started_ms"]):
+            close(time_ms)
+            current = None
+        if now is not None and current is None:
+            current, seen_in_range = now, False
+        if current is not None and window.start_ms <= time_ms <= window.end_ms:
+            seen_in_range = True
+    close(None)
+    return events
+
+
+def _grid_events(ticks: _Ticks, window: Crop) -> list[_Event]:
+    """``GRID on`` / ``GRID off``: Ctrl held while drawing (sidecar ``grid``, the spacing
+    in pixels of that screen's image). A short Ctrl (under ``GRID_MIN_MS``) without a
+    shape snapped meanwhile is a keyboard shortcut and left out."""
+    snapped: list[int] = sorted(
+        {
+            shape["finished_ms"]
+            for sidecar in ticks.data
+            for shape in sidecar.get("drawings") or []
+            if isinstance(shape, dict)
+            and isinstance(shape.get("grid"), int)
+            and isinstance(shape.get("finished_ms"), int)
+        }
+    )
+    intervals: list[tuple[int, int | None, int, str]] = []  # (on, off, px, screen)
+    on: tuple[int, int, str] | None = None
+    for time_ms, sidecar in zip(ticks.times, ticks.data, strict=True):
+        grid = sidecar.get("grid")
+        if isinstance(grid, int) and on is None:
+            on = (time_ms, grid, str(sidecar.get("screen")))
+        elif not isinstance(grid, int) and on is not None:
+            intervals.append((on[0], time_ms, on[1], on[2]))
+            on = None
+    if on is not None:
+        intervals.append((on[0], None, on[1], on[2]))
+    events: list[_Event] = []
+    for start, end, px, screen in intervals:
+        stop = end if end is not None else ticks.times[-1]
+        used = any(start <= t <= stop for t in snapped)
+        if end is not None and end - start < GRID_MIN_MS and not used:
+            continue
+        at = max(start, window.start_ms)
+        if at <= window.end_ms and (end is None or end > window.start_ms):
+            early = " (held before the range)" if start < window.start_ms else ""
+            events.append(
+                _Event(
+                    at,
+                    1,
+                    f"{at} GRID on: Ctrl held, points snap to a {px} px grid (pixels of the "
+                    f"{screen} image; the grid shows on the sketch canvas only){early}",
+                )
+            )
+        if end is not None and window.start_ms <= end <= window.end_ms:
+            events.append(_Event(end, 1, f"{end} GRID off (Ctrl released; snapping since {start})"))
+    return events
 
 
 def _screen_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, int]]:
     """Shapes, sketch canvas, clipboard, cursor screen changes and zoom in ``window``."""
     events, counts = _shape_events(ticks, window)
     counts.update({"clipboard": 0, "cursor_moves": 0, "zoom": 0, "sketch": 0})
+    grid_events = _grid_events(ticks, window)
+    events.extend(grid_events)
+    counts["grid"] = sum(1 for e in grid_events if " GRID on" in e.text)
     sketching = False
     sketch_since: int | None = None
     cursor_screen: str | None = None

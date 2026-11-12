@@ -40,6 +40,7 @@ def test_config_defaults():
     assert c.jpeg_quality == 70
     assert c.auto_stop_minutes == 120
     assert c.archive_after_days == 30
+    assert c.drawing_grid_px == 16
     assert c.audio_input is None
     assert c.recording_folder.name == "VideoStory"
 
@@ -462,3 +463,15 @@ def test_pixel_ratio_mapping():
     from video_story.core.screens import Screen
 
     assert Screen.from_manifest(data).pixel_ratio == 2.0
+
+
+@pytest.mark.parametrize("value", [8, 16, 33, 128])
+def test_drawing_grid_any_value_in_range_is_accepted(value):
+    assert cfg.config_from_dict({"drawing_grid_px": value}).drawing_grid_px == value
+
+
+@pytest.mark.parametrize("value", [7, 129, 0, "abc", 2.5])
+def test_drawing_grid_out_of_range_is_rejected(value):
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.config_from_dict({"drawing_grid_px": value})
+    assert exc.value.field_name == "drawing_grid_px"

@@ -57,9 +57,10 @@ def make_recording(
                 "screen": sid,
                 "cursor": cursor,
                 "drawings": extra.get("drawings", []),
-                "drawing_now": None,
+                "drawing_now": extra.get("drawing_now"),
                 "zoom": extra.get("zoom", []),
                 "background": extra.get("background"),
+                "grid": extra.get("grid"),
                 "clipboard": extra.get("clipboard"),
             }
             (frames / frame_filename(t, sid, "png")).write_bytes(b"\x89PNG")
@@ -115,10 +116,12 @@ def test_timeline_merges_speech_shapes_clipboard_cursor_and_keypoints(tmp_path: 
         "shapes": 1,
         "removed": 1,
         "restored": 0,
+        "unfinished": 0,
         "clipboard": 1,
         "cursor_moves": 1,
         "zoom": 0,
         "sketch": 0,
+        "grid": 0,
         "keypoints": 1,
         "speech": 2,
     }
@@ -357,3 +360,79 @@ def test_frames_report_the_background(tmp_path: Path):
     found = frames_at(paths, 1000, "screen1")
     assert found["frames"][0]["background"] == "sketch"
     assert frames_at(paths, 2000, "screen1")["frames"][0]["background"] is None
+
+
+def test_grid_on_off_and_snapped_shapes(tmp_path: Path):
+    snapped = dict(rect(1, 1200, 1400), grid=16)
+    ticks = {
+        1000: {"grid": 16},
+        1500: {"grid": 16, "drawings": [snapped]},
+        2000: {"drawings": [snapped]},
+        # A short Ctrl without a snapped shape (Ctrl+Z, ...) is left out.
+        3000: {"grid": 16, "drawings": [snapped]},
+        3500: {"drawings": [snapped]},
+        4000: {"grid": 24, "drawings": [snapped]},
+    }
+    paths = make_recording(tmp_path, {**ticks, **{t: ticks[4000] for t in (4500, 5000)}})
+    result = build_timeline(paths, end_ms=5000)
+    text = lines(result)
+    assert (
+        "1000 GRID on: Ctrl held, points snap to a 16 px grid (pixels of the screen1 image; "
+        "the grid shows on the sketch canvas only)"
+    ) in text
+    assert "2000 GRID off (Ctrl released; snapping since 1000)" in text
+    assert not any(line.startswith(("3000 GRID", "3500 GRID")) for line in text)
+    assert any(line.startswith("4000 GRID on") and "24 px" in line for line in text)
+    draw = next(line for line in text if " DRAW #1 " in line)
+    assert "(snapped to the 16 px grid, Ctrl)" in draw
+    assert result["counts"]["grid"] == 2
+
+
+def test_brush_closed_with_shift_during_the_stroke(tmp_path: Path):
+    stroke = {
+        "id": 1,
+        "tool": "brush",
+        "color": "#FF0000",
+        "screen": "screen1",
+        "stroke_width": 4,
+        "started_ms": 1000,
+        "finished_ms": 1900,
+        "path": [{"screen": "screen1", "x": 1, "y": 1}, {"screen": "screen1", "x": 9, "y": 9}],
+        "shift": True,
+        "closed": True,
+        "closed_ms": 1600,
+    }
+    paths = make_recording(tmp_path, {2000: {"drawings": [stroke]}})
+    draw = next(line for line in lines(build_timeline(paths)) if " DRAW #1 " in line)
+    assert "(closed shape, Shift from 1600)" in draw
+
+
+def test_unfinished_shapes_are_reported(tmp_path: Path):
+    now_brush = {"tool": "brush", "color": "#FF0000", "screen": "screen1", "started_ms": 1200}
+    now_rect = {"tool": "rectangle", "color": "#0000FF", "screen": "screen2", "started_ms": 3100}
+    done = rect(1, 2200, 2400)
+    ticks = {
+        # Cancelled: drawn at 1500 and 2000, gone at 2500 without a shape.
+        1500: {"drawing_now": now_brush},
+        2000: {"drawing_now": now_brush},
+        # Finished: no DRAWING line, its DRAW line says it.
+        2300: {},
+        2500: {"drawing_now": {**now_brush, "started_ms": 2200}, "drawings": []},
+        3000: {"drawings": [done]},
+        # Cut by the end of the range.
+        3500: {"drawings": [done], "drawing_now": now_rect},
+        4000: {"drawings": [done], "drawing_now": now_rect},
+    }
+    paths = make_recording(tmp_path, ticks)
+    result = build_timeline(paths, end_ms=3800)
+    text = lines(result)
+    assert (
+        "2500 DRAWING brush #FF0000 screen1 (pressed 1200, never finished: cancelled with "
+        "Esc, the drawing layer closed, or a click without size)"
+    ) in text
+    assert (
+        "3800 DRAWING rectangle #0000FF screen2 (pressed 3100, not finished at the range end)"
+        in (text)
+    )
+    assert not any("pressed 2200" in line and "DRAWING" in line for line in text)
+    assert result["counts"]["unfinished"] == 2

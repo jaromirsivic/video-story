@@ -15,9 +15,10 @@ tools Rectangle / Ellipse / Line / Brush / Arrow / Eraser (icon and key only; re
 is the default) on the second and the 9-color palette in one row below; every button
 names its shortcut in brackets. The left mouse button draws with the selected tool (the
 eraser removes every shape whose line it touches or crosses; Undo brings them back),
-the right mouse button always draws an arrow. Other windows (the control window) can
-be kept above the overlay with :meth:`DrawingOverlay.keep_above`; like the toolbar
-they stay movable and clickable.
+the right mouse button always draws an arrow. The eraser removes a whole group at
+once: all connected lines, every piece of a line or arrow split at screen edges. Other
+windows (the control window) can be kept above the overlay with
+:meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
 
 Sketch: the Sketch/Screen button (``S``) switches the background of every screen
 between the screens as they are (the default whenever drawing mode is entered) and a
@@ -32,13 +33,25 @@ a color. On the overlay windows also ``0`` resets the zoom.
 
 Shift (left button only; the right-button arrow and the eraser ignore it): the
 rectangle becomes a square and the ellipse a circle while Shift is held; a brush
-stroke started with Shift held is a closed shape (its end joins its first point) that
-is finished by releasing Shift or the button. Lines: releasing the button with Shift
+stroke is a closed shape (its end joins its first point) when Shift is held at the press
+or pressed during the stroke (``closed_ms`` then says when); it is finished by releasing
+Shift or the button. Lines: releasing the button with Shift
 held leaves the line's end following the cursor; every press while Shift is held ends
 it there and starts the next line from that point (connected lines, one ``group``);
 releasing Shift ends the line at once when no button is held, else at the button's
-release. Shift is read from the mouse events and polled while a shape is being drawn
-(the overlay need not have the keyboard focus).
+release. Shift and Ctrl are read from the mouse and key events and polled while the
+overlay is shown (it need not have the keyboard focus).
+
+Ctrl (grid): while Ctrl is held, the points the user places snap to a grid of
+:meth:`DrawingOverlay.set_grid_size` logical pixels (Settings > Drawing Grid, 16 by
+default) starting at each screen's top-left corner: both corners of a rectangle or an
+ellipse (with Shift a square or circle whose side is a multiple of the spacing), the
+start and end of a line, every vertex of connected lines, the tail and the head of an
+arrow, but not where a line or an arrow is cut at a screen edge. Brush and eraser never
+snap. Ctrl is read at every point, so it can come or go in the middle of a drag. On the
+sketch canvas the grid is painted in light grey while Ctrl is held (it shows in the
+recording); on the screens it stays invisible. A shape with a snapped point carries
+``grid``; :meth:`DrawingOverlay.grid` tells the recorder while snapping is on.
 
 Lines and arrows can cross screens: while drawn they live in global coordinates in
 :class:`DrawingOverlay` and every window paints its part; when finished they are split
@@ -152,9 +165,11 @@ TOOL_ICON_SIZE = 18  # logical pixels of the tool icons
 TOOL_ICON_INK = QColor("#000000")  # the toolbar has fixed light colors in every theme
 ERASER_TOLERANCE = 6.0  # on-screen pixels around a shape's line that the eraser hits
 SKETCH_COLOR = QColor("#FFFFFF")  # the sketch canvas
+GRID_COLOR = QColor("#E2E2E2")  # the snapping grid on the sketch canvas (Ctrl held)
+DEFAULT_GRID_PX = 16  # grid spacing in logical pixels (Settings > Drawing Grid)
 UNDO_SHORTCUT = "Ctrl+Z"
 CLEAR_SHORTCUT = "Ctrl+Alt+C"
-SHIFT_POLL_MS = 30  # how often Shift is polled while a shape is being drawn
+SHIFT_POLL_MS = 30  # how often Shift and Ctrl are polled while the overlay is shown
 SKETCH_SHORTCUT = "S"
 SKETCH_LABEL = "Sketch"  # the button while the screens are shown (switches to sketch)
 SCREEN_LABEL = "Screen"  # the button while sketching (switches back to the screens)
@@ -193,7 +208,13 @@ TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
         "drag from start to end; release the button with Shift held for connected lines "
         "(every click starts the next one, releasing Shift ends)",
     ),
-    (Tool.BRUSH, "Brush", "B", "freehand line; hold Shift before pressing for a closed shape"),
+    (
+        Tool.BRUSH,
+        "Brush",
+        "B",
+        "freehand line; Shift (before or while drawing) closes the shape, releasing Shift "
+        "finishes it",
+    ),
     (Tool.ARROW, "Arrow", "A", "drag from tail to head"),
     (Tool.ERASER, "Eraser", "U", "drag across the line of a shape to remove it (Ctrl+Z undoes)"),
 )
@@ -216,7 +237,9 @@ class Shape:
     split at screen edges, share it (``None`` otherwise); ``segment`` numbers the
     connected lines 1, 2, ...; ``part_of`` is ``Tool.ARROW`` for the pieces of a split
     arrow without its head. ``split`` (internal, not exported) is shared by the pieces of
-    one split shape, 0 for a shape that was not split.
+    one split shape, 0 for a shape that was not split. ``closed_ms``: when Shift closed a
+    brush stroke already being drawn (``None`` when it was held from the press).
+    ``grid``: the grid spacing (canvas units) its points snapped to while Ctrl was held.
     """
 
     tool: Tool
@@ -232,6 +255,8 @@ class Shape:
     segment: int | None = None
     part_of: Tool | None = None
     split: int = 0
+    closed_ms: int | None = None
+    grid: int | None = None
 
     @property
     def closed(self) -> bool:
@@ -307,6 +332,10 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
         data["shift"] = True
     if shape.closed:
         data["closed"] = True
+        if shape.closed_ms is not None:
+            data["closed_ms"] = shape.closed_ms
+    if shape.grid is not None:
+        data["grid"] = round(shape.grid * device_pixel_ratio)
     if shape.group is not None:
         data["group"] = shape.group
     if shape.segment is not None:
@@ -324,6 +353,26 @@ def constrain_square(start: QPointF, end: QPointF) -> QPointF:
     """
     dx, dy = end.x() - start.x(), end.y() - start.y()
     side = max(abs(dx), abs(dy))
+    return QPointF(start.x() + math.copysign(side, dx), start.y() + math.copysign(side, dy))
+
+
+def snap_to_grid(point: QPointF, step: float) -> QPointF:
+    """``point`` moved to the nearest grid point (multiples of ``step``, from 0,0; half
+    way rounds up)."""
+    return QPointF(_round_half_up(point.x() / step) * step, _round_half_up(point.y() / step) * step)
+
+
+def _round_half_up(value: float) -> int:
+    return math.floor(value + 0.5)
+
+
+def snap_square(start: QPointF, end: QPointF, step: float) -> QPointF:
+    """The corner opposite ``start`` of the square dragged towards ``end`` whose side is a
+    multiple of ``step`` (a square stays a square; with ``start`` on the grid so is the
+    corner)."""
+    corner = constrain_square(start, end)
+    dx, dy = corner.x() - start.x(), corner.y() - start.y()
+    side = _round_half_up(abs(dx) / step) * step
     return QPointF(start.x() + math.copysign(side, dx), start.y() + math.copysign(side, dy))
 
 
@@ -476,6 +525,10 @@ class _FloatingDrag:
 
 def _shift_in(event: QMouseEvent) -> bool:
     return bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+
+def _ctrl_in(event: QMouseEvent) -> bool:
+    return bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
 
 def _overlay_window_flags() -> Qt.WindowType:
@@ -666,11 +719,20 @@ class OverlayWindow(QWidget):
         if not hits:
             return
         for shape in hits:
+            if not any(s is shape for s in self._shapes):
+                continue  # already removed with its group
+            if shape.group is not None:
+                # Connected lines and the pieces of a line or arrow split at screen edges
+                # share a group: the whole group goes, on every screen.
+                group = shape.group
+                self._erased.extend(self._take_matching(lambda s, g=group: s.group == g))
+                self._erased_other.extend(self._controller._take_group_pieces(group, self))
+                continue
             index = next(i for i, s in enumerate(self._shapes) if s is shape)
             del self._shapes[index]
             self._erased.append((index, shape))
             if shape.split:
-                # The other pieces of a line or arrow split at screen edges go with it.
+                # The other pieces of a split shape go with it.
                 self._erased_other.extend(self._controller._take_split_pieces(shape, self))
         self.update()
         self._controller._refresh_drawings()
@@ -685,10 +747,15 @@ class OverlayWindow(QWidget):
 
     def _take_split(self, split: int) -> list[tuple[int, Shape]]:
         """Remove the pieces of split shape ``split`` from this window: ``(index, shape)``."""
+        return self._take_matching(lambda s: s.split == split)
+
+    def _take_matching(self, predicate: Callable[[Shape], bool]) -> list[tuple[int, Shape]]:
+        """Remove every shape matching ``predicate`` from this window: ``(index, shape)``
+        in the order removed (each index as it was at its removal, for the undo)."""
         removed: list[tuple[int, Shape]] = []
         index = 0
         while index < len(self._shapes):
-            if self._shapes[index].split == split:
+            if predicate(self._shapes[index]):
                 removed.append((index, self._shapes.pop(index)))
             else:
                 index += 1
@@ -698,11 +765,30 @@ class OverlayWindow(QWidget):
         return removed
 
     def _shaped_end(self, shape: Shape) -> QPointF:
-        """The dragged corner: the cursor, or the square's corner while Shift is held."""
+        """The dragged corner: the cursor, or the square's corner while Shift is held; on
+        the grid while Ctrl is held."""
         end = self._raw_end if self._raw_end is not None else shape.points[-1]
-        if shape.tool in (Tool.RECTANGLE, Tool.ELLIPSE) and self._controller.shift_held:
+        controller = self._controller
+        if shape.tool not in (Tool.RECTANGLE, Tool.ELLIPSE):
+            return QPointF(end)
+        step = controller.grid_px if controller.ctrl_held else None
+        if step is not None:
+            shape.grid = step
+        if controller.shift_held:
+            if step is not None:
+                return snap_square(shape.points[0], end, step)
             return constrain_square(shape.points[0], end)
+        if step is not None:
+            return snap_to_grid(end, step)
         return QPointF(end)
+
+    def _on_ctrl_changed(self) -> None:
+        """Ctrl went down or up: the dragged corner snaps to the grid or follows the cursor
+        again, and the grid on the sketch canvas appears or disappears."""
+        shape = self._current
+        if shape is not None and shape.tool in (Tool.RECTANGLE, Tool.ELLIPSE):
+            shape.points[-1] = self._shaped_end(shape)
+        self.update()
 
     def _on_shift_changed(self, held: bool) -> None:
         """Shift went down or up while this window's shape is being dragged."""
@@ -712,6 +798,12 @@ class OverlayWindow(QWidget):
         if shape.tool in (Tool.RECTANGLE, Tool.ELLIPSE):
             shape.shift = held  # a square / circle while held, free again when released
             shape.points[-1] = self._shaped_end(shape)
+            self.update()
+        elif shape.tool is Tool.BRUSH and held and not shape.shift:
+            # Shift pressed in the middle of a stroke closes it at once, as if it had been
+            # held from the press (releasing Shift then finishes it).
+            shape.shift = True
+            shape.closed_ms = self._controller._now_ms()
             self.update()
         elif shape.closed and not held:
             self._finish_current()  # releasing Shift finishes a closed brush shape
@@ -770,6 +862,8 @@ class OverlayWindow(QWidget):
         if self._controller.sketch:
             # Sketch: a plain white canvas hides the screen (zoomed or not).
             painter.fillRect(self.rect(), SKETCH_COLOR)
+            if self._controller.ctrl_held:
+                self._paint_grid(painter)
         elif self._zoom > MIN_ZOOM and self._snapshot is not None:
             # Zoomed: show the frozen picture magnified, with crisp (unsmoothed) pixels.
             scale_x = self._snapshot.width() / max(1, self.width())
@@ -789,6 +883,25 @@ class OverlayWindow(QWidget):
         if span is not None:
             paint_shape(painter, span)  # the line or arrow being drawn (maybe from elsewhere)
         painter.end()
+
+    def _paint_grid(self, painter: QPainter) -> None:
+        """The snapping grid (Ctrl held on the sketch canvas): 1 px lines on the multiples
+        of the grid spacing, magnified with the zoom like the shapes."""
+        step = float(self._controller.grid_px)
+        visible = self.visible_canvas_rect()
+        pen = QPen(GRID_COLOR, 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        x = math.ceil(visible.left() / step) * step
+        while x <= visible.right():
+            vx = round(self.to_view(QPointF(x, 0.0)).x())
+            painter.drawLine(vx, 0, vx, self.height())
+            x += step
+        y = math.ceil(visible.top() / step) * step
+        while y <= visible.bottom():
+            vy = round(self.to_view(QPointF(0.0, y)).y())
+            painter.drawLine(0, vy, self.width(), vy)
+            y += step
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.WindowActivate:
@@ -814,6 +927,7 @@ class OverlayWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         button = event.button()
         controller = self._controller
+        controller._note_ctrl(_ctrl_in(event))
         if button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             controller._note_shift(_shift_in(event))  # may end connected lines
         span = controller._span
@@ -870,14 +984,18 @@ class OverlayWindow(QWidget):
             event.accept()
             return
         shift = controller.shift_held
+        snap = tool in (Tool.RECTANGLE, Tool.ELLIPSE) and controller.ctrl_held
+        if snap:
+            pos = snap_to_grid(pos, controller.grid_px)
         self._current = Shape(
             tool,
             QColor(controller.color),
             [pos, pos],
             self.screen_index,
             started_ms=controller._now_ms(),
-            # A square / circle, or a closed brush shape (Shift must be down before the press).
+            # A square / circle, or a closed brush shape (Shift may also come later).
             shift=shift and tool in (Tool.RECTANGLE, Tool.ELLIPSE, Tool.BRUSH),
+            grid=controller.grid_px if snap else None,
         )
         self._raw_end = pos
         self.update()
@@ -886,6 +1004,7 @@ class OverlayWindow(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._controller._note_ctrl(_ctrl_in(event))
         if self._pan_anchor is not None and event.buttons() & Qt.MouseButton.MiddleButton:
             press, offset = self._pan_anchor
             delta = event.position() - press
@@ -932,6 +1051,7 @@ class OverlayWindow(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._controller._note_ctrl(_ctrl_in(event))
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_anchor is not None:
             self._pan_anchor = None
             self.restore_cursor()
@@ -988,6 +1108,8 @@ class OverlayWindow(QWidget):
         letter = chr(key) if ord("A") <= key <= ord("Z") else ""
         if key == Qt.Key.Key_Shift:
             self._controller._note_shift(True)
+        elif key == Qt.Key.Key_Control:
+            self._controller._note_ctrl(True)
         elif key == Qt.Key.Key_Escape:
             self._controller._user_close()
         elif key == Qt.Key.Key_Z and ctrl and not alt and not shift:
@@ -1010,6 +1132,10 @@ class OverlayWindow(QWidget):
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
             self._controller._note_shift(False)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Control and not event.isAutoRepeat():
+            self._controller._note_ctrl(False)
             event.accept()
             return
         super().keyReleaseEvent(event)
@@ -1280,6 +1406,9 @@ class _Span:
     started_ms: int | None
     group: int | None = None  # set for connected lines (from the second line on)
     segment: int = 1
+    raw_end: QPointF | None = None  # the cursor (global), before snapping to the grid
+    start_snapped: bool = False  # the start lies on the grid (Ctrl at the press)
+    end_snapped: bool = False  # the end lies on the grid (Ctrl at the last move)
 
     @property
     def waiting(self) -> bool:
@@ -1354,6 +1483,9 @@ class DrawingOverlay(QObject):
         self._next_split = 0  # the last split shape
         self._span: _Span | None = None  # the line or arrow being drawn
         self._shift = False  # Shift as last seen (mouse events, key events, polling)
+        self._ctrl = False  # Ctrl as last seen: points snap to the grid while held
+        self._grid_px = DEFAULT_GRID_PX
+        self._grid: dict[str, int] | None = None  # grid spacing per screen for the sidecars
         # Where Shift is polled while a shape is being drawn (replaceable in tests).
         self._shift_source: Callable[[], Qt.KeyboardModifier] = (
             QGuiApplication.queryKeyboardModifiers
@@ -1396,8 +1528,31 @@ class DrawingOverlay(QObject):
 
     @property
     def shift_held(self) -> bool:
-        """Shift as last seen by the overlay (it is polled while a shape is drawn)."""
+        """Shift as last seen by the overlay (it is polled while the overlay is shown)."""
         return self._shift
+
+    @property
+    def ctrl_held(self) -> bool:
+        """Ctrl as last seen by the overlay: points snap to the grid while it is held."""
+        return self._ctrl
+
+    @property
+    def grid_px(self) -> int:
+        """The grid spacing in logical pixels (canvas units)."""
+        return self._grid_px
+
+    def set_grid_size(self, px: int) -> None:
+        """The spacing of the snapping grid in logical pixels (Settings > Drawing Grid)."""
+        self._grid_px = max(1, int(px))
+        for window in self._windows:
+            window.update()
+        self._refresh_drawings()
+
+    def grid(self) -> dict[str, int] | None:
+        """``{screen id: spacing in pixels of that screen's image}`` while Ctrl is held in
+        drawing mode (points snap to the grid), else ``None``. Thread-safety as for
+        :meth:`drawings`."""
+        return self._grid
 
     def keep_above(self, window: QWidget) -> None:
         """Keep ``window`` (e.g. the control window) above the overlay while it is shown.
@@ -1457,6 +1612,7 @@ class DrawingOverlay(QObject):
         self._raise_floating()
         self._schedule_toolbar_raise()
         self._refresh_drawings()
+        self._update_shift_timer()
 
     def hide(self) -> None:
         self._visible = False
@@ -1471,7 +1627,9 @@ class DrawingOverlay(QObject):
             window.hide()
             window.set_snapshot(None)  # a fresh picture is grabbed at the next show()
         self._cancel_span()
+        self._ctrl = False
         self._refresh_drawings()
+        self._update_shift_timer()
 
     def close(self) -> None:
         self.hide()
@@ -1705,6 +1863,19 @@ class DrawingOverlay(QObject):
                 )
         return taken
 
+    def _take_group_pieces(
+        self, group: int, origin: OverlayWindow
+    ) -> list[tuple[OverlayWindow, int, Shape]]:
+        """Remove every shape of ``group`` from the windows other than ``origin``."""
+        taken: list[tuple[OverlayWindow, int, Shape]] = []
+        for window in self._windows:
+            if window is not origin:
+                taken.extend(
+                    (window, index, piece)
+                    for index, piece in window._take_matching(lambda s, g=group: s.group == g)
+                )
+        return taken
+
     # -- Shift ----------------------------------------------------------------------
 
     def _note_shift(self, held: bool) -> None:
@@ -1718,13 +1889,32 @@ class DrawingOverlay(QObject):
         if span is not None and span.waiting and not held:
             self._finish_span()  # releasing Shift without a button ends connected lines
 
+    def _note_ctrl(self, held: bool) -> None:
+        """Ctrl is ``held`` (seen in a mouse or key event, or polled)."""
+        if held == self._ctrl:
+            return
+        self._ctrl = held
+        span = self._span
+        if span is not None and span.raw_end is not None:
+            self._move_span(span.raw_end)  # the end snaps to the grid or is free again
+        for window in list(self._windows):
+            window._on_ctrl_changed()
+        self._refresh_drawings()
+
     def _poll_shift(self) -> None:
-        self._note_shift(bool(self._shift_source() & Qt.KeyboardModifier.ShiftModifier))
+        modifiers = self._shift_source()
+        self._note_shift(bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
+        self._note_ctrl(bool(modifiers & Qt.KeyboardModifier.ControlModifier))
         self._update_shift_timer()
 
     def _update_shift_timer(self) -> None:
-        """Poll Shift only while a shape is being drawn (the overlay may lack the focus)."""
-        active = self._span is not None or any(w.current_shape is not None for w in self._windows)
+        """Poll Shift and Ctrl while the overlay is shown or a shape is being drawn (the
+        overlay may lack the focus; Ctrl shows the grid without moving the mouse)."""
+        active = (
+            self._visible
+            or self._span is not None
+            or any(w.current_shape is not None for w in self._windows)
+        )
         if active and not self._shift_timer.isActive():
             self._shift_timer.start()
         elif not active and self._shift_timer.isActive():
@@ -1735,16 +1925,42 @@ class DrawingOverlay(QObject):
     def _begin_span(
         self, window: OverlayWindow, tool: Tool, button: Qt.MouseButton, global_pos: QPointF
     ) -> None:
-        start = QPointF(global_pos)
+        start, snapped = self._snapped_global(global_pos, window)
         self._span = _Span(
-            tool, QColor(self._color), start, QPointF(start), window, button, self._now_ms()
+            tool,
+            QColor(self._color),
+            start,
+            QPointF(start),
+            window,
+            button,
+            self._now_ms(),
+            raw_end=QPointF(global_pos),
+            start_snapped=snapped,
+            end_snapped=snapped,
         )
         self._span_changed()
+
+    def _snapped_global(
+        self, global_pos: QPointF, window: OverlayWindow | None = None
+    ) -> tuple[QPointF, bool]:
+        """``global_pos`` on the grid of the screen under it while Ctrl is held, and
+        whether it was snapped. The grid is in canvas units of that window (its zoom)."""
+        if not self._ctrl:
+            return QPointF(global_pos), False
+        if window is None:
+            point = global_pos.toPoint()
+            window = next((w for w in self._windows if w.geometry().contains(point)), None)
+        if window is None:
+            return QPointF(global_pos), False
+        local = QPointF(window.mapFromGlobal(global_pos))
+        snapped = window.to_view(snap_to_grid(window.to_canvas(local), self._grid_px))
+        return QPointF(window.mapToGlobal(snapped)), True
 
     def _move_span(self, global_pos: QPointF) -> None:
         if self._span is None:
             return
-        self._span.end = QPointF(global_pos)
+        self._span.raw_end = QPointF(global_pos)
+        self._span.end, self._span.end_snapped = self._snapped_global(global_pos)
         for window in self._windows:
             window.update()  # only the screens change; the sidecars get the finished shape
 
@@ -1764,7 +1980,8 @@ class DrawingOverlay(QObject):
         span = self._span
         if span is None:
             return
-        span.end = QPointF(global_pos)
+        span.raw_end = QPointF(global_pos)
+        span.end, span.end_snapped = self._snapped_global(global_pos, window)
         pieces = self._span_pieces(span)
         if not pieces:
             span.button = Qt.MouseButton.LeftButton  # a press on the start: nothing to end
@@ -1786,6 +2003,9 @@ class DrawingOverlay(QObject):
             now,
             group=span.group,
             segment=span.segment + 1,
+            raw_end=QPointF(start),
+            start_snapped=span.end_snapped,
+            end_snapped=span.end_snapped,
         )
         self._span_changed()
 
@@ -1861,6 +2081,7 @@ class DrawingOverlay(QObject):
                 segment=span.segment if connected else None,
                 part_of=Tool.ARROW if span.tool is Tool.ARROW and not head else None,
                 split=split,
+                grid=self._grid_px if span.start_snapped or span.end_snapped else None,
             )
             parts.append((window, shape))
         self._commit_shapes(parts)
@@ -1882,7 +2103,9 @@ class DrawingOverlay(QObject):
             self._drawings = []
             self._drawing_now = None
             self._zoom = []
+            self._grid = None
             return
+        grid: dict[str, int] = {}
         qscreens = QGuiApplication.screens()
         result: list[dict[str, object]] = []
         drawing_now: dict[str, object] | None = None
@@ -1897,6 +2120,8 @@ class DrawingOverlay(QObject):
             if screen is None:
                 continue
             ratio = float(qscreen.devicePixelRatio())
+            if self._ctrl:
+                grid[screen.id] = round(self._grid_px * ratio)
             for shape in window.view_shapes(include_current=False):
                 if shape.points:
                     result.append(shape_to_json(shape, screen, ratio))
@@ -1926,6 +2151,7 @@ class DrawingOverlay(QObject):
         self._drawings = result  # in the order the shapes were finished
         self._drawing_now = drawing_now
         self._zoom = zoom
+        self._grid = grid or None
 
     def _floating_windows(self) -> list[QWidget]:
         """Visible windows kept above the overlay, bottom to top (the toolbar last)."""
@@ -2019,7 +2245,9 @@ class DrawingOverlay(QObject):
 
 __all__ = [
     "ARROW_HEAD_LENGTH",
+    "DEFAULT_GRID_PX",
     "DEFAULT_TOOL",
+    "GRID_COLOR",
     "ERASER_TOLERANCE",
     "MAX_ZOOM",
     "STROKE_WIDTH",
@@ -2031,6 +2259,8 @@ __all__ = [
     "Tool",
     "clip_segment",
     "constrain_square",
+    "snap_square",
+    "snap_to_grid",
     "erase_hits",
     "paint_shape",
     "shape_outline",

@@ -77,6 +77,7 @@ from video_story.ui.icons import (
 
 from .mouse_view import MOUSE_WIDGET_SIZE, MouseWidget
 from .search import match_spans, normalize_query
+from .separators import SeparatorLine
 from .workers import automatic_gc_paused
 
 log = logging.getLogger(__name__)
@@ -777,6 +778,10 @@ class PreviewPanel(QWidget):
         layout.setSpacing(4)
         self.view = PreviewWidget(self)
         layout.addWidget(self.view, 1)
+        # A fixed thin line divides the picture from the controls (the double line of the
+        # splitter handle below the controls is the one that can be dragged).
+        self.separator = SeparatorLine(self)
+        layout.addWidget(self.separator)
 
         # Below the picture a grid of three columns: the mouse on the left (across the
         # transport, time and subtitle rows), the transport buttons centred with the time

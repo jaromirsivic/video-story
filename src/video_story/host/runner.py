@@ -254,6 +254,7 @@ class FrameRef:
         drawing_now: dict[str, Any] | None = None  # the shape being drawn, no geometry
         zoom: list[Any] = []
         background: str | None = None  # "screen" / "sketch" while drawing, else None
+        grid: int | None = None  # grid spacing (image pixels) while Ctrl snaps, else None
         clipboard: str | None = None  # text copied during the recording (see ui.clipboard)
         try:
             data = json.loads(self.sidecar.read_text(encoding="utf-8"))
@@ -271,6 +272,9 @@ class FrameRef:
             raw_background = data.get("background")
             if isinstance(raw_background, str):
                 background = raw_background
+            raw_grid = data.get("grid")
+            if isinstance(raw_grid, int) and not isinstance(raw_grid, bool):
+                grid = raw_grid
             raw_clipboard = data.get("clipboard")
             if isinstance(raw_clipboard, str):
                 clipboard = raw_clipboard
@@ -286,6 +290,7 @@ class FrameRef:
             "drawing_now": drawing_now,
             "zoom": zoom,
             "background": background,
+            "grid": grid,
             "clipboard": clipboard,
         }
         if not include_drawings:

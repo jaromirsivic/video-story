@@ -101,10 +101,6 @@ from PySide6.QtGui import (
     QFont,
     QKeyEvent,
     QKeySequence,
-    QPainter,
-    QPaintEvent,
-    QPalette,
-    QPen,
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
@@ -120,7 +116,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
-    QSplitterHandle,
     QStatusBar,
     QToolButton,
     QVBoxLayout,
@@ -176,6 +171,7 @@ from .recordings_view import BADGE_ARCHIVED, MIN_LIST_WIDTH, RecordingsListView,
 from .render_dialog import ExportFn, RenderVideoDialog, default_output_path
 from .rendering import RenderManager
 from .search import SearchJob, SearchSignals, normalize_query, text_matches
+from .separators import SeparatorSplitter
 from .subtitle_dialog import SubtitleDialog
 from .theme import apply_theme, system_prefers_dark
 from .timeline.model import TimelineModel
@@ -316,34 +312,6 @@ class _MouseDetailsJob(QRunnable):
 def format_crop_time(ms: int) -> str:
     """``HH:MM:SS.cc`` - the crop editors and length show hundredths only (narrower)."""
     return format_timestamp(max(0, int(ms)))[:-1]
-
-
-class SeparatorHandle(QSplitterHandle):
-    """Splitter handle with a thin line across, visible on light and dark backgrounds
-    (the style's grip dots alone vanish on a white background)."""
-
-    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
-        painter = QPainter(self)
-        window = self.palette().color(QPalette.ColorRole.Window)
-        if window.lightness() >= 128:
-            color = self.palette().color(QPalette.ColorRole.Dark)
-        else:
-            color = window.lighter(220)
-        painter.setPen(QPen(color, 1))
-        if self.orientation() == Qt.Orientation.Vertical:  # a horizontal line
-            y = self.height() // 2
-            painter.drawLine(0, y, self.width(), y)
-        else:
-            x = self.width() // 2
-            painter.drawLine(x, 0, x, self.height())
-        painter.end()
-
-
-class SeparatorSplitter(QSplitter):
-    """QSplitter whose handles draw :class:`SeparatorHandle`'s line."""
-
-    def createHandle(self) -> QSplitterHandle:  # noqa: N802
-        return SeparatorHandle(self.orientation(), self)
 
 
 class TimeEdit(QLineEdit):
