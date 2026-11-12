@@ -56,7 +56,9 @@ such a recording into the editor's list, but it is not yours to act on). For
 
 While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks the
 current moment as important (the button counts down 3, 2, 1 before the next one), and
-**Draw** (`Ctrl+Alt+D`) switches the drawing layer on and off. The user can press
+**Draw** (`Ctrl+Space` or `Ctrl+F1`) switches the drawing layer on and off (leaving it
+removes the shapes; the timeline shows them as `REMOVED`). The window can also be
+hidden to the system tray (a click on the tray icon shows it again). The user can press
 **Stop** (`Ctrl+Alt+S`), then choose **Video Editor** (the default: the editor opens at once and
 transcribes while the user crops - the green arrow under the narration track says
 `transcribing (ETA: m:ss)` -, optionally corrects subtitles with **Edit**, types master

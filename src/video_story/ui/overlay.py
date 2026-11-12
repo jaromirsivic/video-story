@@ -707,7 +707,7 @@ class OverlayToolbar(QWidget):
             (
                 ("Undo", "Undo the last shape", self.undo_requested),
                 ("Clear", "Remove all drawings", self.clear_requested),
-                ("Close", "Leave drawing mode", self.close_requested),
+                ("Close", "Leave drawing mode (removes all drawings)", self.close_requested),
             )
         ):
             button = QPushButton(label, self)

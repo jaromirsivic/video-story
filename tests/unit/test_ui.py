@@ -597,8 +597,9 @@ def _activate(qtbot, widget) -> None:
 
 
 def test_buttons_name_their_shortcuts(window):
-    assert window.draw_button.text() == "Draw (Ctrl+Alt+D)"
-    assert "Ctrl+Alt+D" in window.draw_button.toolTip()
+    assert window.draw_button.text() == "Draw (Ctrl+Space)"
+    assert "Ctrl+Space" in window.draw_button.toolTip()
+    assert "Ctrl+F1" in window.draw_button.toolTip()
     right = window.geometry().right()
     window.record_button.click()
     # The longer labels widen the window to the left: it stays in its top right spot.
@@ -619,7 +620,12 @@ def test_shortcuts_are_active_only_while_recording(window, monkeypatch):
     assert not window.hotkeys.enabled and window.hotkeys.application_wide == []
     window.record_button.click()
     assert window.hotkeys.enabled
-    assert window.hotkeys.application_wide == ["Ctrl+Alt+S", "Ctrl+Alt+K", "Ctrl+Alt+D"]
+    assert window.hotkeys.application_wide == [
+        "Ctrl+Alt+S",
+        "Ctrl+Alt+K",
+        "Ctrl+Space",
+        "Ctrl+F1",
+    ]
     _auto_answer_stop(monkeypatch, StopChoice.DISCARD, confirm=True)
     window.record_button.click()
     assert not window.hotkeys.enabled and window.hotkeys.application_wide == []
@@ -662,6 +668,8 @@ def test_draw_shortcut_toggles_drawing(qtbot, controller):
         def __init__(self) -> None:
             super().__init__()
             self.visible = False
+            self.shapes = 0
+            self.clears = 0
 
         def show(self) -> None:
             self.visible = True
@@ -672,6 +680,10 @@ def test_draw_shortcut_toggles_drawing(qtbot, controller):
         def close(self) -> None:
             self.visible = False
 
+        def clear(self) -> None:
+            self.shapes = 0
+            self.clears += 1
+
     overlays: list[FakeOverlay] = []
 
     def factory():
@@ -681,18 +693,135 @@ def test_draw_shortcut_toggles_drawing(qtbot, controller):
     w = cw.ControlWindow(controller, on_finished=lambda status: None, overlay_factory=factory)
     w.show()
     try:
-        ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        ctrl = Qt.KeyboardModifier.ControlModifier
         w.record_button.click()
         _activate(qtbot, w)
-        qtbot.keyClick(w, Qt.Key.Key_D, ctrl_alt)
+        qtbot.keyClick(w, Qt.Key.Key_Space, ctrl)
         qtbot.waitUntil(lambda: w.draw_button.isChecked(), timeout=1000)
-        assert overlays and overlays[0].visible
-        qtbot.keyClick(w, Qt.Key.Key_D, ctrl_alt)
+        overlay = overlays[0]
+        assert overlay.visible
+        overlay.shapes = 2
+        # Leaving drawing mode by the shortcut clears what was drawn.
+        qtbot.keyClick(w, Qt.Key.Key_Space, ctrl)
         qtbot.waitUntil(lambda: not w.draw_button.isChecked(), timeout=1000)
-        assert not overlays[0].visible
+        assert not overlay.visible and overlay.shapes == 0 and overlay.clears == 1
+        # Ctrl+F1 toggles drawing too.
+        qtbot.keyClick(w, Qt.Key.Key_F1, ctrl)
+        qtbot.waitUntil(lambda: w.draw_button.isChecked(), timeout=1000)
+        assert overlay.visible
+        overlay.shapes = 3
+        qtbot.keyClick(w, Qt.Key.Key_F1, ctrl)
+        qtbot.waitUntil(lambda: not w.draw_button.isChecked(), timeout=1000)
+        assert overlay.shapes == 0 and overlay.clears == 2
+        # The button, then Esc on the overlay (its closed signal): cleared as well.
+        w.draw_button.click()
+        assert overlay.visible
+        overlay.shapes = 1
+        overlay.visible = False
+        overlay.closed.emit()
+        assert not w.draw_button.isChecked()
+        assert overlay.shapes == 0 and overlay.clears == 3
     finally:
         w._done = True
         w.close()
+
+
+def test_drawings_are_cleared_when_drawing_mode_ends(qtbot, controller):
+    """With the real overlay: shapes drawn before Esc are gone at the next Draw."""
+    from PySide6.QtCore import QPoint, Qt
+
+    from video_story.ui.overlay import DrawingOverlay
+
+    w = cw.ControlWindow(
+        controller, on_finished=lambda status: None, overlay_factory=DrawingOverlay
+    )
+    w.show()
+    try:
+        w.record_button.click()
+        w.draw_button.click()
+        overlay = w._overlay
+        assert overlay is not None and overlay.is_visible()
+        window = overlay.windows[0]
+        qtbot.mousePress(window, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        qtbot.mouseMove(window, QPoint(60, 60))
+        qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+        assert len(overlay.shapes()) == 1
+        overlay._user_close()  # Esc / Close / the cross
+        assert not w.draw_button.isChecked()
+        w.draw_button.click()
+        assert overlay.is_visible() and overlay.shapes() == []
+    finally:
+        w._close_overlay()  # its application-wide shortcuts must not outlive the test
+        w._done = True
+        w.close()
+
+
+def test_theme_button_switches_and_remembers_the_theme(qtbot, controller, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    app = QApplication.instance()
+    palette, style = app.palette(), app.style().objectName()
+    settings = QSettings(str(tmp_path / "recorder.ini"), QSettings.Format.IniFormat)
+    w = cw.ControlWindow(controller, on_finished=lambda status: None, settings=settings)
+    w.show()
+    try:
+        start = w.dark
+        assert w.theme_button.text() == "Theme"
+        assert ("light" if start else "dark") in w.theme_button.toolTip()
+        w.theme_button.click()
+        assert w.dark is (not start)
+        assert settings.value(cw.THEME_SETTING, type=bool) is (not start)
+        assert ("light" if w.dark else "dark") in w.theme_button.toolTip()
+        dark_window = app.palette().color(app.palette().ColorRole.Window).lightness() < 128
+        assert dark_window is w.dark
+        # A new window starts in the remembered theme.
+        other = cw.ControlWindow(controller, on_finished=lambda status: None, settings=settings)
+        assert other.dark is w.dark
+        other._done = True
+        other.close()
+    finally:
+        w._done = True
+        w.close()
+        app.setStyle(style)
+        app.setPalette(palette)
+
+
+def test_hide_to_tray_and_back(window, monkeypatch, qtbot):
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    messages: list[str] = []
+    monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        QSystemTrayIcon, "showMessage", lambda self, title, text, *a: messages.append(text)
+    )
+    assert window.tray_button.text() == "Hide to Tray"
+    window.record_button.click()
+    window.tray_button.click()
+    assert window.in_tray and not window.isVisible()
+    assert messages and "Ctrl+Alt+S" in messages[0]
+    assert window.hotkeys.enabled  # the shortcuts keep working while hidden
+    # A left or a right click on the tray icon shows the window again.
+    window._on_tray_activated(QSystemTrayIcon.ActivationReason.Context)
+    assert window.isVisible() and not window.in_tray
+    assert window.hide_to_tray()
+    window._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    assert window.isVisible() and not window.in_tray
+    # Discarding the recording from the tray brings the window back.
+    assert window.hide_to_tray()
+    _auto_answer_stop(monkeypatch, StopChoice.DISCARD, confirm=True)
+    window._stop_by_shortcut()
+    qtbot.waitUntil(lambda: window.isVisible(), timeout=1000)
+    assert not window.in_tray and not window.controller.recording
+
+
+def test_hide_to_tray_without_a_tray(window, monkeypatch):
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    notes: list[str] = []
+    monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False))
+    monkeypatch.setattr(cw.QMessageBox, "information", lambda *a, **k: notes.append(a[2]))
+    assert window.hide_to_tray() is False
+    assert window.isVisible() and notes
 
 
 def test_windows_hotkey_codes():
@@ -703,7 +832,16 @@ def test_windows_hotkey_codes():
         ord("S"),
     )
     assert hotkeys.windows_hotkey("Ctrl+Alt+K")[1] == ord("K")
-    assert hotkeys.windows_hotkey("Ctrl+Alt+F5") is None  # only letters and digits
+    assert hotkeys.windows_hotkey("Ctrl+Space") == (
+        hotkeys.MOD_NOREPEAT | hotkeys.MOD_CONTROL,
+        hotkeys.VK_SPACE,
+    )
+    assert hotkeys.windows_hotkey("Ctrl+F1") == (
+        hotkeys.MOD_NOREPEAT | hotkeys.MOD_CONTROL,
+        hotkeys.VK_F1,
+    )
+    assert hotkeys.windows_hotkey("Ctrl+F5")[1] == hotkeys.VK_F1 + 4
+    assert hotkeys.windows_hotkey("Ctrl+Home") is None  # not a supported key
 
 
 @pytest.mark.skipif(not os.name == "nt", reason="WM_HOTKEY is a Windows message")

@@ -29,7 +29,11 @@ def dark_palette() -> QPalette:
     text = QColor("#e6e6e6")
     disabled = QColor("#7a7a7a")
     highlight = QColor("#3b7dd8")
-    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+    for group in (
+        QPalette.ColorGroup.Active,
+        QPalette.ColorGroup.Inactive,
+        QPalette.ColorGroup.Disabled,
+    ):
         p.setColor(group, QPalette.ColorRole.Window, window)
         p.setColor(group, QPalette.ColorRole.WindowText, text)
         p.setColor(group, QPalette.ColorRole.Base, base)
@@ -65,7 +69,11 @@ def light_palette() -> QPalette:
     text = QColor("#1e1e1e")
     disabled = QColor("#9a9a9a")
     highlight = QColor("#2f6fd0")
-    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+    for group in (
+        QPalette.ColorGroup.Active,
+        QPalette.ColorGroup.Inactive,
+        QPalette.ColorGroup.Disabled,
+    ):
         p.setColor(group, QPalette.ColorRole.Window, window)
         p.setColor(group, QPalette.ColorRole.WindowText, text)
         p.setColor(group, QPalette.ColorRole.Base, base)

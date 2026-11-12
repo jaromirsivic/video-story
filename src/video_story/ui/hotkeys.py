@@ -1,5 +1,8 @@
 """Keyboard shortcuts of the control window while recording (Stop, Keypoint, Draw).
 
+One action may have several shortcuts (Draw: Ctrl+Space and Ctrl+F1, in case another
+program, such as an input method, already holds one of them).
+
 While recording the user works in other applications, so the control window rarely has
 the keyboard focus. On Windows the shortcuts are therefore system-wide hotkeys
 (``RegisterHotKey``): they work whichever application is in front, and the key press
@@ -35,6 +38,8 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_NOREPEAT = 0x4000  # holding the keys down fires once
 HOTKEY_ID_BASE = 0x5653  # application hotkey ids must lie in 0x0000-0xBFFF
+VK_SPACE = 0x20
+VK_F1 = 0x70  # F1-F24 are 0x70-0x87
 
 
 @dataclass
@@ -56,15 +61,18 @@ def system_wide_available() -> bool:
 def windows_hotkey(sequence: str) -> tuple[int, int] | None:
     """``(modifiers, virtual key)`` for RegisterHotKey, ``None`` when not expressible.
 
-    Only letters and digits are supported: their Qt key codes equal the Windows
-    virtual-key codes.
+    Letters, digits and Space (their Qt key codes equal the Windows virtual-key codes)
+    and the function keys F1-F24 are supported.
     """
     keys = QKeySequence(sequence)
     if keys.count() != 1:
         return None
     combination = keys[0]
     key = int(combination.key().value)
-    if not (ord("A") <= key <= ord("Z") or ord("0") <= key <= ord("9")):
+    f1 = int(Qt.Key.Key_F1.value)
+    if f1 <= key <= int(Qt.Key.Key_F24.value):
+        key = VK_F1 + key - f1
+    elif not (ord("A") <= key <= ord("Z") or ord("0") <= key <= ord("9") or key == VK_SPACE):
         return None
     qt_modifiers = combination.keyboardModifiers()
     modifiers = MOD_NOREPEAT

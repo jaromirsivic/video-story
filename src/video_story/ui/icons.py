@@ -488,6 +488,29 @@ def moon_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+def hide_to_tray_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """An arrow pointing down into an open tray: hide the window to the system tray."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = _transport_pen(ink, s)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # The tray: a U open at the top.
+        p.drawPolyline(
+            QPolygonF([QPointF(s * 0.16, s * 0.56), QPointF(s * 0.16, s * 0.84),
+                       QPointF(s * 0.84, s * 0.84), QPointF(s * 0.84, s * 0.56)])
+        )  # fmt: skip
+        # The arrow: a shaft and a head reaching into the tray.
+        p.drawLine(QPointF(s * 0.50, s * 0.12), QPointF(s * 0.50, s * 0.56))
+        p.drawPolyline(
+            QPolygonF([QPointF(s * 0.32, s * 0.44), QPointF(s * 0.50, s * 0.64),
+                       QPointF(s * 0.68, s * 0.44)])
+        )  # fmt: skip
+
+    return QIcon(_pixmap(size, draw))
+
+
 def refresh_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     """A circular arrow (the usual Refresh / reload sign)."""
     ink = QColor(color) if color is not None else _button_text_color()
@@ -555,6 +578,7 @@ __all__ = [
     "arrow_icon",
     "discard_icon",
     "draw_icon",
+    "hide_to_tray_icon",
     "instructions_icon",
     "keypoint_icon",
     "moon_icon",

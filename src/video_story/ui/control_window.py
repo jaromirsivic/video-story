@@ -9,7 +9,14 @@ the frame sidecars of the next tick.
 
 Keyboard shortcuts while recording (shown in brackets on the buttons and in their
 tooltips; system-wide on Windows, see :mod:`video_story.ui.hotkeys`): Ctrl+Alt+S Stop,
-Ctrl+Alt+K Keypoint, Ctrl+Alt+D Draw.
+Ctrl+Alt+K Keypoint, Ctrl+Space or Ctrl+F1 Draw. Leaving drawing mode - Esc, the Draw
+shortcut or button again, the toolbar's Close - also clears what was drawn, so the next
+drawing starts on an empty screen.
+
+Two small icon buttons follow Draw: the light / dark theme of the window (the editor's
+sun and moon icons; remembered in the recorder's settings) and **Hide to Tray**, which
+hides the window behind a tray icon (the application's camera icon) and says in a
+balloon how to stop; a left or right click on the icon brings the window back.
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,18 +33,31 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSystemTrayIcon,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from video_story.capture.recorder import low_disk_message
 from video_story.core.timeline import format_timestamp
+from video_story.editor.theme import apply_theme, system_prefers_dark
 from video_story.host.controller import SessionController
 from video_story.host.editor_launcher import launch_editor
 
 from .clipboard import ClipboardTracker
 from .hotkeys import Hotkey, RecordingHotkeys
-from .icons import draw_icon, keypoint_icon, record_icon, settings_icon, stop_icon
+from .icons import (
+    app_icon,
+    draw_icon,
+    hide_to_tray_icon,
+    keypoint_icon,
+    moon_icon,
+    record_icon,
+    settings_icon,
+    stop_icon,
+    sun_icon,
+)
 from .settings_dialog import SettingsDialog
 from .stop_dialog import StopChoice, StopDialog, confirm_discard
 
@@ -46,10 +66,13 @@ log = logging.getLogger(__name__)
 UI_TICK_MS = 200
 STOP_SHORTCUT = "Ctrl+Alt+S"
 KEYPOINT_SHORTCUT = "Ctrl+Alt+K"
-DRAW_SHORTCUT = "Ctrl+Alt+D"
+DRAW_SHORTCUT = "Ctrl+Space"
+DRAW_ALT_SHORTCUT = "Ctrl+F1"  # also toggles drawing (Ctrl+Space may be taken)
 STOP_LABEL = "Stop"
 KEYPOINT_LABEL = "Keypoint"
 DRAW_LABEL = "Draw"
+THEME_SETTING = "view/dark"
+TRAY_BALLOON_MS = 8000
 KEYPOINT_COOLDOWN_S = 3  # the button counts 3, 2, 1 before the next keypoint
 SAVED_NOTE = "What was recorded so far is saved and opens in the Video Story Editor."
 
@@ -92,8 +115,15 @@ class ControlWindow(QWidget):
         config_file: Path | None = None,
         preflight: Callable[[], list[str]] | None = None,
         system_wide_hotkeys: bool | None = None,
+        settings: QSettings | None = None,
     ) -> None:
         super().__init__()
+        self._settings = settings  # remembers the theme (None: not remembered)
+        self._tray: QSystemTrayIcon | None = None
+        self._dark = system_prefers_dark()
+        if settings is not None and settings.contains(THEME_SETTING):
+            self._dark = bool(settings.value(THEME_SETTING, self._dark, type=bool))
+            apply_theme(self._dark)
         self.controller = controller
         self._on_finished = on_finished
         self._overlay_factory = overlay_factory
@@ -153,12 +183,21 @@ class ControlWindow(QWidget):
 
         self.draw_button = QPushButton(draw_icon(), _with_shortcut(DRAW_LABEL, DRAW_SHORTCUT))
         self.draw_button.setToolTip(
-            f"Draw annotations on the screen ({DRAW_SHORTCUT}; available while recording)"
+            f"Draw annotations on the screen ({DRAW_SHORTCUT} or {DRAW_ALT_SHORTCUT}; "
+            "available while recording).\nEsc, the same shortcut or this button again "
+            "leaves drawing mode and removes everything drawn."
         )
         self.draw_button.setCheckable(True)
         self.draw_button.setEnabled(False)
         self.draw_button.toggled.connect(self._toggle_overlay)
         row.addWidget(self.draw_button)
+
+        side = self.draw_button.sizeHint().height()
+        self.theme_button = _icon_button("Theme", side, self.toggle_theme)
+        row.addWidget(self.theme_button)
+        self.tray_button = _icon_button("Hide to Tray", side, self.hide_to_tray)
+        row.addWidget(self.tray_button)
+        self._apply_icons()
         layout.addLayout(row)
 
         self.status_label = QLabel("Ready. Press Record to start.")
@@ -176,6 +215,7 @@ class ControlWindow(QWidget):
                 Hotkey(STOP_SHORTCUT, self._stop_by_shortcut),
                 Hotkey(KEYPOINT_SHORTCUT, self.insert_keypoint),
                 Hotkey(DRAW_SHORTCUT, self._draw_by_shortcut),
+                Hotkey(DRAW_ALT_SHORTCUT, self._draw_by_shortcut),
             ],
             system_wide=system_wide_hotkeys,
         )
@@ -395,6 +435,8 @@ class ControlWindow(QWidget):
         self._show_recording_controls(False)
         self.draw_button.setEnabled(False)
         self.status_label.setText("Recording discarded. Press Record to start again.")
+        if self.in_tray:
+            self.restore_from_tray()  # nothing is recording any more: show the window
         self._fit_width(right)
 
     # Processing -------------------------------------------------------------
@@ -491,6 +533,7 @@ class ControlWindow(QWidget):
         self.hotkeys.disable()
         self._timer.stop()
         self._close_overlay()
+        self._drop_tray()
         self.hide()
         self._on_finished(status)
 
@@ -512,6 +555,91 @@ class ControlWindow(QWidget):
         if dialog.exec() and dialog.result_config is not None:
             self.controller.config = dialog.result_config
             self.status_label.setText("Settings saved. Press Record to start.")
+
+    # Theme ------------------------------------------------------------------
+
+    @property
+    def dark(self) -> bool:
+        return self._dark
+
+    def set_theme(self, dark: bool) -> None:
+        """Apply the dark or the light theme (the whole recorder: dialogs too)."""
+        right = self.geometry().right()
+        self._dark = dark
+        apply_theme(dark)
+        self._apply_icons()
+        if self._settings is not None:
+            self._settings.setValue(THEME_SETTING, dark)
+            self._settings.sync()
+        self._fit_width(right)
+
+    def toggle_theme(self) -> None:
+        self.set_theme(not self._dark)
+
+    def _apply_icons(self) -> None:
+        """(Re)draw the icons that follow the button text colour of the theme."""
+        self.draw_button.setIcon(draw_icon())
+        self.theme_button.setIcon(sun_icon() if self._dark else moon_icon())
+        target = "light" if self._dark else "dark"
+        self.theme_button.setToolTip(f"Switch this window to the {target} theme")
+        self.tray_button.setIcon(hide_to_tray_icon())
+        self.tray_button.setToolTip(
+            "Hide to Tray: hide this window behind an icon in the system tray; click the "
+            f"icon to bring it back (while recording, {STOP_SHORTCUT} still stops)"
+        )
+
+    # System tray ------------------------------------------------------------
+
+    @property
+    def in_tray(self) -> bool:
+        """True while the window is hidden behind its tray icon."""
+        return self._tray is not None and self._tray.isVisible()
+
+    def hide_to_tray(self) -> bool:
+        """Hide the window behind a tray icon; False when there is no system tray."""
+        if self._done:
+            return False
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            QMessageBox.information(
+                self, "Hide to Tray", "This desktop has no system tray to hide into."
+            )
+            return False
+        if self._tray is None:
+            self._tray = QSystemTrayIcon(app_icon(), self)
+            self._tray.setToolTip("Video Story - click to show the window")
+            self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+        self.hide()
+        if self.controller.recording:
+            message = (
+                f"Recording continues. Stop it with {STOP_SHORTCUT}, or click this icon "
+                "to show the Video Story window again."
+            )
+        else:
+            message = "Click this icon to show the Video Story window again."
+        self._tray.showMessage(
+            "Video Story", message, QSystemTrayIcon.MessageIcon.Information, TRAY_BALLOON_MS
+        )
+        return True
+
+    def restore_from_tray(self) -> None:
+        """Show the window again (a click on the tray icon, the recording ended)."""
+        if self._tray is not None:
+            self._tray.hide()
+        if self._done:
+            return
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        # Left (Trigger), right (Context), double or middle click: show the window.
+        if reason != QSystemTrayIcon.ActivationReason.Unknown:
+            self.restore_from_tray()
+
+    def _drop_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.hide()
 
     # Drawing overlay --------------------------------------------------------
 
@@ -544,6 +672,7 @@ class ControlWindow(QWidget):
                 self.raise_()
         elif self._overlay is not None:
             self._overlay.hide()  # type: ignore[attr-defined]
+            self._clear_overlay()
 
     def _connect_overlay_to_recorder(self) -> None:
         """Let the recorder store the drawings in every frame sidecar."""
@@ -583,9 +712,21 @@ class ControlWindow(QWidget):
         recorder.drawing_windows = handles
 
     def _overlay_closed(self) -> None:
+        """The user left drawing mode on the overlay (Esc, Close, the cross)."""
+        self._clear_overlay()
         self.draw_button.blockSignals(True)
         self.draw_button.setChecked(False)
         self.draw_button.blockSignals(False)
+
+    def _clear_overlay(self) -> None:
+        """Leaving drawing mode removes the shapes: the next drawing starts empty."""
+        clear = getattr(self._overlay, "clear", None)
+        if clear is None:
+            return
+        try:
+            clear()
+        except Exception:  # pragma: no cover - drawing must never stop a recording
+            log.exception("clearing the drawings failed")
 
     def _close_overlay(self) -> None:
         recorder = self.controller.recorder
@@ -655,6 +796,7 @@ class ControlWindow(QWidget):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._done:
             self.hotkeys.disable()
+            self._drop_tray()
             event.accept()
             return
         if self._processing or self._halting:
@@ -669,6 +811,7 @@ class ControlWindow(QWidget):
         except Exception:  # pragma: no cover
             log.exception("cancel failed")
         self._done = True
+        self._drop_tray()
         event.accept()
         self._on_finished("cancelled")
 
@@ -678,7 +821,22 @@ def _with_shortcut(label: str, shortcut: str) -> str:
     return f"{label} ({shortcut})"
 
 
+def _icon_button(name: str, side: int, slot: Callable[[], object]) -> QToolButton:
+    """A small square icon-only button as high as the text buttons of the row;
+    ``name`` names it (tests, accessibility) without showing."""
+    button = QToolButton()
+    button.setText(name)
+    button.setAccessibleName(name)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+    button.setFixedSize(QSize(side, side))
+    button.setIconSize(QSize(max(12, side - 10), max(12, side - 10)))
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    button.clicked.connect(lambda _checked=False: slot())
+    return button
+
+
 __all__ = [
+    "DRAW_ALT_SHORTCUT",
     "DRAW_LABEL",
     "DRAW_SHORTCUT",
     "KEYPOINT_COOLDOWN_S",

@@ -35,6 +35,7 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
     platform = get_platform()
     platform.prepare_process()  # DPI awareness must be set before Qt starts
 
+    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from video_story.host.controller import SessionController
@@ -83,6 +84,7 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
         overlay_factory=overlay_factory,
         config_file=config_file,
         preflight=preflight,
+        settings=QSettings("VideoStory", "Recorder"),  # the theme of the window
     )
     window.show()
     window.raise_()
