@@ -16,9 +16,9 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRunnable, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRunnable, Qt  # noqa: E402
 from PySide6.QtGui import QFocusEvent, QImage, QMouseEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from video_story.core.config import Config  # noqa: E402
 from video_story.core.manifest import AudioInfo, Manifest, write_manifest  # noqa: E402
@@ -36,7 +36,6 @@ from video_story.editor.recordings_model import (  # noqa: E402
     format_size,
     scan_recordings,
 )
-from video_story.editor.render_dialog import RenderProgressDialog  # noqa: E402
 from video_story.editor.timeline import thumbnails as thumbnails_mod  # noqa: E402
 from video_story.editor.timeline.model import MAX_ZOOM_PX_PER_S, TimelineModel  # noqa: E402
 from video_story.editor.timeline.thumbnails import ThumbnailCache  # noqa: E402
@@ -50,7 +49,6 @@ from video_story.editor.timeline.view import (  # noqa: E402
 )
 from video_story.editor.timeline.waveform import column_peaks, compute_peaks  # noqa: E402
 from video_story.editor.window import EditorWindow, format_crop_time  # noqa: E402
-from video_story.export import ExportError, ExportRequest, ExportResult  # noqa: E402
 
 FRAME_TIMES = (0, 500, 1000, 1500, 2000)
 DURATION_MS = 2500
@@ -592,149 +590,6 @@ def test_subtitle_label_follows_playhead(editor):
     assert not hasattr(editor.preview, "subtitles_check")  # subtitles are always shown
 
 
-def test_render_passes_selection_and_crop(editor, qtbot, monkeypatch, tmp_path: Path):
-    output = tmp_path / "exports" / "clip.mp4"
-    output.parent.mkdir()
-    calls: dict[str, object] = {}
-    boxes: list[tuple[str, str]] = []
-
-    def fake_export(request, config, progress=None, cancel=None):
-        calls["request"] = request
-        calls["config"] = config
-        progress(0.5, "halfway")
-        assert cancel() is False
-        return ExportResult(
-            output=request.output,
-            srt=request.output.with_suffix(".srt"),
-            screen_id=request.screen_id,
-            start_ms=request.start_ms,
-            end_ms=request.end_ms,
-            duration_ms=request.end_ms - request.start_ms,
-            width=160,
-            height=100,
-            fps=24,
-            frames_used=3,
-            ffmpeg="ffmpeg",
-        )
-
-    editor._export_fn = fake_export
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(output), "MP4"))
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "information",
-        staticmethod(lambda parent, title, text, *a, **k: boxes.append((title, text))),
-    )
-    editor.select_screen("screen2")
-    editor.model.set_in(700)
-    editor.model.set_out(2200)
-    editor._crop_updated()
-
-    result = editor.render()
-    request = calls["request"]
-    assert isinstance(request, ExportRequest)
-    assert request.paths.session_id == NEWEST
-    assert request.output == output
-    assert request.screen_id == "screen2"
-    assert (request.start_ms, request.end_ms) == (700, 2200)
-    assert request.draw_cursor is True and request.write_srt is True
-    assert calls["config"] is editor.config
-    assert result is editor.last_export_result and result.duration_ms == 1500
-    assert boxes and boxes[0][0] == "Render finished"
-    assert str(output) in boxes[0][1] and str(output.with_suffix(".srt")) in boxes[0][1]
-    assert editor.render_button.isEnabled() and editor.isVisible()
-
-
-def test_render_default_path_and_cancelled_dialog(editor, monkeypatch):
-    seen: list[str] = []
-
-    def fake_dialog(parent, title, suggested, filt):
-        seen.append(suggested)
-        assert filt == "MP4 video (*.mp4)"
-        return ("", "")
-
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
-    assert editor.render() is None
-    assert seen == [str(editor.config.recording_folder / f"{NEWEST}_screen1.mp4")]
-
-
-def test_render_error_is_reported(editor, monkeypatch, tmp_path: Path):
-    errors: list[str] = []
-
-    def failing_export(request, config, progress=None, cancel=None):
-        raise ExportError("FFMPEG_FAILED", "ffmpeg exploded")
-
-    editor._export_fn = failing_export
-    monkeypatch.setattr(
-        QFileDialog,
-        "getSaveFileName",
-        staticmethod(lambda *a, **k: (str(tmp_path / "x"), "")),
-    )
-    monkeypatch.setattr(
-        QMessageBox, "critical", staticmethod(lambda p, t, text, *a, **k: errors.append(text))
-    )
-    assert editor.render() is None
-    assert errors and "ffmpeg exploded" in errors[0] and "FFMPEG_FAILED" in errors[0]
-
-
-def test_render_cancel_shows_message_after_worker_ends(editor, monkeypatch, tmp_path: Path):
-    boxes: list[tuple[str, str]] = []
-    seen: dict[str, object] = {}
-    finished = threading.Event()
-
-    def slow_export(request, config, progress=None, cancel=None):
-        try:
-            deadline = time.perf_counter() + 10  # never hang the suite
-            while not cancel():
-                if time.perf_counter() > deadline:
-                    raise ExportError("TIMEOUT", "cancel never arrived")
-                progress(0.1, "working")
-                time.sleep(0.01)
-            time.sleep(0.25)  # ffmpeg takes a moment to wind down after Cancel
-            raise ExportError("CANCELLED", "export cancelled")
-        finally:
-            finished.set()
-
-    editor._export_fn = slow_export
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(tmp_path / "c.mp4"), ""))
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "information",
-        staticmethod(lambda parent, title, text, *a, **k: boxes.append((title, text))),
-    )
-    monkeypatch.setattr(
-        QMessageBox, "critical", staticmethod(lambda p, t, text, *a, **k: boxes.append((t, text)))
-    )
-
-    def press_cancel() -> None:
-        dialog = editor.findChild(RenderProgressDialog)
-        seen["dialog_visible"] = dialog is not None and dialog.isVisible()
-        if dialog is None:
-            return
-        dialog.cancel_button.click()
-        seen["button_enabled_after"] = dialog.cancel_button.isEnabled()
-        seen["label_after"] = dialog.message_label.text()
-
-        def later() -> None:
-            seen["visible_later"] = dialog.isVisible()
-            seen["worker_done_later"] = finished.is_set()
-
-        QTimer.singleShot(80, later)
-
-    QTimer.singleShot(150, press_cancel)
-    assert editor.render() is None
-    assert finished.is_set()
-    assert seen["dialog_visible"] is True
-    assert seen["button_enabled_after"] is False and seen["label_after"] == "Cancelling"
-    # The dialog stayed open until the worker ended (which it had not yet 80 ms later).
-    assert seen["visible_later"] is True and seen["worker_done_later"] is False
-    assert boxes == [("Render cancelled", "The export was cancelled.")]
-    assert editor.last_export_result is None and editor.render_button.isEnabled()
-
-
 def test_player_fallback_clock_when_sounddevice_missing(editor, qtbot, no_sd):
     messages: list[str] = []
     editor.player.status_message.connect(messages.append)
@@ -1091,6 +946,5 @@ def test_empty_recording_folder(qtbot, tmp_path: Path):
     window.show()
     assert window.recording is None
     assert window.status_label.text() == "No recording selected"
-    assert window.render() is None  # nothing to export; the window stays open
     window.toggle_play()
     assert not window.player.playing

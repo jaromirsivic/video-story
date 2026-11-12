@@ -72,11 +72,14 @@ what is previewed and exported. The bottom row holds **Auto process**, the green
 **Process** (Ctrl+Enter), **Instructions** (Ctrl+I: the master instructions for you,
 stored in `instructions.txt`, empty by default; a bullet on the button marks stored
 ones; the templates **Draft Intent**, **Create Plan** and **Implement** fill the box
-with a ready-made instruction), a separator and the blue **Render** (Ctrl+R) for an MP4. Process hands the
+with a ready-made instruction), at the right edge. Right-click a recording for **Render Video...**
+(above Archive Video): pick the screen and the MP4 file (`Select File Name`), and the
+cropped range renders in the background with `RENDERING...` on the row; one video at a
+time, **Cancel Rendering** on that row stops it. Process hands the
 cropped range and the instructions to you and closes the editor. A recording that came
 straight from the Stop dialog is transcribed in the background of the editor: a green
 arrow under the audio track marks how far whisper got with `transcribing (ETA: m:ss)`
-under it, subtitles appear as they are produced, and Render and Process stay disabled
+under it, subtitles appear as they are produced, and Render Video and Process stay disabled
 until the transcript is complete (closing the editor early keeps the partial transcript;
 selecting the recording again resumes it; when it fails, **Retry transcription**
 continues it). **Auto process** presses Process by itself five seconds after the

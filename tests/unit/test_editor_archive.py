@@ -25,6 +25,7 @@ from video_story.editor.recordings_view import (  # noqa: E402
     format_percent,
 )
 from video_story.editor.window import (  # noqa: E402
+    ARCHIVED_NOTE,
     ARCHIVING_MESSAGE,
     EditorWindow,
     archive_label,
@@ -118,11 +119,12 @@ def test_archive_shown_video_locks_it_then_shows_the_archived_view(qtbot, tmp_pa
     # Read only: subtitles yes, everything in the bottom row no.
     recording = window.recording
     assert recording.audio is None and recording.frame_times("screen1") == [0]
-    assert not window.process_button.isEnabled() and not window.render_button.isEnabled()
+    assert not window.process_button.isEnabled()
     assert not window.instructions_button.isEnabled()
     assert not window.auto_process_checkbox.isEnabled()
-    assert not window.process_action.isEnabled() and not window.render_action.isEnabled()
-    assert window.render() is None
+    assert not window.process_action.isEnabled()
+    assert window.render_block_reason([_item(window, NEWEST)]) == ARCHIVED_NOTE
+    assert window.render_video(_item(window, NEWEST)) is False
     window.model.set_playhead(1600)
     window._sync_playhead()
     assert window.preview.subtitle_label.text() == "second line"

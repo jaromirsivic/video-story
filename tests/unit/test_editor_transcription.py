@@ -13,7 +13,7 @@ from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt  # noqa: E402
-from PySide6.QtGui import QKeyEvent, QMouseEvent  # noqa: E402
+from PySide6.QtGui import QKeyEvent, QKeySequence, QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 from test_editor import NEWEST, OLDER, _wait_loaded, make_recording  # noqa: E402
 
@@ -25,7 +25,11 @@ from video_story.editor.recordings_model import scan_recordings  # noqa: E402
 from video_story.editor.subtitle_dialog import SubtitleDialog  # noqa: E402
 from video_story.editor.timeline.view import COLOR_TRANSCRIBING  # noqa: E402
 from video_story.editor.transcription import TranscriptionManager  # noqa: E402
-from video_story.editor.window import AUTO_PROCESS_SECONDS, EditorWindow  # noqa: E402
+from video_story.editor.window import (  # noqa: E402
+    AUTO_PROCESS_SECONDS,
+    TRANSCRIBING_NOTE,
+    EditorWindow,
+)
 from video_story.host import editor_session as es  # noqa: E402
 
 FAKE_WORKER = r"""
@@ -165,14 +169,14 @@ def test_untranscribed_recording_is_transcribed_in_the_background(qtbot, tmp_pat
     window = _open(qtbot, tmp_path, spec)
     # Right after loading: the worker runs, the buttons wait, the timeline says so.
     assert window.transcription.is_running(NEWEST)
-    assert not window.process_button.isEnabled() and not window.render_button.isEnabled()
-    assert not window.process_action.isEnabled() and not window.render_action.isEnabled()
+    assert not window.process_button.isEnabled() and not window.process_action.isEnabled()
     assert "transcription" in window.process_button.toolTip().lower()
-    assert "transcription" in window.render_button.toolTip().lower()
+    item = window.recordings.item(window.recordings.row_of(NEWEST))
+    assert window.render_block_reason([item]) == TRANSCRIBING_NOTE
     assert window.timeline.transcription == ("transcribing", 0)
     assert "transcribing" in window.recordings.item(1).details
     assert "transcribing" in window.status_label.text()
-    assert window.process() is None and window.render() is None  # direct calls refuse too
+    assert window.process() is None and window.render_video(item) is False  # refused too
 
     # The first segment shows up as a subtitle while whisper is still working.
     qtbot.waitUntil(lambda: window.recording.subtitle_at(500) == "ahoj světe", timeout=10_000)
@@ -199,7 +203,7 @@ def test_untranscribed_recording_is_transcribed_in_the_background(qtbot, tmp_pat
     assert manifest.transcript is not None and manifest.transcript.language == "cs"
     assert manifest.transcript.segments == 2 and manifest.finished_at
     qtbot.waitUntil(lambda: window.process_button.isEnabled(), timeout=5000)
-    assert window.render_button.isEnabled() and window.render_action.isEnabled()
+    assert window.render_block_reason([item]) is None
     assert window.timeline.transcription is None
     assert "transcribing" not in window.recordings.item(1).details
     assert window.recordings.item(1).first_line == "ahoj světe"
@@ -267,7 +271,9 @@ def test_transcription_failure_unlocks_the_buttons(qtbot, tmp_path: Path):
     )
     assert "whisper model not found" in window.statusBar().currentMessage()
     assert window.timeline.transcription == ("failed", 0)
-    assert window.process_button.isEnabled() and window.render_button.isEnabled()
+    assert window.process_button.isEnabled()
+    item = window.recordings.item(window.recordings.row_of(NEWEST))
+    assert window.render_block_reason([item]) is None  # a failure must not lock the user out
     assert "transcription failed" in window.status_label.text()
     assert not window.recording.transcript_complete  # the files still say so
 
@@ -331,23 +337,25 @@ def test_timeline_paints_the_green_arrow_at_the_transcription_front(qtbot, tmp_p
 # Buttons --------------------------------------------------------------------------
 
 
-def test_render_button_is_blue_next_to_the_green_process_button(qtbot, tmp_path: Path):
+def test_bottom_row_has_no_render_button_and_ends_at_the_right(qtbot, tmp_path: Path):
     make_recording(tmp_path, NEWEST)
     window = EditorWindow(Config(recording_folder=tmp_path))
     qtbot.addWidget(window)
     window.show()
     _wait_loaded(qtbot, window, NEWEST)
-    render, process = window.render_button, window.process_button
-    assert "#1f6fd0" in render.styleSheet() and "color: white" in render.styleSheet()
-    image = render.grab().toImage()
-    colour = image.pixelColor(image.width() // 2, image.height() // 4)
-    assert colour.blue() > colour.red() + 60 and colour.blue() > colour.green() + 40
+    process = window.process_button
+    assert not hasattr(window, "render_button") and not hasattr(window, "render_action")
+    ctrl_r = QKeySequence("Ctrl+R")
+    assert not any(ctrl_r in action.shortcuts() for action in window.actions())
     image = process.grab().toImage()
     colour = image.pixelColor(image.width() // 2, image.height() // 4)
     assert colour.green() > colour.red() + 60 and colour.green() > colour.blue() + 60
     assert window.auto_process_checkbox.geometry().right() < process.geometry().left()
     assert process.geometry().right() < window.instructions_button.geometry().left()
-    assert window.instructions_button.geometry().right() < render.geometry().left()
+    # Instructions is the last widget of the row: it ends at the right edge of the panel.
+    row = window.instructions_button.parentWidget()
+    right_gap = row.width() - window.instructions_button.geometry().right()
+    assert right_gap < 20
     assert window.auto_process_checkbox.text() == "Auto process"
     assert not window.auto_process_checkbox.isChecked()
 

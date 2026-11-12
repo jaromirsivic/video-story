@@ -20,6 +20,11 @@ moved, show "Keypoint N" on hover and act as a magnet for the crop handles and t
 playhead. A white arrow on the ruler marks where Play was last pressed
 (Stop returns there). The +/- zoom keeps the playhead in the middle of the view.
 
+Pressing the middle mouse button grabs the timeline: while the button is held the view
+moves with the mouse (drag to the right and earlier times come into view), like a
+horizontal two-finger scroll on a touchpad. The playhead and the crop stay where they
+are.
+
 A full screen / normal toggle in the audio header stretches the waveform vertically so
 that the loudest sound of the recording reaches the full height of the track: quiet
 speech becomes visible. Only the drawing is scaled; the audio itself is unchanged.
@@ -231,6 +236,7 @@ class TimelineView(QWidget):
         self._syncing_scrollbar = False
         self._drag: str | None = None
         self._drag_offset = 0.0  # px between the grabbed handle and the press position
+        self._pan: tuple[float, float] | None = None  # middle button: (press x, scroll_ms)
         self._transcription: tuple[str, int] | None = None  # (state, transcribed_ms)
         self._eta_s: float | None = None  # estimated seconds until the transcription ends
         self._hover_keypoint: int | None = None  # keypoint under the mouse (tooltip shown)
@@ -607,7 +613,35 @@ class TimelineView(QWidget):
             return None
         return "in" if d_in <= d_out else "out"
 
+    @property
+    def panning(self) -> bool:
+        """The middle mouse button holds the timeline."""
+        return self._pan is not None
+
+    def _start_pan(self, x: float) -> None:
+        self._pan = (x, float(self.model.scroll_ms))
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def _pan_to(self, x: float) -> None:
+        """The grabbed moment stays under the mouse: moving right shows earlier times."""
+        if self._pan is None or self.model.zoom <= 0:
+            return
+        start_x, start_scroll = self._pan
+        scroll = start_scroll - (x - start_x) * 1000.0 / self.model.zoom
+        if int(round(scroll)) != self.model.scroll_ms:
+            self.model.set_scroll(scroll)
+            self._after_view_change()
+
+    def _end_pan(self) -> None:
+        self._pan = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.MiddleButton:
+            if self._drag is None and event.position().y() < self._canvas_height():
+                self._start_pan(event.position().x())
+                event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position().toPoint()
@@ -645,6 +679,9 @@ class TimelineView(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
+        if self._pan is not None:
+            self._pan_to(event.position().x())
+            return
         if self._drag in ("in", "out"):
             self._drag_handle_to(pos.x())
         elif self._drag == "playhead":
@@ -729,6 +766,10 @@ class TimelineView(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.MiddleButton and self._pan is not None:
+            self._pan_to(event.position().x())
+            self._end_pan()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             drag, self._drag = self._drag, None
             if drag == "playhead":

@@ -16,9 +16,14 @@ thumbnail shows the selected screen at that moment and the text shows what was b
 said. Leaving the row returns it to the start.
 
 A label in the middle of the thumbnail (black capitals on white) tells what happens to
-a recording: ``TRANSCRIBING...`` and ``ARCHIVING...`` with the percentage under it
-(one decimal; archiving counts all screens together, so one of two screens done is
-50 %), ``ARCHIVED`` once it was archived. A recording without a label is not archived.
+a recording: ``TRANSCRIBING...``, ``ARCHIVING...`` and ``RENDERING...`` with the
+percentage under it (one decimal; archiving counts all screens together, so one of two
+screens done is 50 %), ``ARCHIVED`` once it was archived. A recording without a label is
+not archived.
+
+The freshly recorded video (:meth:`RecordingsListView.set_fresh`; the window names the
+recording that came from the Stop dialog, otherwise the newest one) has a light green
+background whenever it is not selected.
 
 The recordings are grouped by folder: every folder starts with a header row (an
 accordion) - a triangle (open / closed), the name with the number of videos in brackets
@@ -100,6 +105,15 @@ BADGE_PAD = 4
 BADGE_TRANSCRIBING = "TRANSCRIBING..."
 BADGE_ARCHIVING = "ARCHIVING..."
 BADGE_ARCHIVED = "ARCHIVED"
+BADGE_RENDERING = "RENDERING..."
+BADGE_BY_KIND = {
+    "transcribing": BADGE_TRANSCRIBING,
+    "archiving": BADGE_ARCHIVING,
+    "rendering": BADGE_RENDERING,
+}
+# The recording that came from the Stop dialog (or the newest one), when not selected.
+FRESH_LIGHT = QColor("#dff5e1")
+FRESH_DARK = QColor("#24452c")
 MATCH_FRAME_W = 3  # the yellow frame of a recording whose transcript has the searched text
 HEADER_BUTTON = 22  # the pin and the menu button of a folder header (square)
 HEADER_GAP = 6
@@ -174,6 +188,12 @@ def elided_lines(text: str, font: QFont, width: int, max_lines: int) -> list[str
         lines.append(text[start : start + length].rstrip())
     layout.endLayout()
     return lines
+
+
+def fresh_background(palette: QPalette) -> QColor:
+    """Light green behind the freshly recorded video (a muted green in the dark theme)."""
+    dark = palette.color(QPalette.ColorRole.Base).lightness() < 128
+    return FRESH_DARK if dark else FRESH_LIGHT
 
 
 def header_background(palette: QPalette) -> QColor:
@@ -355,7 +375,9 @@ class RecordingDelegate(QStyledItemDelegate):
         painter.setClipRect(rect)
         if selected:
             painter.fillRect(rect, palette.color(QPalette.ColorRole.Highlight))
-        elif option.state & QStyle.StateFlag.State_MouseOver:
+        elif self.view.is_fresh(item.session_id):
+            painter.fillRect(rect, fresh_background(palette))
+        if not selected and option.state & QStyle.StateFlag.State_MouseOver:
             hover = QColor(palette.color(QPalette.ColorRole.Highlight))
             hover.setAlpha(40)
             painter.fillRect(rect, hover)
@@ -553,8 +575,10 @@ class RecordingsListView(QListView):
         self._screen_position = 0
         self._frames: dict[str, _Frames] = {}  # session id -> frame index (lazy)
         self._last_image: dict[str, QImage] = {}  # session id -> thumbnail drawn last
-        # session id -> ("transcribing" | "archiving", fraction): work running right now
+        # session id -> ("transcribing" | "archiving" | "rendering", fraction): work
+        # running right now
         self._activity: dict[str, tuple[str, float]] = {}
+        self._fresh: str | None = None  # the recording painted green (see set_fresh)
         self._matches: set[str] = set()  # session ids with the searched text (yellow frame)
         self._header_hover: tuple[int, str] | None = None  # (row, "pin" | "menu")
         self._clamping = False
@@ -708,8 +732,8 @@ class RecordingsListView(QListView):
     # Labels ---------------------------------------------------------------------
 
     def set_activity(self, session_id: str, kind: str | None, fraction: float = 0.0) -> None:
-        """What runs for a recording now (``"transcribing"``, ``"archiving"``) and how
-        far it got; ``None`` clears it."""
+        """What runs for a recording now (``"transcribing"``, ``"archiving"``,
+        ``"rendering"``) and how far it got; ``None`` clears it."""
         if kind is None:
             changed = self._activity.pop(session_id, None) is not None
         else:
@@ -721,6 +745,22 @@ class RecordingsListView(QListView):
 
     def activity(self, session_id: str) -> tuple[str, float] | None:
         return self._activity.get(session_id)
+
+    # Fresh recording ------------------------------------------------------------
+
+    def set_fresh(self, session_id: str | None) -> None:
+        """The recording painted light green whenever it is not selected: the one that
+        came from the Stop dialog (the window decides)."""
+        if session_id != self._fresh:
+            self._fresh = session_id
+            self.viewport().update()
+
+    @property
+    def fresh(self) -> str | None:
+        return self._fresh
+
+    def is_fresh(self, session_id: str) -> bool:
+        return session_id == self._fresh
 
     # Search ---------------------------------------------------------------------
 
@@ -748,8 +788,7 @@ class RecordingsListView(QListView):
         active = self._activity.get(item.session_id)
         if active is not None:
             kind, fraction = active
-            label = BADGE_TRANSCRIBING if kind == "transcribing" else BADGE_ARCHIVING
-            return label, format_percent(fraction)
+            return BADGE_BY_KIND.get(kind, BADGE_ARCHIVING), format_percent(fraction)
         if item.archived:
             return BADGE_ARCHIVED, None
         if item.archiving:
@@ -1004,6 +1043,7 @@ class RecordingsListView(QListView):
 __all__ = [
     "BADGE_ARCHIVED",
     "BADGE_ARCHIVING",
+    "BADGE_RENDERING",
     "BADGE_TRANSCRIBING",
     "FOLDER_MENU_TOOLTIP",
     "PIN_TOOLTIP",

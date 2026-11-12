@@ -71,30 +71,25 @@ def _open(qtbot, folder: Path, **kwargs) -> EditorWindow:
 # Process button -------------------------------------------------------------------
 
 
-def test_process_button_is_green_enabled_and_next_to_render(qtbot, folder: Path):
+def test_process_button_is_green_enabled_next_to_instructions(qtbot, folder: Path):
     window = _open(qtbot, folder)
     button = window.process_button
     assert button.text() == "Process" and button.isEnabled()
     assert "agent" in button.toolTip() and "cropped range" in button.toolTip()
-    assert button.minimumSize() == window.render_button.minimumSize()
+    assert button.minimumSize() == window.instructions_button.minimumSize()
     assert button.font().bold() and button.font().pointSizeF() == pytest.approx(
-        window.render_button.font().pointSizeF()
+        window.instructions_button.font().pointSizeF()
     )
     assert "#1e9e3e" in button.styleSheet() and "color: white" in button.styleSheet()
     image = button.grab().toImage()
     centre = image.pixelColor(image.width() // 2, image.height() // 4)  # away from the text
     assert centre.green() > centre.red() + 60 and centre.green() > centre.blue() + 60
     assert QKeySequence("Ctrl+Return") in window.process_action.shortcuts()
-    assert window.render_button.parentWidget() is button.parentWidget()
-    # Order: Auto process | Process | Instructions || Render (Process before Render).
+    assert window.instructions_button.parentWidget() is button.parentWidget()
+    # Order: Auto process | Process | Instructions, at the right edge (no Render).
     assert window.auto_process_checkbox.geometry().right() < button.geometry().left()
     assert button.geometry().right() < window.instructions_button.geometry().left()
-    assert (
-        window.instructions_button.geometry().right()
-        < window.render_separator.geometry().left()
-        < window.render_button.geometry().left()
-    )
-    # Smaller than the old 180x44 buttons, all three the same size.
+    # Smaller than the old 180x44 buttons, both the same size.
     assert button.minimumSize().height() < 44 and button.minimumSize().width() < 180
     assert window.instructions_button.minimumSize() == button.minimumSize()
 
@@ -170,12 +165,13 @@ def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, m
     qtbot.keyClicks(window.in_edit, "00:00:00.900")
     seen: list[tuple[int, int]] = []
 
-    def cancelled_dialog(parent, suggested):
+    def cancelled_dialog(item, default_screen):
         seen.append((window.model.in_ms, window.model.out_ms))
         return None
 
-    monkeypatch.setattr(window_mod, "ask_output_path", cancelled_dialog)
-    assert window.render() is None
+    monkeypatch.setattr(window, "_ask_render", cancelled_dialog)
+    item = window.recordings.item(window.recordings.row_of(NEWEST))
+    assert window.render_video(item) is False
     assert seen == [(900, DURATION_MS)]
     # A value typed into Out and Process called by a direct call: committed.
     window.out_edit.setFocus()

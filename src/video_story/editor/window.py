@@ -27,17 +27,29 @@ reads the corrected words.
 A recording that arrives from the Stop dialog is not transcribed yet: the window
 starts :class:`TranscriptionManager` for the shown recording, the timeline shows a
 green arrow at the transcription front with the estimated time to the end, subtitles
-appear as whisper produces them, and **Render** and **Process** stay disabled until the
-transcript is complete. With **Auto process** ticked, a complete transcript starts a
+appear as whisper produces them, and **Process** (and **Render Video...**) stay disabled
+until the transcript is complete. With **Auto process** ticked, a complete transcript starts a
 five second countdown on the Process button that presses it by itself unless the user
 clicks or types.
 
-The bottom row reads **Auto process**, the green **Process**, **Instructions**, a
-separator and the blue **Render**. Instructions opens a text box for the master
+The bottom row reads **Auto process**, the green **Process** and **Instructions**, at the
+right edge. Instructions opens a text box for the master
 instructions for the AI about the whole recording (``instructions.txt`` next to the
 recording, empty by default); they travel to the agent with the crop. **Stop** returns
 to where **Play** was last pressed (a white arrow on the ruler). The theme button above
 **Edit** switches between the light and the dark theme (remembered in the settings).
+
+The list's menu offers **Render Video...** right above Archive Video: a dialog asks for
+the screen and the MP4 file (``Select File Name``), and the video is rendered in the
+background by :class:`RenderManager` (the list shows ``RENDERING...`` with the percentage;
+one video at a time, never several selected ones; the cropped range of that video). On
+the video being rendered the item reads **Cancel Rendering**. While it renders, the video
+cannot be archived, deleted, moved or transcribed again; closing the window (also by
+Process) asks first and stops the render.
+
+The recording that came from the Stop dialog (``recording_session``), otherwise the
+newest recording, is painted light green in the list whenever it is not selected, so
+that the user does not lose it while looking at others.
 
 The list's menu offers **Archive Video** / **Archive Videos (N)** under Open Folder
 Location (N counts only the selected recordings that can still be archived: not
@@ -48,7 +60,7 @@ earlier editor left unfinished. A recording in the queue cannot be edited: the p
 says "This video is being archived." with the percentage. An archived recording shows
 the still of every screen (``archive/<screenId>.jpg``), a flat audio line and the
 subtitles; the playhead moves and subtitles can be edited, but Auto process, Process,
-Instructions and Render are disabled; `ARCHIVED` blinks in the middle of the preview.
+Instructions and Render Video are disabled; `ARCHIVED` blinks in the middle of the preview.
 
 Under the list sit the search box, the magnifier button and the Refresh button (a
 circular arrow). Enter or the magnifier searches the subtitles (see
@@ -99,7 +111,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -162,7 +173,8 @@ from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import FolderHeader, FolderRole, ItemRole, RecordingItem, RecordingsModel
 from .recordings_view import BADGE_ARCHIVED, MIN_LIST_WIDTH, RecordingsListView, format_percent
-from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
+from .render_dialog import ExportFn, RenderVideoDialog, default_output_path
+from .rendering import RenderManager
 from .search import SearchJob, SearchSignals, normalize_query, text_matches
 from .subtitle_dialog import SubtitleDialog
 from .theme import apply_theme, system_prefers_dark
@@ -186,7 +198,7 @@ AUTO_PROCESS_TICK_MS = 1000
 SESSION_PROGRESS_INTERVAL_S = 5.0  # how often state.json learns the transcription progress
 ETA_MIN_ELAPSED_S = 3.0  # no estimate before the transcription ran this long
 ETA_MIN_PROGRESS = 0.01  # ... and advanced this much
-ACTION_BUTTON_SIZE = (128, 32)  # Process, Instructions and Render (smaller than before)
+ACTION_BUTTON_SIZE = (128, 32)  # Process and Instructions (smaller than before)
 INSTRUCTIONS_LABEL = "Instructions"
 INSTRUCTIONS_SET_LABEL = "Instructions •"  # a bullet marks stored instructions
 INSTRUCTIONS_TOOLTIP = (
@@ -200,14 +212,6 @@ QPushButton {
 QPushButton:hover { background-color: #23b347; }
 QPushButton:pressed { background-color: #167a30; }
 QPushButton:disabled { background-color: #8fcf9f; color: #f4fff6; border-color: #7fbf8f; }
-"""
-RENDER_BUTTON_STYLE = """
-QPushButton {
-    background-color: #1f6fd0; color: white; border: 1px solid #185aa8; border-radius: 4px;
-}
-QPushButton:hover { background-color: #2a7fe6; }
-QPushButton:pressed { background-color: #185aa8; }
-QPushButton:disabled { background-color: #9dbfe8; color: #f3f8ff; border-color: #8fb2dc; }
 """
 DELETE_ONE_LABEL = "Delete Video"
 ARCHIVE_ONE_LABEL = "Archive Video"
@@ -226,6 +230,13 @@ ARCHIVING_MESSAGE = "This video is being archived."
 ARCHIVED_NOTE = "Not available for an archived video"
 BEING_ARCHIVED_REASON = "it is being archived"
 TRANSCRIBING_NOTE = "Available once the transcription is complete"
+RENDER_VIDEO_LABEL = "Render Video..."
+CANCEL_RENDER_LABEL = "Cancel Rendering"
+RENDER_ONE_NOTE = "Select one video to render"
+RENDER_BUSY_NOTE = "Another video is being rendered"
+RENDER_ARCHIVING_NOTE = "Not available while the video is being archived"
+BEING_RENDERED_REASON = "it is being rendered"
+BEING_RENDERED_NOTE = "Not available while the video is being rendered"
 SEARCH_PLACEHOLDER = "Search the spoken text"
 SEARCH_TOOLTIP = (
     "Find a word or phrase in the subtitles of every recording; upper and lower case and "
@@ -465,6 +476,16 @@ class EditorWindow(QMainWindow):
         self.archiver.progress.connect(self._on_archive_progress)
         self.archiver.finished.connect(self._on_archive_finished)
         self.archiver.failed.connect(self._on_archive_failed)
+        self.renderer = RenderManager(config, self)
+        self.renderer.started.connect(self._on_render_started)
+        self.renderer.progress.connect(self._on_render_progress)
+        self.renderer.finished.connect(self._on_render_finished)
+        self.renderer.failed.connect(self._on_render_failed)
+        self.renderer.cancelled.connect(self._on_render_cancelled)
+        self._render_box: QMessageBox | None = None  # the last "Render finished/failed"
+        # The recording that came from the Stop dialog: painted green in the list (the
+        # newest recording when the editor was opened otherwise).
+        self._fresh_session: str | None = recording_session
         self._transcription_failed: dict[str, str] = {}  # session id -> message
         self._transcription_fraction: dict[str, float] = {}
         # session id -> (monotonic time, fraction) of the first progress event: the ETA
@@ -521,6 +542,8 @@ class EditorWindow(QMainWindow):
         self.recordings = RecordingsModel(config.recording_folder, self)
         self.list_view.setModel(self.recordings)
         self.list_view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.recordings.modelReset.connect(self._update_fresh)
+        self._update_fresh()
         self._start_archive_queue()
         self._select_row(self.recordings.default_row(session_id))
         self._update_status()
@@ -652,7 +675,7 @@ class EditorWindow(QMainWindow):
         self.timeline.transcribe_requested.connect(self.request_transcribe_again)
         bottom_layout.addWidget(self.timeline, 1)
 
-        # Bottom row: Auto process | Process | Instructions || Render.
+        # Bottom row, at the right edge: Auto process | Process | Instructions.
         render_row = QHBoxLayout()
         render_row.setSpacing(12)
         render_row.addStretch(1)
@@ -699,20 +722,6 @@ class EditorWindow(QMainWindow):
         self.instructions_button.setEnabled(False)
         self.instructions_button.clicked.connect(self.edit_instructions)
         render_row.addWidget(self.instructions_button)
-        self.render_separator = QFrame()
-        self.render_separator.setFrameShape(QFrame.Shape.VLine)
-        self.render_separator.setFrameShadow(QFrame.Shadow.Sunken)
-        self.render_separator.setFixedHeight(ACTION_BUTTON_SIZE[1] - 4)
-        render_row.addWidget(self.render_separator)
-        self.render_button = QPushButton("Render")
-        self.render_tooltip = "Export the selected screen and crop to MP4 + SRT (Ctrl+R)"
-        self.render_button.setToolTip(self.render_tooltip)
-        self.render_button.setFont(action_font)
-        self.render_button.setMinimumSize(*ACTION_BUTTON_SIZE)
-        self.render_button.setStyleSheet(RENDER_BUTTON_STYLE)
-        self.render_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.render_button.clicked.connect(self.render)
-        render_row.addWidget(self.render_button)
         bottom_layout.addLayout(render_row)
         self.right_splitter.addWidget(bottom)
         self.right_splitter.setStretchFactor(0, 3)
@@ -772,7 +781,6 @@ class EditorWindow(QMainWindow):
         self.zoom_in_action = action("Zoom in", ["Ctrl+=", "Ctrl++"], self.zoom_in)
         self.zoom_out_action = action("Zoom out", "Ctrl+-", self.zoom_out)
         self.fit_action = action("Fit", "Ctrl+0", self.zoom_fit)
-        self.render_action = action("Render", "Ctrl+R", self.render)
         self.process_action = action("Process", ["Ctrl+Return", "Ctrl+Enter"], self.process)
         self.instructions_action = action("Instructions", "Ctrl+I", self.edit_instructions)
         self.theme_action = action("Toggle theme", "Ctrl+T", self.toggle_theme)
@@ -788,6 +796,20 @@ class EditorWindow(QMainWindow):
             self.list_view.setCurrentIndex(self.recordings.index(row))
             return
         self._select_row(row)
+
+    @property
+    def fresh_recording(self) -> str | None:
+        """The recording painted green in the list (see :meth:`_update_fresh`)."""
+        return self.list_view.fresh
+
+    def _update_fresh(self) -> None:
+        """Green in the list: the recording that came from the Stop dialog while it is
+        listed, otherwise the newest recording (the one recorded last)."""
+        items = self.recordings.items
+        fresh = self._fresh_session
+        if fresh is None or self.recordings.row_of(fresh) < 0:
+            fresh = items[0].session_id if items else None
+        self.list_view.set_fresh(fresh)
 
     # Search -----------------------------------------------------------------
 
@@ -925,6 +947,7 @@ class EditorWindow(QMainWindow):
             and not item.archiving
             and not self.archiver.is_queued(item.session_id)
             and item.transcript_complete
+            and self.renderer.running != item.session_id
         ]
 
     def _show_list_menu(self, pos: QPoint) -> None:
@@ -942,7 +965,15 @@ class EditorWindow(QMainWindow):
         if clicked.session_id not in {item.session_id for item in selected}:
             self.list_view.setCurrentIndex(index)  # right click outside the selection
             selected = [clicked]
+        menu = self.recording_menu(clicked, selected)
+        menu.exec(self.list_view.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def recording_menu(self, clicked: RecordingItem, selected: list[RecordingItem]) -> QMenu:
+        """The menu of a right click on recordings: Open Folder Location, Move Video(s)
+        to Folder..., Render Video... (or Cancel Rendering), Archive Video(s), Delete."""
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         open_action = menu.addAction("Open Folder Location")
         open_action.triggered.connect(lambda: self.open_folder_location(clicked))
         move_action = menu.addAction(move_label(len(selected)))
@@ -952,20 +983,20 @@ class EditorWindow(QMainWindow):
         if not targets:
             move_action.setToolTip(NO_OTHER_FOLDER)
         elif not movable:
-            move_action.setToolTip(NOT_MOVABLE_NOTE)
+            rendering = any(item.session_id == self.renderer.running for item in selected)
+            move_action.setToolTip(BEING_RENDERED_NOTE if rendering else NOT_MOVABLE_NOTE)
         move_action.triggered.connect(lambda: self.move_recordings_dialog(selected))
+        self._add_render_action(menu, clicked, selected)
         archivable = self.archivable(selected)
         archive_action = menu.addAction(archive_label(max(1, len(archivable))))
         archive_action.setEnabled(bool(archivable))
         if not archivable:
             archive_action.setToolTip(self._not_archivable_reason(selected))
-        menu.setToolTipsVisible(True)
         archive_action.triggered.connect(lambda: self.archive_recordings(archivable))
         menu.addSeparator()
         delete_action = menu.addAction(delete_label(len(selected)))
         delete_action.triggered.connect(lambda: self.delete_recordings(selected))
-        menu.exec(self.list_view.viewport().mapToGlobal(pos))
-        menu.deleteLater()
+        return menu
 
     def open_folder_location(self, item: RecordingItem) -> bool:
         """Open the recording's folder in the system file manager."""
@@ -978,6 +1009,8 @@ class EditorWindow(QMainWindow):
     def _not_archivable_reason(self, items: list[RecordingItem]) -> str:
         if all(item.archived for item in items):
             return "Already archived"
+        if any(item.session_id == self.renderer.running for item in items):
+            return BEING_RENDERED_NOTE
         if any(not item.transcript_complete for item in items if not item.archived):
             return "Available once the transcription is complete"
         return "Already archived or being archived"
@@ -1152,10 +1185,17 @@ class EditorWindow(QMainWindow):
             for item in items
             if self.archiver.running == item.session_id
         ]
+        failures += [
+            f"{item.title} ({item.session_id}): {BEING_RENDERED_REASON}"
+            for item in items
+            if self.renderer.running == item.session_id
+        ]
         items = [
             item
             for item in items
-            if not recording_in_use(item.paths) and self.archiver.running != item.session_id
+            if not recording_in_use(item.paths)
+            and self.archiver.running != item.session_id
+            and self.renderer.running != item.session_id
         ]
         for item in items:
             self.archiver.dequeue(item.session_id)
@@ -1351,13 +1391,15 @@ class EditorWindow(QMainWindow):
 
     def movable(self, items: list[RecordingItem]) -> list[RecordingItem]:
         """The recordings among ``items`` that can move to another folder: not queued
-        for archiving or being archived (the archive worker writes and deletes there)."""
+        for archiving or being archived (the archive worker writes and deletes there)
+        and not being rendered (FFmpeg reads its frames)."""
         return [
             item
             for item in items
             if not item.archiving
             and not self.archiver.is_queued(item.session_id)
             and self.archiver.running != item.session_id
+            and self.renderer.running != item.session_id
         ]
 
     def _move_targets(self, items: list[RecordingItem]) -> list[str]:
@@ -1826,56 +1868,206 @@ class EditorWindow(QMainWindow):
 
     # Render -----------------------------------------------------------------
 
-    def build_export_request(self, output: Path) -> ExportRequest | None:
-        if self.recording is None:
-            return None
-        return ExportRequest(
-            paths=self.recording.paths,
-            output=output,
-            screen_id=self.model.selected_screen,
-            start_ms=self.model.in_ms,
-            end_ms=self.model.out_ms,
-            draw_cursor=self.config.editor_draw_cursor,
-            write_srt=True,
-        )
-
     def _commit_time_edits(self) -> None:
-        """Apply a value typed into In/Out that was not committed yet (Ctrl+R, Ctrl+Enter)."""
+        """Apply a value typed into In/Out that was not committed yet (Ctrl+Enter)."""
         for edit in (self.in_edit, self.out_edit):
             if edit.hasFocus():
                 edit.commit()
 
-    def render(self) -> ExportResult | None:
-        if self.recording is None:
-            self._show_status_message("Select a recording first.")
-            return None
-        if self.recording.archived:
-            self._show_status_message(ARCHIVED_NOTE + ".")
-            return None
-        if not self.actions_allowed:
-            self._show_status_message(TRANSCRIBING_NOTE + ".")
-            return None
-        self._stop_countdown()
-        self._commit_time_edits()
-        if self.player.playing:
-            self.toggle_play()
-        suggested = default_output_path(
-            self.config, self.recording.session_id, self.model.selected_screen
+    def _add_render_action(
+        self, menu: QMenu, clicked: RecordingItem, selected: list[RecordingItem]
+    ) -> QAction:
+        """**Render Video...** (one video), or **Cancel Rendering** on the video being
+        rendered; placed right above Archive Video."""
+        if self.renderer.running is not None and clicked.session_id == self.renderer.running:
+            action = menu.addAction(CANCEL_RENDER_LABEL)
+            action.setEnabled(not self.renderer.cancelling)
+            action.triggered.connect(self.cancel_rendering)
+            return action
+        action = menu.addAction(RENDER_VIDEO_LABEL)
+        reason = self.render_block_reason(selected)
+        action.setEnabled(reason is None)
+        if reason is not None:
+            action.setToolTip(reason)
+        action.triggered.connect(lambda: self.render_video(selected[0]))
+        return action
+
+    def _transcript_done(self, item: RecordingItem) -> bool:
+        """The transcript is complete (or cannot be made: a failed transcription must not
+        lock the user out); the shown recording knows it best."""
+        if item.session_id in self._transcription_failed:
+            return True
+        recording = self.recording
+        if recording is not None and recording.session_id == item.session_id:
+            return recording.transcript_complete
+        return item.transcript_complete
+
+    def render_block_reason(self, items: list[RecordingItem]) -> str | None:
+        """Why Render Video is not available for ``items`` (``None``: it is)."""
+        if len(items) != 1:
+            return RENDER_ONE_NOTE
+        item = items[0]
+        if item.archived:
+            return ARCHIVED_NOTE
+        if (
+            item.archiving
+            or self.archiver.is_queued(item.session_id)
+            or self.archiver.running == item.session_id
+        ):
+            return RENDER_ARCHIVING_NOTE
+        if not self._transcript_done(item):
+            return TRANSCRIBING_NOTE
+        if self.renderer.running is not None:
+            return RENDER_BUSY_NOTE
+        return None
+
+    def _ask_render(self, item: RecordingItem, default_screen: str) -> tuple[str, Path] | None:
+        """The Render Video dialog: ``(screen id, MP4 file)`` or ``None`` (Cancel)."""
+        sizes = dict(zip(item.screen_ids, item.screen_sizes, strict=False))
+        screens = []
+        for screen_id in item.screen_ids or (default_screen,):
+            width, height = sizes.get(screen_id, (0, 0))
+            label = f"{screen_id} {width}x{height}" if width else screen_id
+            screens.append((screen_id, label))
+        dialog = RenderVideoDialog(
+            screens,
+            default_screen,
+            lambda screen_id: default_output_path(self.config, item.session_id, screen_id),
+            self,
+            title=item.title,
         )
-        output = ask_output_path(self, suggested)
-        if output is None:
-            return None
-        request = self.build_export_request(output)
-        assert request is not None
-        self.render_button.setEnabled(False)
         try:
-            result = run_render(self, self.config, request, self._export_fn)
+            if dialog.exec() != RenderVideoDialog.DialogCode.Accepted or dialog.output is None:
+                return None
+            return dialog.screen_id, dialog.output
         finally:
-            self._update_buttons()
+            dialog.deleteLater()
+
+    def render_video(self, item: RecordingItem) -> bool:
+        """Render Video...: ask for the screen and the file, then render the cropped
+        range of ``item`` in the background. Returns True when the render started."""
+        reason = self.render_block_reason([item])
+        if reason is not None:
+            self._show_status_message(reason + ".")
+            return False
+        shown = self.recording is not None and self.recording.session_id == item.session_id
+        if shown:
+            self._commit_time_edits()
+            self._flush_crop()
+            default_screen = self.model.selected_screen
+        else:
+            default_screen = item.screen_ids[0] if item.screen_ids else "screen1"
+        answer = self._ask_render(item, default_screen)
+        if answer is None:
+            return False
+        screen_id, output = answer
+        if self.render_block_reason([item]) is not None:
+            return False  # something changed while the dialog was open
+        if self.recording is not None and self.recording.session_id == item.session_id:
+            start_ms, end_ms = self.model.in_ms, self.model.out_ms
+        else:
+            crop = read_crop(item.paths.crop_path(item.paths.final_dir), item.duration_ms)
+            start_ms, end_ms = crop.start_ms, crop.end_ms
+        request = ExportRequest(
+            paths=item.paths,
+            output=output,
+            screen_id=screen_id,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            draw_cursor=self.config.editor_draw_cursor,
+            write_srt=True,
+        )
+        if not self.renderer.start(request, self._export_fn):
+            self._show_status_message(RENDER_BUSY_NOTE + ".")
+            return False
+        return True
+
+    def cancel_rendering(self) -> bool:
+        """Cancel Rendering: stop FFmpeg; the partial file is removed."""
+        session_id = self.renderer.running
+        if session_id is None or not self.renderer.cancel():
+            return False
+        self._show_status_message(f"Cancelling the render of {session_id}...")
+        return True
+
+    def _on_render_started(self, session_id: str) -> None:
+        self.list_view.set_activity(session_id, "rendering", 0.0)
+        request = self.renderer.request
+        target = f" to {request.output}" if request is not None else ""
+        self._show_status_message(f"Rendering {session_id}{target}")
+        self._update_buttons()
+
+    def _on_render_progress(self, session_id: str, fraction: float, _message: str) -> None:
+        self.list_view.set_activity(session_id, "rendering", fraction)
+
+    def _render_ended(self, session_id: str) -> None:
+        self.list_view.set_activity(session_id, None)
+        self._update_buttons()
+
+    def _on_render_finished(self, session_id: str, result: object) -> None:
+        self._render_ended(session_id)
+        if not isinstance(result, ExportResult):
+            return
         self.last_export_result = result
-        if result is not None:
-            self._show_status_message(f"Rendered {result.output}")
-        return result
+        self._show_status_message(f"Rendered {result.output}")
+        lines = [f"Video saved to:\n{result.output}"]
+        if result.srt:
+            lines.append(f"Subtitles saved to:\n{result.srt}")
+        lines.append(
+            f"{result.width}x{result.height}, {result.duration_ms / 1000:.1f} s, "
+            f"screen {result.screen_id}"
+        )
+        self._notify_render(QMessageBox.Icon.Information, "Render finished", "\n\n".join(lines))
+
+    def _on_render_failed(self, session_id: str, message: str) -> None:
+        self._render_ended(session_id)
+        self._show_status_message(f"Render of {session_id} failed: {message}")
+        self._notify_render(QMessageBox.Icon.Critical, "Render failed", message or "Unknown error")
+
+    def _on_render_cancelled(self, session_id: str) -> None:
+        self._render_ended(session_id)
+        self._show_status_message(f"Render of {session_id} cancelled")
+
+    def _notify_render(self, icon: QMessageBox.Icon, title: str, text: str) -> None:
+        """A message box that does not block the editor (tests override this)."""
+        if self._render_box is not None:
+            self._render_box.close()
+        box = QMessageBox(icon, title, text, QMessageBox.StandardButton.Ok, self)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._render_box = box
+        box.finished.connect(lambda _code: self._forget_render_box(box))
+        box.show()
+
+    def _forget_render_box(self, box: QMessageBox) -> None:
+        if self._render_box is box:
+            self._render_box = None
+
+    def _confirm_stop_render(self) -> bool:
+        """Ask before the window closes (also by Process) while a video renders (tests
+        override this)."""
+        answer = QMessageBox.question(
+            self,
+            "Rendering",
+            f"The video {self.renderer.running} is being rendered.\n\n"
+            "Do you really want to close the window? The rendering will be stopped.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _stop_render_for_close(self) -> bool:
+        """No render, or the user agreed to stop it (it is stopped then); False keeps
+        the window open."""
+        if self.renderer.running is None:
+            return True
+        if not self._confirm_stop_render():
+            return False
+        session_id = self.renderer.running
+        self.renderer.shutdown()
+        if session_id is not None:
+            self._render_ended(session_id)
+        return True
 
     # Instructions -----------------------------------------------------------
 
@@ -2035,6 +2227,8 @@ class EditorWindow(QMainWindow):
             )
             return None
         self._stop_countdown()
+        if not self._stop_render_for_close():
+            return None  # a video is being rendered and the user keeps the window
         self._commit_time_edits()
         if self.player.playing:
             self.toggle_play()
@@ -2127,11 +2321,14 @@ class EditorWindow(QMainWindow):
 
     def _audio_editable(self) -> LoadedRecording | None:
         """The shown recording when its audio may change (not archived or being
-        archived, at least one audio track); ``None`` otherwise."""
+        archived, not being rendered, at least one audio track); ``None`` otherwise."""
         recording = self.recording
         if recording is None or recording.archived or not recording.tracks:
             return None
         if self.archiver.is_queued(recording.session_id):
+            return None
+        if self.renderer.running == recording.session_id:
+            self._show_status_message(BEING_RENDERED_NOTE + ".")
             return None
         return recording
 
@@ -2248,9 +2445,6 @@ class EditorWindow(QMainWindow):
             note = ""
         else:
             note = f"\n{ARCHIVED_NOTE if archived else TRANSCRIBING_NOTE}"
-        self.render_button.setEnabled(allowed)
-        self.render_action.setEnabled(allowed)
-        self.render_button.setToolTip(self.render_tooltip + note)
         self.process_button.setToolTip(self.process_tooltip + note)
         if not self._process_feedback_timer.isActive():
             self.process_button.setEnabled(allowed)
@@ -2583,6 +2777,8 @@ class EditorWindow(QMainWindow):
                 self._cancel_recording_session()
             self.recording_session = request.recording_session
             self._adopt_recording_session(request.recording_session)
+            self._fresh_session = request.recording_session  # green from now on
+            self._update_fresh()
         if request.session_id is None:
             self.refresh_recordings()
         else:
@@ -2691,6 +2887,9 @@ class EditorWindow(QMainWindow):
         self.player.stop()
         self.transcription.shutdown()  # the stored partial transcript resumes next time
         self.archiver.shutdown()  # stops cleanly; the next editor resumes the queue
+        self.renderer.shutdown()  # the user agreed to stop it (closeEvent)
+        if self._render_box is not None:
+            self._render_box.close()
         self._load_generation += 1  # ignore late results
         self._load_pool.waitForDone(10_000)
         self._mouse_pool.waitForDone(10_000)
@@ -2701,6 +2900,9 @@ class EditorWindow(QMainWindow):
         self.preview.view.wait()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self._stop_render_for_close():
+            event.ignore()  # the render goes on; so does the window
+            return
         self._attach_timer.stop()
         self._stop_countdown()
         self.transcription.stop()  # no more segments are stored once we start closing
@@ -2721,7 +2923,6 @@ __all__ = [
     "INSTRUCTIONS_SET_LABEL",
     "EditorWindow",
     "PROCESS_BUTTON_STYLE",
-    "RENDER_BUTTON_STYLE",
     "TimeEdit",
     "WINDOW_TITLE",
 ]
