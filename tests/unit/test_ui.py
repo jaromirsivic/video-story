@@ -647,11 +647,13 @@ def test_draw_shortcut_toggles_drawing(qtbot, controller):
             self.visible = False
             self.shapes = 0
             self.clears = 0
+            self.shapes_at_hide: list[int] = []
 
         def show(self) -> None:
             self.visible = True
 
         def hide(self) -> None:
+            self.shapes_at_hide.append(self.shapes)
             self.visible = False
 
         def close(self) -> None:
@@ -682,6 +684,8 @@ def test_draw_shortcut_toggles_drawing(qtbot, controller):
         qtbot.keyClick(w, Qt.Key.Key_Space, ctrl)
         qtbot.waitUntil(lambda: not w.draw_button.isChecked(), timeout=1000)
         assert not overlay.visible and overlay.shapes == 0 and overlay.clears == 1
+        # ... before hiding the overlay: hidden windows keep their last picture.
+        assert overlay.shapes_at_hide == [0]
         # Ctrl+F1 toggles drawing too.
         qtbot.keyClick(w, Qt.Key.Key_F1, ctrl)
         qtbot.waitUntil(lambda: w.draw_button.isChecked(), timeout=1000)
@@ -723,7 +727,11 @@ def test_drawings_are_cleared_when_drawing_mode_ends(qtbot, controller):
         qtbot.mouseMove(window, QPoint(60, 60))
         qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
         assert len(overlay.shapes()) == 1
+        hidden_with: list[int] = []
+        real_hide = overlay.hide
+        overlay.hide = lambda: (hidden_with.append(len(overlay.shapes())), real_hide())
         overlay._user_close()  # Esc / Close / the cross
+        assert hidden_with == [0]  # cleared while still shown, then hidden
         assert not w.draw_button.isChecked()
         w.draw_button.click()
         assert overlay.is_visible() and overlay.shapes() == []

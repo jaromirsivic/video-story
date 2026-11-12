@@ -73,6 +73,10 @@ KEYPOINT_LABEL = "Keypoint"
 DRAW_LABEL = "Draw"
 THEME_SETTING = "view/dark"
 TRAY_BALLOON_MS = 8000
+TRAY_SHOW_HINT = (
+    "click the Video Story icon in the system tray (under ^ if it is hidden) "
+    "to show the window again."
+)
 KEYPOINT_COOLDOWN_S = 3  # the button counts 3, 2, 1 before the next keypoint
 SAVED_NOTE = "What was recorded so far is saved and opens in the Video Story Editor."
 
@@ -612,12 +616,9 @@ class ControlWindow(QWidget):
         self._tray.show()
         self.hide()
         if self.controller.recording:
-            message = (
-                f"Recording continues. Stop it with {STOP_SHORTCUT}, or click this icon "
-                "to show the Video Story window again."
-            )
+            message = f"Recording continues. Stop it with {STOP_SHORTCUT}, or {TRAY_SHOW_HINT}"
         else:
-            message = "Click this icon to show the Video Story window again."
+            message = TRAY_SHOW_HINT[0].upper() + TRAY_SHOW_HINT[1:]
         self._tray.showMessage(
             "Video Story", message, QSystemTrayIcon.MessageIcon.Information, TRAY_BALLOON_MS
         )
@@ -673,8 +674,10 @@ class ControlWindow(QWidget):
                 self._share_drawing_windows()
                 self.raise_()
         elif self._overlay is not None:
-            self._overlay.hide()  # type: ignore[attr-defined]
+            # Clear while the overlay is still shown: hiding then paints it empty, so the
+            # old shapes do not flash when drawing starts again.
             self._clear_overlay()
+            self._overlay.hide()  # type: ignore[attr-defined]
 
     def _apply_drawing_grid(self) -> None:
         """The grid spacing Ctrl snaps to while drawing (Settings > Drawing Grid)."""

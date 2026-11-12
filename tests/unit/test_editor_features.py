@@ -46,7 +46,7 @@ from video_story.editor.timeline.view import (  # noqa: E402
 )
 from video_story.editor.window import (  # noqa: E402
     INSTRUCTIONS_LABEL,
-    INSTRUCTIONS_SET_LABEL,
+    INSTRUCTIONS_SET_STYLE,
     EditorWindow,
 )
 from video_story.host import editor_session as es  # noqa: E402
@@ -207,6 +207,7 @@ def test_instructions_button_dialog_file_and_process_event(
     editor, qtbot, folder: Path, monkeypatch
 ):
     assert editor.instructions_button.text() == INSTRUCTIONS_LABEL
+    assert editor.instructions_button.styleSheet() == ""
     assert editor.instructions == "" and editor.instructions_button.isEnabled()
     assert "whole recording" in editor.instructions_button.toolTip()
 
@@ -226,7 +227,8 @@ def test_instructions_button_dialog_file_and_process_event(
     monkeypatch.setattr(editor, "_instructions_dialog", lambda text: FakeDialog(text))
     assert editor.edit_instructions()
     assert editor.instructions == "Create an implementation plan."
-    assert editor.instructions_button.text() == INSTRUCTIONS_SET_LABEL
+    assert editor.instructions_button.text() == INSTRUCTIONS_LABEL  # no bullet
+    assert editor.instructions_button.styleSheet() == INSTRUCTIONS_SET_STYLE  # blue
     assert "Create an implementation plan." in editor.instructions_button.toolTip()
     path = SessionPaths(folder, NEWEST).instructions_path(folder / "default" / NEWEST)
     assert read_instructions(path) == "Create an implementation plan."

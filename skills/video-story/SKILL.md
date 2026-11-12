@@ -68,7 +68,8 @@ hidden to the system tray (a click on the tray icon shows it again). The user ca
 transcribes while the user crops - the green arrow under the narration track says
 `transcribing (ETA: m:ss)` -, optionally corrects subtitles with **Edit**, types master
 **Instructions** for you, and presses its green **Process** button, which closes the
-editor; Render Video and Process are available only once the transcript is complete, and
+editor (pressed on a recording other than the fresh, green one, it asks first);
+Render Video and Process are available only once the transcript is complete, and
 **Auto process** - unticked whenever the editor opens or another recording is selected -
 presses Process by itself five seconds after that unless the user clicks or types),
 **Continue Recording** or **Discard Recording**; a stopped recording always goes

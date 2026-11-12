@@ -349,6 +349,35 @@ def test_hide_and_show_keep_shapes(overlay):
     assert overlay.windows[0].isVisible()
 
 
+def test_hide_paints_the_windows_before_hiding_them(overlay, monkeypatch):
+    """A hidden translucent window shows its last picture for a moment when it appears
+    again: hide() paints the cleared state (sketch off, no zoom) while still shown."""
+    window = overlay.windows[0]
+    drag(window, [(10, 10), (30, 30)])
+    overlay.set_sketch(True)
+    painted: list[tuple[bool, bool, int]] = []
+    real_repaint = window.repaint
+
+    def repaint() -> None:
+        painted.append((window.isVisible(), overlay.sketch, len(overlay.shapes())))
+        real_repaint()
+
+    monkeypatch.setattr(window, "repaint", repaint)
+    overlay.clear()
+    overlay.hide()
+    assert painted == [(True, False, 0)]
+    assert not window.isVisible()
+
+
+def test_user_close_emits_closed_before_hiding(overlay, qtbot):
+    """The owner clears the shapes on ``closed`` while the windows are still shown."""
+    drag(overlay.windows[0], [(10, 10), (30, 30)])
+    seen: list[bool] = []
+    overlay.closed.connect(lambda: (seen.append(overlay.is_visible()), overlay.clear()))
+    overlay._user_close()
+    assert seen == [True] and not overlay.is_visible() and overlay.shapes() == []
+
+
 def _recorded_screens():
     """Screens matching the offscreen QScreens (origin 0,0), as the recorder would list them."""
     raw = [
@@ -567,6 +596,10 @@ def test_toolbar_layout_rows_and_outline(overlay):
     assert all(not b.icon().isNull() for b in tools)
     assert len({b.icon().cacheKey() for b in tools}) == 6
     assert all(b.toolTip() for b in tools)
+    assert tools[0].toolTip().startswith("Rectangle (R): draw a rectangle")
+    assert all(b.toolTip() for b in actions)
+    # The toolbar never becomes the active window: tooltips must show anyway.
+    assert toolbar.testAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
     assert "border: 2px solid #000000" in toolbar.styleSheet()
 
 

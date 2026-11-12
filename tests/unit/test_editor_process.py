@@ -182,6 +182,66 @@ def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, m
     assert es.read_editor_event(editor_session)["crop"] == {"start_ms": 900, "end_ms": 2000}
 
 
+def _show_older(qtbot, window: EditorWindow, monkeypatch, answer: bool) -> list[str]:
+    """Select the older recording (not the green one) and answer the confirmation with
+    ``answer``; returns the list the confirmation calls are counted in."""
+    window.list_view.setCurrentIndex(window.recordings.index(2))
+    _wait_loaded(qtbot, window, OLDER)
+    assert window.fresh_recording == NEWEST
+    asked: list[str] = []
+
+    def confirm() -> bool:
+        asked.append(window.recording.session_id)
+        return answer
+
+    monkeypatch.setattr(window, "_confirm_process_not_latest", confirm)
+    return asked
+
+
+def test_process_on_the_latest_recording_does_not_ask(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    asked: list[bool] = []
+    monkeypatch.setattr(window, "_confirm_process_not_latest", lambda: asked.append(True))
+    assert window.fresh_recording == NEWEST
+    window.process_button.click()
+    assert asked == [] and window.process_button.text() == "Sent to agent"
+
+
+def test_process_on_an_older_recording_asks_and_no_keeps_the_window(
+    qtbot, folder: Path, monkeypatch
+):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=False)
+    window.process_button.click()
+    assert asked == [OLDER] and sent == []
+    assert window.process_button.text() == "Process" and window.isVisible()
+    assert not _crop_file(folder, OLDER).exists()
+    # Ctrl+Enter asks as well.
+    qtbot.keyClick(window.timeline, Qt.Key_Return, Qt.KeyboardModifier.ControlModifier)
+    assert asked == [OLDER, OLDER] and sent == []
+
+
+def test_process_on_an_older_recording_yes_sends_it(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=True)
+    window.process_button.click()
+    assert asked == [OLDER] and sent == [OLDER]
+    assert window.process_button.text() == "Sent to agent"
+
+
+def test_auto_process_on_an_older_recording_does_not_ask(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=False)
+    assert window.process(auto=True) is not None
+    assert asked == [] and sent == [OLDER]
+
+
 def test_process_failure_keeps_the_recording_session_and_the_button(
     qtbot, folder: Path, monkeypatch
 ):
@@ -334,7 +394,9 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     assert read_state(paths.state_path).status is Status.PROCESSED
 
 
-def test_process_on_another_recording_still_finishes_the_recording_session(qtbot, folder: Path):
+def test_process_on_another_recording_still_finishes_the_recording_session(
+    qtbot, folder: Path, monkeypatch
+):
     cfg = Config(recording_folder=folder)
     editor_session = es.new_editor_session(cfg)
     paths = _editing_session(folder, NEWEST)
@@ -343,6 +405,7 @@ def test_process_on_another_recording_still_finishes_the_recording_session(qtbot
     _wait_loaded(qtbot, window, OLDER)
     window.model.set_in(1000)
     window._crop_updated()
+    monkeypatch.setattr(window, "_confirm_process_not_latest", lambda: True)
     window.process_button.click()
     event = es.read_editor_event(editor_session)
     assert event["session_id"] == OLDER and event["crop"]["start_ms"] == 1000

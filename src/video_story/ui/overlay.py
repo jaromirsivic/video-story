@@ -194,29 +194,46 @@ class Background(StrEnum):
 DEFAULT_TOOL = Tool.RECTANGLE  # the tool selected when the overlay is created
 # Tool buttons, left to right: (tool, name, key, tooltip text).
 TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
-    (Tool.RECTANGLE, "Rectangle", "R", "drag from corner to corner; Shift: a square"),
+    (
+        Tool.RECTANGLE,
+        "Rectangle",
+        "R",
+        "draw a rectangle - drag from corner to corner; Shift: a square, Ctrl: snap to the grid",
+    ),
     (
         Tool.ELLIPSE,
         "Ellipse",
         "E",
-        "drag from corner to corner of its bounding box; Shift: a circle",
+        "draw an ellipse - drag from corner to corner of its bounding box; Shift: a "
+        "circle, Ctrl: snap to the grid",
     ),
     (
         Tool.LINE,
         "Line",
         "L",
-        "drag from start to end; release the button with Shift held for connected lines "
-        "(every click starts the next one, releasing Shift ends)",
+        "draw a straight line - drag from start to end; release the button with Shift "
+        "held for connected lines (every click starts the next one, releasing Shift "
+        "ends), Ctrl: snap to the grid",
     ),
     (
         Tool.BRUSH,
         "Brush",
         "B",
-        "freehand line; Shift (before or while drawing) closes the shape, releasing Shift "
-        "finishes it",
+        "draw freehand; Shift (before or while drawing) closes the shape, releasing "
+        "Shift finishes it",
     ),
-    (Tool.ARROW, "Arrow", "A", "drag from tail to head"),
-    (Tool.ERASER, "Eraser", "U", "drag across the line of a shape to remove it (Ctrl+Z undoes)"),
+    (
+        Tool.ARROW,
+        "Arrow",
+        "A",
+        "draw an arrow - drag from tail to head; Ctrl: snap to the grid",
+    ),
+    (
+        Tool.ERASER,
+        "Eraser",
+        "U",
+        "remove shapes - drag across the line of a shape (Ctrl+Z brings it back)",
+    ),
 )
 TOOL_KEYS = {key: tool for tool, _name, key, _tip in TOOL_BUTTONS}
 
@@ -1172,6 +1189,9 @@ class OverlayToolbar(QWidget):
         # We paint the toolbar ourselves (frameless): the style sheet must draw its
         # background and the black outline that keeps it visible on white backgrounds.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Qt shows tooltips only in the active window, and this one never becomes active
+        # (WindowDoesNotAcceptFocus): show the buttons' hints anyway.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         # Explicit colors: the toolbar must look the same in light and dark system themes.
         self.setStyleSheet(
             "QWidget#overlayToolbar { background: #F4F4F4; border: 2px solid #000000; }"
@@ -1624,8 +1644,14 @@ class DrawingOverlay(QObject):
             self._toolbar.hide()
         for window in self._windows:
             window.cancel_gesture()
-            window.hide()
             window.set_snapshot(None)  # a fresh picture is grabbed at the next show()
+            if window.isVisible():
+                # Paint what the next show() starts from (no sketch canvas, no zoom, and
+                # no shapes when they were cleared first) before hiding: Windows shows a
+                # hidden translucent window's last picture for a moment when it appears
+                # again, so old shapes would flash at the next Draw.
+                window.repaint()
+            window.hide()
         self._cancel_span()
         self._ctrl = False
         self._refresh_drawings()
@@ -2239,8 +2265,10 @@ class DrawingOverlay(QObject):
     def _user_close(self) -> None:
         if not self._visible:
             return
-        self.hide()
+        # Tell the owner first: it clears the shapes while the windows are still shown,
+        # so that hide() paints them empty (see hide()).
         self.closed.emit()
+        self.hide()
 
 
 __all__ = [

@@ -251,6 +251,8 @@ def test_moving_the_recording_an_agent_waits_on_points_process_there(editor, qtb
     assert read_state(paths.state_path).recording_dir == str(folder / "Clients" / NEWEST)
     editor.list_view.setCurrentIndex(editor.recordings.index(editor.recordings.row_of(NEWEST)))
     _wait_loaded(qtbot, editor, NEWEST)
+    # Not the green recording any more (another folder comes first): Process asks.
+    editor._confirm_process_not_latest = lambda: True
     editor.process()
     state = read_state(paths.state_path)
     assert state.status is Status.PROCESSED

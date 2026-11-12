@@ -25,3 +25,19 @@ def _no_live_transcription(monkeypatch):
     import video_story.host.controller as controller
 
     monkeypatch.setattr(controller, "live_transcription_available", lambda _c: "disabled in tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_modal_process_question(monkeypatch):
+    """Process on a recording that is not the green one asks in a modal box, which would
+    hang an offscreen test: fail loudly instead. Tests that expect the question patch
+    ``_confirm_process_not_latest`` on their window."""
+    try:
+        import video_story.editor.window as window
+    except ImportError:  # pragma: no cover - Qt missing
+        return
+
+    def unexpected(_self) -> bool:
+        raise AssertionError("unexpected 'process a recording that is not the latest' question")
+
+    monkeypatch.setattr(window.EditorWindow, "_confirm_process_not_latest", unexpected)

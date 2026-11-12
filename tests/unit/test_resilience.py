@@ -415,6 +415,7 @@ def test_process_waits_for_the_transcript_of_the_awaited_recording(qtbot, tmp_pa
         awaited.transcript_json_path(awaited.final_dir),
         Transcript("en", [Segment(0, 500, "so far"), Segment(600, 900, "done")]),
     )
+    window._confirm_process_not_latest = lambda: True  # OLDER is not the green one
     assert window.process() is not None
     assert read_state(awaited.state_path).status is Status.PROCESSED
 

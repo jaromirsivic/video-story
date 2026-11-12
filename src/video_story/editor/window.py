@@ -33,11 +33,13 @@ five second countdown on the Process button that presses it by itself unless the
 clicks or types.
 
 The bottom row reads **Auto process**, the green **Process** and **Instructions**, at the
-right edge. Instructions opens a text box for the master
-instructions for the AI about the whole recording (``instructions.txt`` next to the
-recording, empty by default); they travel to the agent with the crop. **Stop** returns
-to where **Play** was last pressed (a white arrow on the ruler). The theme button above
-**Edit** switches between the light and the dark theme (remembered in the settings).
+right edge. Instructions (blue while instructions are stored) opens a text box for the
+master instructions for the AI about the whole recording (``instructions.txt`` next to
+the recording, empty by default); they travel to the agent with the crop. Process
+pressed on a recording that is not the green one asks first (Auto process never asks).
+**Stop** returns to where **Play** was last pressed (a white arrow on the ruler). The
+theme button above **Edit** switches between the light and the dark theme (remembered in
+the settings).
 
 The list's menu offers **Render Video...** right above Archive Video: a dialog asks for
 the screen and the MP4 file (``Select File Name``), and the video is rendered in the
@@ -196,10 +198,23 @@ ETA_MIN_ELAPSED_S = 3.0  # no estimate before the transcription ran this long
 ETA_MIN_PROGRESS = 0.01  # ... and advanced this much
 ACTION_BUTTON_SIZE = (128, 32)  # Process and Instructions (smaller than before)
 INSTRUCTIONS_LABEL = "Instructions"
-INSTRUCTIONS_SET_LABEL = "Instructions •"  # a bullet marks stored instructions
 INSTRUCTIONS_TOOLTIP = (
     "Master instructions for the AI about the whole recording, e.g. “create an "
-    "implementation plan” (Ctrl+I). Empty by default."
+    "implementation plan” (Ctrl+I). Empty by default; the button turns blue once "
+    "instructions are stored."
+)
+# The Instructions button while instructions are stored: blue (green is Process).
+INSTRUCTIONS_SET_STYLE = """
+QPushButton {
+    background-color: #1f6fd1; color: white; border: 1px solid #1858a8; border-radius: 4px;
+}
+QPushButton:hover { background-color: #2b7de6; }
+QPushButton:pressed { background-color: #1858a8; }
+QPushButton:disabled { background-color: #9dbfe8; color: #f4f8ff; border-color: #8aafd9; }
+"""
+PROCESS_NOT_LATEST_TEXT = (
+    "This is not the latest recording (the one with the green background in the "
+    "list).\n\nDo you really want to process it?"
 )
 PROCESS_BUTTON_STYLE = """
 QPushButton {
@@ -2024,6 +2039,18 @@ class EditorWindow(QMainWindow):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _confirm_process_not_latest(self) -> bool:
+        """Ask before Process sends a recording that is not the latest one (the green
+        row in the list); tests override this."""
+        answer = QMessageBox.question(
+            self,
+            "Process",
+            PROCESS_NOT_LATEST_TEXT,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _stop_render_for_close(self) -> bool:
         """No render, or the user agreed to stop it (it is stopped then); False keeps
         the window open."""
@@ -2054,7 +2081,7 @@ class EditorWindow(QMainWindow):
 
     def _update_instructions_button(self) -> None:
         has = bool(self._instructions)
-        self.instructions_button.setText(INSTRUCTIONS_SET_LABEL if has else INSTRUCTIONS_LABEL)
+        self.instructions_button.setStyleSheet(INSTRUCTIONS_SET_STYLE if has else "")
         tooltip = INSTRUCTIONS_TOOLTIP
         if has:
             preview = self._instructions if len(self._instructions) <= 400 else (
@@ -2165,7 +2192,7 @@ class EditorWindow(QMainWindow):
 
     # Process ----------------------------------------------------------------
 
-    def process(self) -> Crop | None:
+    def process(self, *, auto: bool = False) -> Crop | None:
         """Send the shown recording and its crop to the agent, then close the window.
 
         Stores ``crop.json``, writes the ``process`` event into ``editor_session`` and
@@ -2176,6 +2203,9 @@ class EditorWindow(QMainWindow):
         all screens; the selected track is irrelevant. When the event went out, the
         window closes (the work continues in the agent); on a failure it stays open so
         that the user can retry.
+
+        Pressed by hand (button, Ctrl+Enter) on a recording that is not the green one
+        in the list, it first asks whether to go on; ``auto`` (Auto process) never asks.
         """
         if self.recording is None:
             self._show_status_message("Select a recording first.")
@@ -2195,6 +2225,14 @@ class EditorWindow(QMainWindow):
             )
             return None
         self._stop_countdown()
+        fresh = self.fresh_recording
+        if (
+            not auto
+            and fresh is not None
+            and fresh != self.recording.session_id
+            and not self._confirm_process_not_latest()
+        ):
+            return None
         if not self._stop_render_for_close():
             return None  # a video is being rendered and the user keeps the window
         self._commit_time_edits()
@@ -2617,7 +2655,7 @@ class EditorWindow(QMainWindow):
             return
         self._stop_countdown()
         log.info("Auto process: pressing Process")
-        self.process()
+        self.process(auto=True)
 
     def _stop_countdown(self) -> None:
         self._auto_timer.stop()
@@ -2888,7 +2926,7 @@ __all__ = [
     "ACTION_BUTTON_SIZE",
     "AUTO_PROCESS_SECONDS",
     "INSTRUCTIONS_LABEL",
-    "INSTRUCTIONS_SET_LABEL",
+    "INSTRUCTIONS_SET_STYLE",
     "EditorWindow",
     "PROCESS_BUTTON_STYLE",
     "TimeEdit",
