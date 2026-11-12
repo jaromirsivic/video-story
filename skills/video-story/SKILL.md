@@ -245,8 +245,12 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
   `audio_input`, `computer_audio` true|false, `mouse_actions` true|false (clicks, the
   elements under the mouse and their content; default true), `auto_stop_minutes`,
   `archive_after_days`). The user can also use
-  the **Settings** button, which also opens the recording folder and can delete all
-  recordings. Recordings older than `archive_after_days` (default 30) are archived when
+  the **Settings** button, which also opens the recording folder (recordings are
+  deleted in the editor only). The editor groups recordings into folders: a recording
+  lies in `<recording_folder>/<folder>/<session_id>/`, a new one in the user's main
+  folder (`default` at first), and the user may move it to another folder, also
+  between Stop and Process - always use the `recording_dir` the result gives (or the
+  session id), never a path you built yourself. Recordings older than `archive_after_days` (default 30) are archived when
   the editor starts (one MP4 per screen; frames and audio are deleted); nothing is
   deleted automatically.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;

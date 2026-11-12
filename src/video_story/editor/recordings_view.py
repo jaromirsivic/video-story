@@ -19,6 +19,15 @@ A label in the middle of the thumbnail (black capitals on white) tells what happ
 a recording: ``TRANSCRIBING...`` and ``ARCHIVING...`` with the percentage under it
 (one decimal; archiving counts all screens together, so one of two screens done is
 50 %), ``ARCHIVED`` once it was archived. A recording without a label is not archived.
+
+The recordings are grouped by folder: every folder starts with a header row (an
+accordion) - a triangle (open / closed), the name with the number of videos in brackets
+(bold for the main folder, where new recordings are saved; a long name is cut with
+``…`` so that the count stays visible), a pin (empty; filled for the pinned folder, which
+always stands first) and ``⋯`` (the folder's menu). A click on the header opens or closes
+the folder, a click on the pin or on ``⋯`` emits :attr:`RecordingsListView.pin_clicked`
+or :attr:`RecordingsListView.folder_menu_requested`. Shift and Ctrl select within one
+folder only: a Shift or Ctrl click into another folder starts a new selection there.
 """
 
 from __future__ import annotations
@@ -28,6 +37,8 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QEvent,
+    QItemSelection,
+    QItemSelectionModel,
     QModelIndex,
     QPersistentModelIndex,
     QPoint,
@@ -36,6 +47,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    Signal,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -46,12 +58,15 @@ from PySide6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPalette,
     QPen,
+    QPolygonF,
     QTextLayout,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QListView,
     QStyle,
     QStyledItemDelegate,
@@ -63,7 +78,7 @@ from PySide6.QtWidgets import (
 from video_story.host.runner import FrameIndex
 
 from .recording import StillFrames
-from .recordings_model import ItemRole, RecordingItem
+from .recordings_model import FolderHeader, FolderRole, ItemRole, RecordingItem
 from .timeline.thumbnails import ThumbnailCache
 from .timeline.view import COLOR_MATCH
 
@@ -86,6 +101,13 @@ BADGE_TRANSCRIBING = "TRANSCRIBING..."
 BADGE_ARCHIVING = "ARCHIVING..."
 BADGE_ARCHIVED = "ARCHIVED"
 MATCH_FRAME_W = 3  # the yellow frame of a recording whose transcript has the searched text
+HEADER_BUTTON = 22  # the pin and the menu button of a folder header (square)
+HEADER_GAP = 6
+CHEVRON = 9
+PIN_TOOLTIP = "Pin to top"
+UNPIN_TOOLTIP = "Unpin"
+FOLDER_MENU_TOOLTIP = "Folder actions"
+MAIN_FOLDER_TOOLTIP = "Main folder: new recordings are saved here"
 
 
 def format_percent(fraction: float) -> str:
@@ -154,6 +176,83 @@ def elided_lines(text: str, font: QFont, width: int, max_lines: int) -> list[str
     return lines
 
 
+def header_background(palette: QPalette) -> QColor:
+    """A header row stands out a little from the recording rows (both themes)."""
+    base = palette.color(QPalette.ColorRole.Base)
+    return base.lighter(135) if base.lightness() < 128 else base.darker(108)
+
+
+def draw_pin(painter: QPainter, box: QRectF, color: QColor, filled: bool) -> None:
+    """A push pin, empty (outline) or filled."""
+    w, h = box.width(), box.height()
+    cx = box.center().x()
+    top = box.top() + h * 0.14
+    grip_w, grip_h = w * 0.30, h * 0.30
+    collar_w, collar_y = w * 0.56, top + h * 0.44
+    body = QPainterPath()
+    body.addPolygon(
+        QPolygonF(
+            [
+                QPointF(cx - grip_w / 2, top),
+                QPointF(cx + grip_w / 2, top),
+                QPointF(cx + grip_w / 2, top + grip_h),
+                QPointF(cx + collar_w / 2, collar_y),
+                QPointF(cx - collar_w / 2, collar_y),
+                QPointF(cx - grip_w / 2, top + grip_h),
+            ]
+        )
+    )
+    body.closeSubpath()
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(color, max(1.2, w / 16))
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(QBrush(color) if filled else Qt.BrushStyle.NoBrush)
+    painter.drawPath(body)
+    painter.drawLine(QPointF(cx, collar_y), QPointF(cx, box.bottom() - h * 0.08))
+    painter.restore()
+
+
+def draw_menu_dots(painter: QPainter, box: QRectF, color: QColor) -> None:
+    """``⋯``: three dots in a row."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(color))
+    radius = max(1.5, box.width() / 13)
+    step = box.width() / 4.2
+    center = box.center()
+    for k in (-1, 0, 1):
+        painter.drawEllipse(QPointF(center.x() + k * step, center.y()), radius, radius)
+    painter.restore()
+
+
+def draw_chevron(painter: QPainter, box: QRectF, color: QColor, collapsed: bool) -> None:
+    """A small filled triangle: pointing down (open) or right (closed)."""
+    c = box.center()
+    r = box.width() / 2
+    if collapsed:
+        points = [
+            QPointF(c.x() - r * 0.5, c.y() - r),
+            QPointF(c.x() + r * 0.7, c.y()),
+            QPointF(c.x() - r * 0.5, c.y() + r),
+        ]
+    else:
+        points = [
+            QPointF(c.x() - r, c.y() - r * 0.5),
+            QPointF(c.x() + r, c.y() - r * 0.5),
+            QPointF(c.x(), c.y() + r * 0.7),
+        ]
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(color))
+    painter.drawPolygon(QPolygonF(points))
+    painter.restore()
+
+
 class RecordingDelegate(QStyledItemDelegate):
     """Paints a row of :class:`RecordingsListView` (see the module docstring)."""
 
@@ -188,10 +287,48 @@ class RecordingDelegate(QStyledItemDelegate):
         first = right - count * DOT_D - (count - 1) * DOT_GAP + 1
         return [QRect(first + k * (DOT_D + DOT_GAP), y, DOT_D, DOT_D) for k in range(count)]
 
+    @staticmethod
+    def menu_rect(rect: QRect) -> QRect:
+        """The ``⋯`` button of a folder header."""
+        top = rect.top() + (rect.height() - HEADER_BUTTON) // 2
+        return QRect(rect.right() - PAD - HEADER_BUTTON + 1, top, HEADER_BUTTON, HEADER_BUTTON)
+
+    @classmethod
+    def pin_rect(cls, rect: QRect) -> QRect:
+        """The pin button of a folder header (left of ``⋯``)."""
+        return cls.menu_rect(rect).translated(-(HEADER_BUTTON + 2), 0)
+
+    @staticmethod
+    def chevron_rect(rect: QRect) -> QRect:
+        top = rect.top() + (rect.height() - CHEVRON) // 2
+        return QRect(rect.left() + PAD + 2, top, CHEVRON, CHEVRON)
+
+    @classmethod
+    def name_rect(cls, rect: QRect) -> QRect:
+        left = cls.chevron_rect(rect).right() + 1 + HEADER_GAP
+        right = cls.pin_rect(rect).left() - HEADER_GAP
+        return QRect(left, rect.top(), max(1, right - left), rect.height())
+
+    @staticmethod
+    def header_font(base: QFont, main: bool) -> QFont:
+        font = QFont(base)
+        font.setBold(main)
+        return font
+
+    @classmethod
+    def header_texts(cls, header: FolderHeader, font: QFont, width: int) -> tuple[str, str]:
+        """The (possibly elided) name and `` (N)``: the count always stays visible."""
+        metrics = QFontMetrics(cls.header_font(font, header.main))
+        count = f" ({header.count})"
+        room = max(1, width - metrics.horizontalAdvance(count))
+        return metrics.elidedText(header.name, Qt.TextElideMode.ElideRight, room), count
+
     def sizeHint(  # noqa: N802
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
     ) -> QSize:
         line = QFontMetrics(option.font).lineSpacing()
+        if isinstance(index.data(FolderRole), FolderHeader):
+            return QSize(MIN_LIST_WIDTH, max(HEADER_BUTTON + 6, line + 2 * PAD) + 1)
         text_h = (2 + TEXT_LINES) * line
         return QSize(MIN_LIST_WIDTH, max(THUMB_H, text_h) + 2 * PAD + 1)
 
@@ -203,6 +340,10 @@ class RecordingDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
+        header = index.data(FolderRole)
+        if isinstance(header, FolderHeader):
+            self._paint_header(painter, option, index.row(), header)
+            return
         item = index.data(ItemRole)
         if not isinstance(item, RecordingItem):
             super().paint(painter, option, index)
@@ -260,6 +401,45 @@ class RecordingDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             half = MATCH_FRAME_W / 2
             painter.drawRect(QRectF(rect).adjusted(half, half, -half - 1, -half - 1))
+        painter.setPen(QPen(separator_color(palette), 1))
+        painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+        painter.restore()
+
+    def _paint_header(
+        self, painter: QPainter, option: QStyleOptionViewItem, row: int, header: FolderHeader
+    ) -> None:
+        rect = option.rect
+        palette = option.palette
+        ink = palette.color(QPalette.ColorRole.Text)
+        painter.save()
+        painter.setClipRect(rect)
+        painter.fillRect(rect, header_background(palette))
+        draw_chevron(painter, QRectF(self.chevron_rect(rect)), ink, header.collapsed)
+        area = self.name_rect(rect)
+        font = self.header_font(option.font, header.main)
+        name, count = self.header_texts(header, option.font, area.width())
+        metrics = QFontMetrics(font)
+        painter.setFont(font)
+        painter.setPen(QPen(ink))
+        align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(area, align, name)
+        count_left = area.left() + metrics.horizontalAdvance(name)
+        painter.drawText(
+            QRect(count_left, area.top(), max(1, area.right() - count_left + 1), area.height()),
+            align,
+            count,
+        )
+        hovered = self.view.header_hover
+        for part, box in (("pin", self.pin_rect(rect)), ("menu", self.menu_rect(rect))):
+            if hovered == (row, part):
+                shade = QColor(palette.color(QPalette.ColorRole.Highlight))
+                shade.setAlpha(60)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(shade)
+                painter.drawRoundedRect(QRectF(box), 4, 4)
+        draw_pin(painter, QRectF(self.pin_rect(rect)).adjusted(4, 3, -4, -3), ink, header.pinned)
+        draw_menu_dots(painter, QRectF(self.menu_rect(rect)).adjusted(3, 3, -3, -3), ink)
         painter.setPen(QPen(separator_color(palette), 1))
         painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
         painter.restore()
@@ -347,13 +527,18 @@ class RecordingDelegate(QStyledItemDelegate):
 
 
 class RecordingsListView(QListView):
-    """The recordings list with thumbnail rows and the hover scrub (module docstring)."""
+    """The recordings list with folder headers, thumbnail rows and the hover scrub
+    (module docstring)."""
+
+    pin_clicked = Signal(str)  # folder name: its pin was clicked
+    folder_menu_requested = Signal(str, QPoint)  # folder name, global position
+    folder_toggled = Signal(str, bool)  # folder name, collapsed now
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.delegate = RecordingDelegate(self)
         self.setItemDelegate(self.delegate)
-        self.setUniformItemSizes(True)
+        self.setUniformItemSizes(False)  # folder headers are lower than recordings
         self.setSpacing(0)
         self.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -371,6 +556,8 @@ class RecordingsListView(QListView):
         # session id -> ("transcribing" | "archiving", fraction): work running right now
         self._activity: dict[str, tuple[str, float]] = {}
         self._matches: set[str] = set()  # session ids with the searched text (yellow frame)
+        self._header_hover: tuple[int, str] | None = None  # (row, "pin" | "menu")
+        self._clamping = False
 
     # Model --------------------------------------------------------------------
 
@@ -378,15 +565,145 @@ class RecordingsListView(QListView):
         old = self.model()
         if old is not None:
             old.modelReset.disconnect(self._on_model_reset)
+            old.dataChanged.disconnect(self._on_data_changed)
         super().setModel(model)
         if model is not None:
             model.modelReset.connect(self._on_model_reset)
+            model.dataChanged.connect(self._on_data_changed)
+            self.selectionModel().selectionChanged.connect(self._keep_selection_in_one_folder)
+            self.apply_collapsed()
 
     def _on_model_reset(self) -> None:
         """Refresh: frames may have changed; the chosen screens stay."""
         self._frames.clear()
         self._last_image.clear()
         self._hover = None
+        self._header_hover = None
+        self.apply_collapsed()
+
+    def _on_data_changed(self, *_args) -> None:
+        self.apply_collapsed()
+
+    # Folders ------------------------------------------------------------------
+
+    def _header_at_row(self, row: int) -> FolderHeader | None:
+        model = self.model()
+        if model is None:
+            return None
+        value = model.index(row, 0).data(FolderRole)
+        return value if isinstance(value, FolderHeader) else None
+
+    def _folder_of_row(self, row: int) -> str | None:
+        model = self.model()
+        if model is None or not hasattr(model, "folder_of_row"):
+            return None
+        return model.folder_of_row(row)
+
+    def apply_collapsed(self) -> None:
+        """Hide the recordings of collapsed folders, show the others."""
+        model = self.model()
+        if model is None:
+            return
+        collapsed = False
+        for row in range(model.rowCount()):
+            header = self._header_at_row(row)
+            if header is not None:
+                collapsed = header.collapsed
+                hidden = False
+            else:
+                hidden = collapsed
+            if self.isRowHidden(row) != hidden:
+                self.setRowHidden(row, hidden)
+
+    def toggle_folder(self, folder: str) -> None:
+        """Open a closed folder, close an open one (stored in ``folders.json``)."""
+        model = self.model()
+        if model is None or not hasattr(model, "set_collapsed"):
+            return
+        collapsed = not model.is_collapsed(folder)
+        if model.set_collapsed(folder, collapsed):
+            self.folder_toggled.emit(folder, collapsed)
+
+    def header_hit(self, pos: QPoint) -> tuple[FolderHeader, str, QRect] | None:
+        """The folder header under ``pos`` and the part hit: ``"pin"``, ``"menu"`` or
+        ``"header"`` (anywhere else on the row), with that part's rectangle."""
+        index = self.indexAt(pos)
+        header = index.data(FolderRole) if index.isValid() else None
+        if not isinstance(header, FolderHeader):
+            return None
+        rect = self.visualRect(index)
+        for part, area in (
+            ("pin", self.delegate.pin_rect(rect)),
+            ("menu", self.delegate.menu_rect(rect)),
+        ):
+            if area.contains(pos):
+                return header, part, area
+        return header, "header", rect
+
+    @property
+    def header_hover(self) -> tuple[int, str] | None:
+        return self._header_hover
+
+    def _set_header_hover(self, value: tuple[int, str] | None) -> None:
+        if value != self._header_hover:
+            self._header_hover = value
+            self.viewport().update()
+
+    def _keep_selection_in_one_folder(self, *_args) -> None:
+        """Bulk actions work within one folder: rows of other folders than the current
+        row's are deselected (Shift ranges across a header, Ctrl+A)."""
+        if self._clamping:
+            return
+        selection = self.selectionModel()
+        current = self.currentIndex()
+        if selection is None or not current.isValid():
+            return
+        folder = self._folder_of_row(current.row())
+        if folder is None:
+            return
+        foreign = QItemSelection()
+        for index in selection.selectedRows():
+            if self._folder_of_row(index.row()) != folder:
+                foreign.select(index, index)
+        if foreign.isEmpty():
+            return
+        self._clamping = True
+        try:
+            selection.select(foreign, QItemSelectionModel.SelectionFlag.Deselect)
+        finally:
+            self._clamping = False
+
+    def moveCursor(  # noqa: N802
+        self, action: QAbstractItemView.CursorAction, modifiers: Qt.KeyboardModifier
+    ) -> QModelIndex:
+        """Keys skip the folder headers and the rows of closed folders; Shift does not
+        leave the current folder."""
+        index = super().moveCursor(action, modifiers)
+        model = self.model()
+        current = self.currentIndex()
+        if model is None or not index.isValid():
+            return index
+        backwards = action in (
+            QAbstractItemView.CursorAction.MoveUp,
+            QAbstractItemView.CursorAction.MovePageUp,
+            QAbstractItemView.CursorAction.MovePrevious,
+            QAbstractItemView.CursorAction.MoveEnd,
+        )
+        step = -1 if backwards else 1
+        row = index.row()
+        while 0 <= row < model.rowCount() and (
+            self._header_at_row(row) is not None or self.isRowHidden(row)
+        ):
+            row += step
+        if not 0 <= row < model.rowCount():
+            return current
+        if (
+            modifiers & Qt.KeyboardModifier.ShiftModifier
+            and current.isValid()
+            and self._folder_of_row(current.row()) != self._folder_of_row(row)
+        ):
+            return current
+        return model.index(row, 0)
 
     # Labels ---------------------------------------------------------------------
 
@@ -539,7 +856,7 @@ class RecordingsListView(QListView):
     def scrub_to(self, pos: QPoint) -> None:
         """Preview the row under ``pos`` at the moment its x position stands for."""
         index = self.indexAt(pos)
-        if not index.isValid():
+        if not index.isValid() or isinstance(index.data(FolderRole), FolderHeader):
             self.clear_hover()
             return
         rect = self.visualRect(index)
@@ -567,28 +884,102 @@ class RecordingsListView(QListView):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
         self.scrub_to(pos)
+        header = self.header_hit(pos)
+        if header is not None:
+            row = self.indexAt(pos).row()
+            self._set_header_hover((row, header[1]) if header[1] != "header" else None)
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+            return  # no drag selection starts on a header
+        self._set_header_hover(None)
         on_dot = self.dot_at(pos) is not None
         self.viewport().setCursor(
             Qt.CursorShape.PointingHandCursor if on_dot else Qt.CursorShape.ArrowCursor
         )
         super().mouseMoveEvent(event)
 
+    def _press_header(self, event: QMouseEvent) -> bool:
+        """A press on a folder header: toggle, pin or menu. True when it was one."""
+        pos = event.position().toPoint()
+        hit = self.header_hit(pos)
+        if hit is None:
+            return False
+        event.accept()
+        if event.button() != Qt.MouseButton.LeftButton:
+            return True  # the right button opens the folder menu (context menu)
+        header, part, area = hit
+        if part == "pin":
+            self.pin_clicked.emit(header.name)
+        elif part == "menu":
+            self.folder_menu_requested.emit(
+                header.name, self.viewport().mapToGlobal(area.bottomLeft())
+            )
+        else:
+            self.toggle_folder(header.name)
+        return True
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._press_header(event):
+            return
         hit = self.dot_at(event.position().toPoint())
         if hit is not None and event.button() == Qt.MouseButton.LeftButton:
             item, screen_id = hit
             self.set_screen(item, screen_id)
             event.accept()
             return  # a dot only switches the thumbnail; it does not open the recording
+        modifiers = event.modifiers()
+        extend = Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+        index = self.indexAt(event.position().toPoint())
+        current = self.currentIndex()
+        if (
+            modifiers & extend
+            and index.isValid()
+            and current.isValid()
+            and self._folder_of_row(index.row()) != self._folder_of_row(current.row())
+        ):
+            # Shift/Ctrl into another folder: a new selection there (one folder only).
+            plain = QMouseEvent(
+                event.type(),
+                event.position(),
+                event.globalPosition(),
+                event.button(),
+                event.buttons(),
+                modifiers & ~extend,
+            )
+            super().mousePressEvent(plain)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._press_header(event):  # a quick second click toggles again
+            return
+        super().mouseDoubleClickEvent(event)
 
     def dot_tooltip(self, pos: QPoint) -> str | None:
         """Tooltip of the screen dot under ``pos``: ``screen1 2560x1600``."""
         hit = self.dot_at(pos)
         return hit[0].screen_label(hit[1]) if hit is not None else None
 
+    def header_tooltip(self, pos: QPoint) -> str | None:
+        """Tooltip of a folder header: the pin, ``⋯`` or the folder itself."""
+        hit = self.header_hit(pos)
+        if hit is None:
+            return None
+        header, part, _area = hit
+        if part == "pin":
+            return UNPIN_TOOLTIP if header.pinned else PIN_TOOLTIP
+        if part == "menu":
+            return FOLDER_MENU_TOOLTIP
+        text = header.label
+        return f"{text}\n{MAIN_FOLDER_TOOLTIP}" if header.main else text
+
     def viewportEvent(self, event: QEvent) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            header = self.header_hit(event.pos())
+            if header is not None:
+                text = self.header_tooltip(event.pos())
+                QToolTip.showText(event.globalPos(), text or "", self.viewport(), header[2])
+                return True
             hit = self._dot_hit(event.pos())
             if hit is not None:
                 item, screen_id, area = hit
@@ -598,6 +989,7 @@ class RecordingsListView(QListView):
                 return True
         if event.type() == QEvent.Type.Leave:
             self.clear_hover()
+            self._set_header_hover(None)
             self.viewport().unsetCursor()
         return super().viewportEvent(event)
 
@@ -613,6 +1005,10 @@ __all__ = [
     "BADGE_ARCHIVED",
     "BADGE_ARCHIVING",
     "BADGE_TRANSCRIBING",
+    "FOLDER_MENU_TOOLTIP",
+    "PIN_TOOLTIP",
+    "UNPIN_TOOLTIP",
+    "draw_pin",
     "MIN_LIST_WIDTH",
     "RecordingDelegate",
     "RecordingsListView",

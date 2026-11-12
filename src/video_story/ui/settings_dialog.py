@@ -1,5 +1,5 @@
 """Settings dialog: items in the order required by the specification, followed by the
-archiving setting and the recording folder actions (Open Folder, Delete All)."""
+archiving setting and the recording folder action (Open Folder)."""
 
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ SYSTEM_DEFAULT_LABEL = "System default input"
 class SettingsDialog(QDialog):
     """Edit ``config.json``. ``result_config`` holds the saved configuration on accept.
 
-    ``current_session_id`` is the session of the open control window; its work folder
-    is never touched by **Delete All Recordings**. ``config_file`` is the file to save
+    ``current_session_id`` is the session of the open control window. ``config_file``
+    is the file to save
     to (default: the plugin's ``config.json``). ``save_guard(config)`` returns a context
     manager entered around the save: the control window uses it to move its session to
     a newly chosen Recording Folder; an exception from it keeps the dialog open.
@@ -190,16 +190,12 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Archive After", self.archive_after_spin)
 
-        # 7. Recordings: open the folder, delete everything
+        # 7. Recordings: open the folder (recordings are deleted in the editor)
         self.open_folder_button = QPushButton("Open Folder")
         self.open_folder_button.setToolTip("Open the recording folder in the file manager")
         self.open_folder_button.clicked.connect(self._open_folder)
-        self.delete_all_button = QPushButton("Delete All Recordings...")
-        self.delete_all_button.setToolTip("Delete every stored recording (asks first)")
-        self.delete_all_button.clicked.connect(self._delete_all)
         actions_row = QHBoxLayout()
         actions_row.addWidget(self.open_folder_button)
-        actions_row.addWidget(self.delete_all_button)
         actions_row.addStretch(1)
         form.addRow("Recordings", actions_row)
 
@@ -262,30 +258,6 @@ class SettingsDialog(QDialog):
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.warning(self, "Cannot open folder", f"No file manager opened {folder}.")
-
-    def _delete_all(self) -> None:
-        """Delete every recording in the configured folder after confirmation."""
-        from video_story.host.retention import delete_all_recordings, summarize_recordings
-
-        folder = self._config.recording_folder
-        summary = summarize_recordings(folder, exclude_session_id=self._current_session_id)
-        if summary.count == 0:
-            QMessageBox.information(self, "Delete All Recordings", f"No recordings in {folder}.")
-            return
-        answer = QMessageBox.question(
-            self,
-            "Delete All Recordings",
-            f"Delete all {summary.count} recording(s) ({summary.total_text}) in\n{folder}?\n\n"
-            "This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        deleted = delete_all_recordings(folder, exclude_session_id=self._current_session_id)
-        QMessageBox.information(
-            self, "Delete All Recordings", f"Deleted {len(deleted)} recording(s)."
-        )
 
     # Values -------------------------------------------------------------------
 

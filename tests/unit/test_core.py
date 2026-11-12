@@ -211,7 +211,7 @@ def test_session_id_and_paths(tmp_path: Path):
     state = SessionState(session_id=sid, status=Status.RECORDING, recording_folder=str(tmp_path))
     write_state(paths.state_path, state)
     final = paths.finalize()
-    assert final == tmp_path / sid
+    assert final == tmp_path / "default" / sid  # the main folder (default at first)
     assert (final / "frames" / "0_000_screen1.png").exists()
     assert paths.state_path.exists()  # state survives for `wait`
     assert read_state(paths.state_path).status is Status.RECORDING
@@ -242,7 +242,7 @@ def test_finalize_with_open_ui_log(tmp_path: Path):
         ui_log.write(b"window output\n")
         ui_log.flush()
         final = paths.finalize()
-    assert final == tmp_path / paths.session_id
+    assert final == tmp_path / "default" / paths.session_id
     assert sorted(p.name for p in final.iterdir()) == [
         "audio",
         "frames",

@@ -1,5 +1,5 @@
-"""Lifetime of recordings: old ones are archived (never deleted automatically); one or
-all of them are deleted on request.
+"""Lifetime of recordings: old ones are archived (never deleted automatically); a
+recording is deleted on request (the editor's Delete Video and folder actions).
 
 A recording's age is taken from its session id (``YYYYMMDD-HHMMSS``, local time of the
 recording start), which is deterministic and independent of file timestamps. Recordings
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,21 +19,6 @@ from video_story.core.session import SessionPaths, list_sessions, read_state
 from video_story.platform.process import pid_alive
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class RecordingsSummary:
-    count: int
-    total_bytes: int
-
-    @property
-    def total_text(self) -> str:
-        size = float(self.total_bytes)
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if size < 1024 or unit == "TB":
-                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"  # pragma: no cover
 
 
 def session_started_at(session_id: str) -> datetime | None:
@@ -63,33 +47,6 @@ def _is_active(paths: SessionPaths) -> bool:
     except RuntimeError:
         return False
     return not state.status.final and pid_alive(state.pid)
-
-
-def _dir_size(path: Path) -> int:
-    total = 0
-    for entry in path.rglob("*"):
-        try:
-            if entry.is_file():
-                total += entry.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def summarize_recordings(
-    recording_folder: Path, exclude_session_id: str | None = None
-) -> RecordingsSummary:
-    """Number and size of the recordings that :func:`delete_all_recordings` would remove."""
-    count = 0
-    total = 0
-    for paths in list_sessions(recording_folder):
-        if paths.session_id == exclude_session_id:
-            continue
-        for directory in (paths.final_dir, paths.work_dir):
-            if directory.exists():
-                total += _dir_size(directory)
-        count += 1
-    return RecordingsSummary(count=count, total_bytes=total)
 
 
 def _delete_session(paths: SessionPaths) -> bool:
@@ -145,28 +102,10 @@ def recordings_due_for_archive(
     return due
 
 
-def delete_all_recordings(
-    recording_folder: Path, exclude_session_id: str | None = None
-) -> list[str]:
-    """Delete every recording except ``exclude_session_id`` (the open window's session)
-    and sessions whose window is still running; returns the deleted session ids."""
-    deleted: list[str] = []
-    for paths in list_sessions(recording_folder):
-        if paths.session_id == exclude_session_id or _is_active(paths):
-            continue
-        if _delete_session(paths):
-            deleted.append(paths.session_id)
-    log.info("deleted %d recording(s) from %s", len(deleted), recording_folder)
-    return deleted
-
-
 __all__ = [
     "IN_USE_REASON",
-    "RecordingsSummary",
-    "delete_all_recordings",
     "delete_recording",
     "recording_in_use",
     "recordings_due_for_archive",
     "session_started_at",
-    "summarize_recordings",
 ]

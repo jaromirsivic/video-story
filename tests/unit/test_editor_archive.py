@@ -54,7 +54,7 @@ def emit(event):
     sys.stdout.write(json.dumps(event) + "\n")
     sys.stdout.flush()
 
-paths = SessionPaths(final.parent, final.name)
+paths = SessionPaths(final.parent.parent, final.name, final.parent.name)
 emit({"event": "phase", "phase": "archiving"})
 state = archive_recording(
     paths,

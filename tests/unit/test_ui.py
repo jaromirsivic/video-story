@@ -10,7 +10,7 @@ from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
 from PySide6.QtCore import QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton  # noqa: E402
 
 from video_story.core.config import Config  # noqa: E402
 from video_story.core.session import SessionPaths, Status, read_state  # noqa: E402
@@ -545,41 +545,13 @@ def test_settings_live_transcription_is_off_and_disabled_with_whisper_cli(qtbot,
     assert dialog.values()["live_transcription"] == "light"  # the stored value is kept
 
 
-def test_settings_delete_all_asks_and_keeps_current_session(qtbot, tmp_path: Path, monkeypatch):
-    from video_story.core.session import SessionPaths, SessionState, Status, write_state
-    from video_story.ui import settings_dialog as sd
-
-    old = SessionPaths(tmp_path, "20261001-090000")
-    old.frames_dir(old.final_dir).mkdir(parents=True)
-    (old.frames_dir(old.final_dir) / "0_000_screen1.png").write_bytes(b"x")
-    current = SessionPaths(tmp_path, "20261107-120000")
-    current.create_work_dirs()
-    write_state(
-        current.state_path,
-        SessionState(session_id=current.session_id, status=Status.READY, recording_folder="x"),
-    )
-    dialog = SettingsDialog(
-        Config(recording_folder=tmp_path), current_session_id=current.session_id
-    )
+def test_settings_offers_no_delete_all(qtbot, tmp_path: Path):
+    """Recordings are deleted in the editor (videos, folders), never from Settings."""
+    dialog = SettingsDialog(Config(recording_folder=tmp_path))
     qtbot.addWidget(dialog)
-    questions: list[str] = []
-
-    def answer_no(*args, **kwargs):
-        questions.append(args[2])
-        return sd.QMessageBox.StandardButton.No
-
-    monkeypatch.setattr(sd.QMessageBox, "question", answer_no)
-    monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **k: None)
-    dialog.delete_all_button.click()
-    assert len(questions) == 1 and "1 recording(s)" in questions[0]
-    assert old.final_dir.exists()
-
-    monkeypatch.setattr(
-        sd.QMessageBox, "question", lambda *a, **k: sd.QMessageBox.StandardButton.Yes
-    )
-    dialog.delete_all_button.click()
-    assert not old.final_dir.exists()
-    assert current.state_path.exists()
+    assert not hasattr(dialog, "delete_all_button")
+    texts = [button.text() for button in dialog.findChildren(QPushButton)]
+    assert not any("Delete" in text for text in texts)
 
 
 def test_app_instance_available():

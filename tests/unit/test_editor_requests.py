@@ -133,7 +133,7 @@ def test_fit_button_stretches_the_waveform_to_the_loudest_sound(editor, qtbot):
 
 def test_screen_dot_tooltip_names_the_screen_and_its_size(editor):
     view = editor.list_view
-    index = view.model().index(0, 0)
+    index = view.model().index(1, 0)  # row 0 is the default folder's header
     line = QFontMetrics(view.font()).lineSpacing()
     first, second = view.delegate.dot_rects(view.visualRect(index), 2, line)
     assert view.dot_tooltip(first.center()) == "screen1 320x200"
@@ -154,27 +154,28 @@ def _select_rows(editor, rows: list[int]) -> None:
 def test_delete_one_recording_after_confirmation(editor, folder, qtbot):
     asked: list[int] = []
     editor._confirm_delete = lambda items: asked.append(len(items)) or True
-    item = editor.recordings.item(2)  # the oldest, not the one shown
+    item = editor.recordings.item(3)  # the oldest, not the one shown
     assert editor.delete_recordings([item]) == [OLDER]
     assert asked == [1]
-    assert not (folder / OLDER).exists()
+    assert not (folder / "default" / OLDER).exists()
     assert [i.session_id for i in editor.recordings.items] == [THIRD, NEWEST]
     assert editor.recording.session_id == THIRD
 
 
 def test_declined_confirmation_deletes_nothing(editor, folder):
     editor._confirm_delete = lambda items: False
-    assert editor.delete_recordings([editor.recordings.item(1)]) == []
-    assert (folder / NEWEST).exists() and len(editor.recordings.items) == 3
+    assert editor.delete_recordings([editor.recordings.item(2)]) == []
+    assert (folder / "default" / NEWEST).exists() and len(editor.recordings.items) == 3
 
 
 def test_delete_several_selected_including_the_shown_one(editor, folder, qtbot):
     editor._confirm_delete = lambda items: True
-    _select_rows(editor, [0, 1])
+    _select_rows(editor, [1, 2])
     items = editor.selected_items()
     assert [i.session_id for i in items] == [THIRD, NEWEST]
     assert sorted(editor.delete_recordings(items)) == sorted([THIRD, NEWEST])
-    assert not (folder / THIRD).exists() and not (folder / NEWEST).exists()
+    assert not (folder / "default" / THIRD).exists()
+    assert not (folder / "default" / NEWEST).exists()
     _wait_loaded(qtbot, editor, OLDER)  # the list refreshed and shows what is left
 
 
@@ -186,8 +187,8 @@ def test_recording_in_use_is_kept(editor, folder, monkeypatch):
     paths.work_dir.mkdir(parents=True)
     state = SessionState(session_id=OLDER, status=Status.EDITING, recording_folder=str(folder))
     write_state(paths.state_path, state)  # the pid is this (running) process
-    assert editor.delete_recordings([editor.recordings.item(2)]) == []
-    assert (folder / OLDER).exists()
+    assert editor.delete_recordings([editor.recordings.item(3)]) == []
+    assert (folder / "default" / OLDER).exists()
     assert len(reported) == 1 and retention.IN_USE_REASON in reported[0][0]
 
 
@@ -197,14 +198,14 @@ def test_open_folder_location_opens_the_recording_folder(editor, folder, monkeyp
         "video_story.editor.window.QDesktopServices.openUrl",
         lambda url: opened.append(url.toLocalFile()) or True,
     )
-    assert editor.open_folder_location(editor.recordings.item(1))
-    assert Path(opened[0]) == folder / NEWEST
+    assert editor.open_folder_location(editor.recordings.item(2))
+    assert Path(opened[0]) == folder / "default" / NEWEST
 
 
 def test_shift_click_selects_several_rows_and_shows_the_clicked_one(editor, qtbot):
     view = editor.list_view
-    first = view.visualRect(editor.recordings.index(0)).center()
-    last = view.visualRect(editor.recordings.index(2)).center()
+    first = view.visualRect(editor.recordings.index(1)).center()
+    last = view.visualRect(editor.recordings.index(3)).center()
     qtbot.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=first)
     qtbot.mouseClick(
         view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, last

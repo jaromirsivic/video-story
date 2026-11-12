@@ -66,24 +66,6 @@ def test_archive_boundary_uses_session_timestamp(tmp_path: Path):
     assert [p.session_id for p in due] == ["20261008-115959"]
 
 
-def test_summarize_and_delete_all_keep_current_session(tmp_path: Path):
-    a = _make_final(tmp_path, "20261001-090000", size=1000)
-    b = _make_final(tmp_path, "20261002-090000", size=24)
-    # The open window's session: a work folder with state.json and ui.log.
-    current = _make_work(tmp_path, "20261107-120000", Status.READY, pid=os.getpid())
-    (current.work_dir / "ui.log").write_text("log", encoding="utf-8")
-
-    summary = retention.summarize_recordings(tmp_path, exclude_session_id=current.session_id)
-    assert summary.count == 2 and summary.total_bytes == 1024 + 4  # two manifests "{}"
-    assert summary.total_text == "1.0 KB"
-
-    deleted = retention.delete_all_recordings(tmp_path, exclude_session_id=current.session_id)
-    assert sorted(deleted) == [a.session_id, b.session_id]
-    assert not a.final_dir.exists() and not b.final_dir.exists()
-    assert current.state_path.exists() and (current.work_dir / "ui.log").exists()
-    assert retention.summarize_recordings(tmp_path, current.session_id).count == 0
-
-
 def test_frame_ref_exposes_drawings(tmp_path: Path):
     image = tmp_path / "1_000_screen1.png"
     sidecar = tmp_path / "1_000_screen1.json"

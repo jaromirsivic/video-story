@@ -278,7 +278,7 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     make_recording(tmp_path, "20251231-000000", with_transcript=False)
     # Unprocessed (work only) and broken (no manifest) sessions are not listed.
     (tmp_path / ".work" / "20260103-000000").mkdir(parents=True)
-    (tmp_path / "20260104-000000").mkdir()
+    (tmp_path / "default" / "20260104-000000").mkdir()
 
     items = scan_recordings(tmp_path)
     assert [i.session_id for i in items] == [NEWEST, OLDER, "20251231-000000"]
@@ -296,14 +296,15 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     assert items[0].text_at(2000) == "second line"
 
     model = RecordingsModel(tmp_path)
-    assert model.rowCount() == 3
-    assert model.default_row() == 0
-    assert model.default_row(OLDER) == 1
-    assert model.default_row("20200101-000000") == 0
-    assert model.data(model.index(1), Qt.ItemDataRole.DisplayRole).startswith("01.01.2026")
-    (tmp_path / NEWEST / "manifest.json").unlink()
+    assert model.rowCount() == 4  # the header of the default folder, then the recordings
+    assert model.header(0).label == "default (3)" and model.item(0) is None
+    assert model.default_row() == 1
+    assert model.default_row(OLDER) == 2
+    assert model.default_row("20200101-000000") == 1
+    assert model.data(model.index(2), Qt.ItemDataRole.DisplayRole).startswith("01.01.2026")
+    (tmp_path / "default" / NEWEST / "manifest.json").unlink()
     model.refresh()
-    assert model.rowCount() == 2 and model.default_row() == 0
+    assert model.rowCount() == 3 and model.default_row() == 1
 
 
 def test_recording_length_shows_hours_only_when_nonzero(tmp_path: Path):
@@ -330,7 +331,9 @@ def test_size_format_and_folder_size(tmp_path: Path):
 
 def test_recordings_model_empty_folder(tmp_path: Path):
     model = RecordingsModel(tmp_path / "missing")
-    assert model.rowCount() == 0 and model.default_row() == -1
+    # Only the header of the default folder, which is created when it is missing.
+    assert model.rowCount() == 1 and model.default_row() == -1
+    assert (tmp_path / "missing" / "default").is_dir()
 
 
 # Editor window -----------------------------------------------------------------
@@ -456,7 +459,7 @@ def editor(qtbot, folder: Path):
 
 def test_window_loads_newest_recording_and_workers(editor, qtbot):
     assert editor.windowTitle() == "Video Story Editor"
-    assert editor.list_view.currentIndex().row() == 0
+    assert editor.list_view.currentIndex().row() == 1  # row 0: the default folder's header
     assert editor.model.duration_ms == DURATION_MS
     assert editor.model.screens == ["screen1", "screen2"]
     assert editor.model.selected_screen == "screen1"
@@ -480,8 +483,8 @@ def test_window_session_argument_selects_that_recording(qtbot, folder: Path):
     qtbot.addWidget(window)
     window.show()
     _wait_loaded(qtbot, window, OLDER)
-    assert window.list_view.currentIndex().row() == 1
-    window.list_view.setCurrentIndex(window.recordings.index(0))
+    assert window.list_view.currentIndex().row() == 2
+    window.list_view.setCurrentIndex(window.recordings.index(1))
     _wait_loaded(qtbot, window, NEWEST)
     window.refresh_recordings()
     assert window.recording.session_id == NEWEST

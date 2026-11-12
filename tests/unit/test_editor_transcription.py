@@ -170,7 +170,7 @@ def test_untranscribed_recording_is_transcribed_in_the_background(qtbot, tmp_pat
     assert "transcription" in window.process_button.toolTip().lower()
     assert "transcription" in window.render_button.toolTip().lower()
     assert window.timeline.transcription == ("transcribing", 0)
-    assert "transcribing" in window.recordings.item(0).details
+    assert "transcribing" in window.recordings.item(1).details
     assert "transcribing" in window.status_label.text()
     assert window.process() is None and window.render() is None  # direct calls refuse too
 
@@ -201,8 +201,8 @@ def test_untranscribed_recording_is_transcribed_in_the_background(qtbot, tmp_pat
     qtbot.waitUntil(lambda: window.process_button.isEnabled(), timeout=5000)
     assert window.render_button.isEnabled() and window.render_action.isEnabled()
     assert window.timeline.transcription is None
-    assert "transcribing" not in window.recordings.item(0).details
-    assert window.recordings.item(0).first_line == "ahoj světe"
+    assert "transcribing" not in window.recordings.item(1).details
+    assert window.recordings.item(1).first_line == "ahoj světe"
     assert "Transcription complete: 2 subtitles" in window.statusBar().currentMessage()
     qtbot.waitUntil(lambda: window.transcription.running is None, timeout=5000)
     assert _starts(tmp_path) == [(NEWEST, 0)]
@@ -278,7 +278,7 @@ def test_showing_another_recording_moves_the_transcription(qtbot, tmp_path: Path
     spec = _spec(tmp_path, [{"sleep": 60}, DONE])
     window = _open(qtbot, tmp_path, spec)
     assert window.transcription.running == NEWEST
-    window.list_view.setCurrentIndex(window.recordings.index(1))
+    window.list_view.setCurrentIndex(window.recordings.index(2))
     _wait_loaded(qtbot, window, OLDER)
     assert window.transcription.running == OLDER  # queued until the killed worker ends
     assert window.timeline.transcription == ("transcribing", 0)

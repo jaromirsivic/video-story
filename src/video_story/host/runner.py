@@ -25,6 +25,7 @@ from video_story.core.naming import FrameName, parse_frame_filename
 from video_story.core.session import (
     FRAMES_INFO_DIR_NAME,
     UI_LOG_FILE_NAME,
+    WORK_DIR_NAME,
     SessionPaths,
     SessionState,
     Status,
@@ -53,15 +54,16 @@ class SessionError(RuntimeError):
 
 
 def resolve_session(config: Config, session: str) -> SessionPaths:
-    """Accept a session id or a path to a recording / work directory."""
+    """Accept a session id or a path to a recording (``<root>/<folder>/<id>``) or work
+    (``<root>/.work/<id>``) directory."""
     if is_session_id(session):
         return SessionPaths(config.recording_folder, session)
     path = Path(session).expanduser()
     if path.is_dir() and is_session_id(path.name):
         parent = path.parent
-        if parent.name == ".work":
-            parent = parent.parent
-        return SessionPaths(parent, path.name)
+        if parent.name == WORK_DIR_NAME:
+            return SessionPaths(parent.parent, path.name)
+        return SessionPaths(parent.parent, path.name, folder=parent.name)
     raise SessionError("INVALID_SESSION", f"not a session id or recording directory: {session}")
 
 

@@ -571,8 +571,42 @@ def search_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+def new_folder_icon(size: int = 24, color: QColor | None = None) -> QIcon:
+    """A folder with a plus sign (Create new folder)."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = _transport_pen(ink, s)
+        pen.setWidthF(max(1.2, s * 0.075))
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        left, right = s * 0.10, s * 0.82
+        top, bottom = s * 0.22, s * 0.80
+        tab_end, body_top = s * 0.40, s * 0.32
+        outline = QPainterPath()
+        outline.moveTo(left, bottom)
+        outline.lineTo(left, top)
+        outline.lineTo(tab_end, top)
+        outline.lineTo(tab_end + s * 0.07, body_top)
+        outline.lineTo(right, body_top)
+        outline.lineTo(right, s * 0.50)
+        outline.moveTo(s * 0.56, bottom)
+        outline.lineTo(left, bottom)
+        p.drawPath(outline)
+        # the plus in the bottom right corner
+        cx, cy, arm = s * 0.76, s * 0.74, s * 0.16
+        plus = QPen(pen)
+        plus.setWidthF(pen.widthF() * 1.15)
+        p.setPen(plus)
+        p.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+        p.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
+
+    return QIcon(_pixmap(size, draw))
+
+
 __all__ = [
     "KEYPOINT_GREEN",
+    "new_folder_icon",
     "app_icon",
     "install_app_icon",
     "arrow_icon",

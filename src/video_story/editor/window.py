@@ -120,6 +120,17 @@ from video_story.core.archive_state import request_archive
 from video_story.core.audio_mix import COMPUTER, MICROPHONE, TRACK_LABELS, TRACK_NAMES
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.crop import Crop, read_crop, write_crop
+from video_story.core.folders import (
+    DEFAULT_FOLDER,
+    create_folder,
+    folder_names_on_disk,
+    move_folder,
+    move_recording,
+    pin,
+    remove_folder,
+    set_main,
+    unpin,
+)
 from video_story.core.instructions import read_instructions, write_instructions
 from video_story.core.session import SessionPaths
 from video_story.core.timeline import format_timestamp, parse_timestamp
@@ -140,15 +151,16 @@ from video_story.host.retention import (
     recording_in_use,
     recordings_due_for_archive,
 )
-from video_story.ui.icons import refresh_icon, search_icon
+from video_story.ui.icons import new_folder_icon, refresh_icon, search_icon
 
 from .archiving import PHASE_TRANSCRIBING, ArchiveManager
+from .folder_dialogs import CreateFolderDialog, MoveToFolderDialog
 from .instructions_dialog import InstructionsDialog
 from .mouse_details_dialog import LOADING, MouseDetailsDialog
 from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
-from .recordings_model import ItemRole, RecordingItem, RecordingsModel
+from .recordings_model import FolderHeader, FolderRole, ItemRole, RecordingItem, RecordingsModel
 from .recordings_view import BADGE_ARCHIVED, MIN_LIST_WIDTH, RecordingsListView, format_percent
 from .render_dialog import ExportFn, ask_output_path, default_output_path, run_render
 from .search import SearchJob, SearchSignals, normalize_query, text_matches
@@ -199,6 +211,17 @@ QPushButton:disabled { background-color: #9dbfe8; color: #f3f8ff; border-color: 
 """
 DELETE_ONE_LABEL = "Delete Video"
 ARCHIVE_ONE_LABEL = "Archive Video"
+MOVE_ONE_LABEL = "Move Video to Folder..."
+NEW_FOLDER_TOOLTIP = "Create new folder"
+SET_MAIN_LABEL = "Set as Main Folder"
+SET_MAIN_TOOLTIP = "New recordings are saved to the main folder"
+MOVE_UP_LABEL = "Move Up"
+MOVE_DOWN_LABEL = "Move Down"
+ARCHIVE_ALL_LABEL = "Archive All"
+DELETE_FOLDER_LABEL = "Delete Folder"
+DEFAULT_NOT_DELETABLE = "The default folder cannot be deleted"
+NO_OTHER_FOLDER = "Create a folder first"
+NOT_MOVABLE_NOTE = "Videos being archived cannot be moved"
 ARCHIVING_MESSAGE = "This video is being archived."
 ARCHIVED_NOTE = "Not available for an archived video"
 BEING_ARCHIVED_REASON = "it is being archived"
@@ -215,6 +238,16 @@ SEARCH_BUTTON_MIN = 26  # px: the search and refresh buttons are at least this t
 def delete_label(count: int) -> str:
     """``Delete Video`` for one recording, ``Delete Videos (8)`` for more."""
     return DELETE_ONE_LABEL if count == 1 else f"Delete Videos ({count})"
+
+
+def move_label(count: int) -> str:
+    """``Move Video to Folder...`` for one recording, ``Move Videos to Folder... (5)``."""
+    return MOVE_ONE_LABEL if count == 1 else f"Move Videos to Folder... ({count})"
+
+
+def delete_all_label(count: int) -> str:
+    """``Delete All Videos (12)`` - the folder menu."""
+    return f"Delete All Videos ({count})"
 
 
 def archive_label(count: int) -> str:
@@ -507,11 +540,28 @@ class EditorWindow(QMainWindow):
         title_font = QFont(title.font())
         title_font.setBold(True)
         title.setFont(title_font)
-        left_layout.addWidget(title)
+        # The title with Create new folder (a folder with a plus) on its right.
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.new_folder_button = QToolButton()
+        self.new_folder_button.setText("New Folder")
+        self.new_folder_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.new_folder_button.setToolTip(NEW_FOLDER_TOOLTIP)
+        self.new_folder_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.new_folder_button.setAutoRaise(True)
+        self.new_folder_button.setFixedSize(30, 26)
+        self.new_folder_button.setIconSize(QSize(SEARCH_ICON_SIZE + 2, SEARCH_ICON_SIZE + 2))
+        self.new_folder_button.clicked.connect(self.create_folder)
+        title_row.addWidget(self.new_folder_button)
+        left_layout.addLayout(title_row)
         self.list_view = RecordingsListView()
         self.list_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_view.customContextMenuRequested.connect(self._show_list_menu)
+        self.list_view.pin_clicked.connect(self.toggle_pin)
+        self.list_view.folder_menu_requested.connect(self._show_folder_menu)
         left_layout.addWidget(self.list_view, 1)
         # Under the list: the search box, the magnifier (search) and Refresh (icon only).
         search_row = QHBoxLayout()
@@ -695,6 +745,7 @@ class EditorWindow(QMainWindow):
         """(Re)draw the list's icons in the button text colour of the theme."""
         self.search_button.setIcon(search_icon(SEARCH_ICON_SIZE * 2))
         self.refresh_button.setIcon(refresh_icon(SEARCH_ICON_SIZE * 2))
+        self.new_folder_button.setIcon(new_folder_icon(SEARCH_ICON_SIZE * 2))
 
     def _build_actions(self) -> None:
         def action(text: str, keys: list[str] | str, slot) -> QAction:
@@ -798,6 +849,10 @@ class EditorWindow(QMainWindow):
     def _on_search_match(self, generation: int, session_id: str) -> None:
         if generation == self._search_generation:
             self.list_view.add_search_match(session_id)
+            row = self.recordings.row_of(session_id)
+            folder = self.recordings.folder_of_row(row) if row >= 0 else None
+            if folder is not None:
+                self.recordings.set_collapsed(folder, False)  # show where it was found
 
     def _on_search_finished(self, generation: int, _searched: int) -> None:
         if generation != self._search_generation:
@@ -837,10 +892,19 @@ class EditorWindow(QMainWindow):
             self.list_view.setCurrentIndex(index)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
-        """The current row (the one clicked last, also with Shift or Ctrl) is shown."""
+        """The current row (the one clicked last, also with Shift or Ctrl) is shown; a
+        closed folder opens to show it."""
         item = current.data(ItemRole) if current.isValid() else None
         if isinstance(item, RecordingItem):
+            self._reveal_row(current.row())
             self._load_recording(item)
+
+    def _reveal_row(self, row: int) -> None:
+        """Open the folder of ``row`` when it is closed (stored) and scroll to it."""
+        folder = self.recordings.folder_of_row(row)
+        if folder is not None and self.recordings.is_collapsed(folder):
+            self.recordings.set_collapsed(folder, False)
+        self.list_view.scrollTo(self.recordings.index(row))
 
     def selected_items(self) -> list[RecordingItem]:
         """The recordings selected in the list, in list order."""
@@ -864,8 +928,13 @@ class EditorWindow(QMainWindow):
         ]
 
     def _show_list_menu(self, pos: QPoint) -> None:
-        """Right click on the list: Open Folder Location, Archive Video(s), Delete."""
+        """Right click on the list: Open Folder Location, Move Video(s) to Folder...,
+        Archive Video(s), Delete; on a folder header the folder's menu."""
         index = self.list_view.indexAt(pos)
+        header = index.data(FolderRole) if index.isValid() else None
+        if isinstance(header, FolderHeader):
+            self._show_folder_menu(header.name, self.list_view.viewport().mapToGlobal(pos))
+            return
         clicked = index.data(ItemRole) if index.isValid() else None
         if not isinstance(clicked, RecordingItem):
             return
@@ -876,6 +945,15 @@ class EditorWindow(QMainWindow):
         menu = QMenu(self)
         open_action = menu.addAction("Open Folder Location")
         open_action.triggered.connect(lambda: self.open_folder_location(clicked))
+        move_action = menu.addAction(move_label(len(selected)))
+        targets = self._move_targets(selected)
+        movable = self.movable(selected)
+        move_action.setEnabled(bool(targets) and bool(movable))
+        if not targets:
+            move_action.setToolTip(NO_OTHER_FOLDER)
+        elif not movable:
+            move_action.setToolTip(NOT_MOVABLE_NOTE)
+        move_action.triggered.connect(lambda: self.move_recordings_dialog(selected))
         archivable = self.archivable(selected)
         archive_action = menu.addAction(archive_label(max(1, len(archivable))))
         archive_action.setEnabled(bool(archivable))
@@ -1038,14 +1116,11 @@ class EditorWindow(QMainWindow):
         """Ask before recordings are deleted for good (tests override this)."""
         if len(items) == 1:
             text = (
-                "Permanently delete the folder of this recording?\n\n"
+                "Permanently delete this recording?\n\n"
                 f"{items[0].paths.final_dir}\n\nThis cannot be undone."
             )
         else:
-            text = (
-                f"Permanently delete the folders of these {len(items)} recordings?"
-                "\n\nThis cannot be undone."
-            )
+            text = f"Permanently delete these {len(items)} recordings?\n\nThis cannot be undone."
         answer = QMessageBox.question(
             self,
             delete_label(len(items)),
@@ -1058,13 +1133,14 @@ class EditorWindow(QMainWindow):
     def _report_delete_failures(self, failures: list[str]) -> None:
         QMessageBox.warning(self, "Not deleted", "\n".join(failures))
 
-    def delete_recordings(self, items: list[RecordingItem]) -> list[str]:
-        """Delete the folders of ``items`` after a confirmation, then refresh the list.
+    def delete_recordings(self, items: list[RecordingItem], confirm: bool = True) -> list[str]:
+        """Delete ``items`` after a confirmation (``confirm`` False: the caller asked
+        already), then refresh the list.
 
         Returns the deleted session ids. A recording still in use by a running Video
         Story window (one an agent waits on) is kept and reported.
         """
-        if not items or not self._confirm_delete(items):
+        if not items or (confirm and not self._confirm_delete(items)):
             return []
         failures = [
             f"{item.title} ({item.session_id}): {IN_USE_REASON}"
@@ -1102,6 +1178,272 @@ class EditorWindow(QMainWindow):
         if failures:
             self._report_delete_failures(failures)
         return deleted
+
+    # Folders ----------------------------------------------------------------
+
+    def _confirm(self, title: str, text: str) -> bool:
+        """A Yes/No question, No by default (tests override this)."""
+        answer = QMessageBox.question(
+            self,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _report_failure(self, title: str, text: str) -> None:
+        """A warning box (tests override this)."""
+        QMessageBox.warning(self, title, text)
+
+    def _ask_new_folder(self, existing: list[str], movable: int) -> tuple[str, bool] | None:
+        """Create new folder: ``(name, move the selected videos)`` or ``None`` (Cancel)."""
+        dialog = CreateFolderDialog(existing, movable, self)
+        try:
+            if dialog.exec() != CreateFolderDialog.DialogCode.Accepted:
+                return None
+            return dialog.name, dialog.move_selected
+        finally:
+            dialog.deleteLater()
+
+    def _ask_target_folder(self, folders: list[str], count: int) -> str | None:
+        """Move Video(s) to Folder: the chosen folder or ``None`` (Cancel)."""
+        dialog = MoveToFolderDialog(folders, count, self)
+        try:
+            if dialog.exec() != MoveToFolderDialog.DialogCode.Accepted:
+                return None
+            return dialog.folder
+        finally:
+            dialog.deleteLater()
+
+    def _keep_list_state(self, rebuild) -> None:
+        """Run ``rebuild`` (it resets the list) and select the same recordings again."""
+        current = self.recording.session_id if self.recording else self._current_item_id()
+        selected = [item.session_id for item in self.selected_items()]
+        rebuild()
+        self._restore_selection(current, selected)
+
+    def _restore_selection(self, current: str | None, selected: list[str]) -> None:
+        row = self.recordings.row_of(current) if current else -1
+        if row < 0:
+            self._select_row(self.recordings.default_row())
+            return
+        index = self.recordings.index(row)
+        if self.list_view.currentIndex() == index:
+            self._load_recording(self.recordings.item(row))
+        else:
+            self.list_view.setCurrentIndex(index)
+        model = self.list_view.selectionModel()
+        for session_id in selected:
+            other = self.recordings.row_of(session_id)
+            if other >= 0 and other != row:
+                model.select(self.recordings.index(other), model.SelectionFlag.Select)
+
+    def _change_folders(self, change, *args) -> bool:
+        """Apply a change of ``folders.json`` and rebuild the list (no rescan)."""
+        try:
+            change(self.config.recording_folder, *args)
+        except (OSError, ValueError) as exc:
+            self._report_failure("Folders", str(exc))
+            return False
+        self._keep_list_state(self.recordings.reload_folders)
+        return True
+
+    def set_main_folder(self, folder: str) -> bool:
+        """New recordings are saved to ``folder`` from now on (its name turns bold)."""
+        if not self._change_folders(set_main, folder):
+            return False
+        self._show_status_message(f"New recordings are saved to “{folder}”")
+        return True
+
+    def move_folder_up(self, folder: str) -> bool:
+        return self._change_folders(move_folder, folder, -1)
+
+    def move_folder_down(self, folder: str) -> bool:
+        return self._change_folders(move_folder, folder, 1)
+
+    def toggle_pin(self, folder: str) -> bool:
+        """The pin of a folder header: pin it to the top (the folder pinned before moves
+        to second) or unpin it (the order stays); both ask first."""
+        header = self.recordings.header_of(folder)
+        if header is None:
+            return False
+        if header.pinned:
+            if not self._confirm(
+                "Unpin Folder",
+                f"Unpin the folder “{folder}”?\n\nNo folder will stay pinned to the top.",
+            ):
+                return False
+            return self._change_folders(unpin)
+        if not self._confirm(
+            "Pin Folder", f"Pin the folder “{folder}” to the top, above all other folders?"
+        ):
+            return False
+        if not self._change_folders(pin, folder):
+            return False
+        self.list_view.scrollToTop()
+        return True
+
+    def folder_menu(self, folder: str) -> QMenu:
+        """The menu of a folder (``⋯`` on its header, or a right click on it)."""
+        state = self.recordings.folder_state
+        items = self.recordings.items_of(folder)
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        main_action = menu.addAction(SET_MAIN_LABEL)
+        main_action.setToolTip(SET_MAIN_TOOLTIP)
+        main_action.setEnabled(state.main != folder)
+        main_action.triggered.connect(lambda: self.set_main_folder(folder))
+        menu.addSeparator()
+        up_action = menu.addAction(MOVE_UP_LABEL)
+        up_action.setEnabled(state.can_move_up(folder))
+        up_action.triggered.connect(lambda: self.move_folder_up(folder))
+        down_action = menu.addAction(MOVE_DOWN_LABEL)
+        down_action.setEnabled(state.can_move_down(folder))
+        down_action.triggered.connect(lambda: self.move_folder_down(folder))
+        menu.addSeparator()
+        archivable = self.archivable(items)
+        archive_action = menu.addAction(ARCHIVE_ALL_LABEL)
+        archive_action.setEnabled(bool(archivable))
+        if items and not archivable:
+            archive_action.setToolTip(self._not_archivable_reason(items))
+        archive_action.triggered.connect(lambda: self.archive_recordings(archivable))
+        menu.addSeparator()
+        delete_videos = menu.addAction(delete_all_label(len(items)))
+        delete_videos.setEnabled(bool(items))
+        delete_videos.triggered.connect(lambda: self.delete_recordings(items))
+        delete_folder = menu.addAction(DELETE_FOLDER_LABEL)
+        delete_folder.setEnabled(folder != DEFAULT_FOLDER)
+        if folder == DEFAULT_FOLDER:
+            delete_folder.setToolTip(DEFAULT_NOT_DELETABLE)
+        delete_folder.triggered.connect(lambda: self.delete_folder(folder))
+        return menu
+
+    def _show_folder_menu(self, folder: str, global_pos: QPoint) -> None:
+        menu = self.folder_menu(folder)
+        menu.exec(global_pos)
+        menu.deleteLater()
+
+    def create_folder(self) -> str | None:
+        """Create new folder (the button right of "Recordings"): ask for the name, create
+        the folder at the end and move the selected videos into it when asked to."""
+        root = self.config.recording_folder
+        movable = self.movable(self.selected_items())
+        existing = sorted(set(folder_names_on_disk(root)) | set(self.recordings.folders))
+        answer = self._ask_new_folder(existing, len(movable))
+        if answer is None:
+            return None
+        name, move = answer
+        try:
+            create_folder(root, name)
+        except (OSError, ValueError) as exc:
+            self._report_failure("Folder not created", f"{name}\n\n{exc}")
+            return None
+        if move and movable:
+            self.move_recordings(movable, name)
+        else:
+            self._keep_list_state(self.recordings.reload_folders)
+        row = self.recordings.header_row(name)
+        if row >= 0:
+            self.list_view.scrollTo(self.recordings.index(row))
+        self._show_status_message(f"Created folder “{name}”")
+        return name
+
+    def movable(self, items: list[RecordingItem]) -> list[RecordingItem]:
+        """The recordings among ``items`` that can move to another folder: not queued
+        for archiving or being archived (the archive worker writes and deletes there)."""
+        return [
+            item
+            for item in items
+            if not item.archiving
+            and not self.archiver.is_queued(item.session_id)
+            and self.archiver.running != item.session_id
+        ]
+
+    def _move_targets(self, items: list[RecordingItem]) -> list[str]:
+        """The folders ``items`` can move to (every folder but theirs), in list order."""
+        own = {item.folder for item in items}
+        return [name for name in self.recordings.folders if name not in own]
+
+    def move_recordings_dialog(self, items: list[RecordingItem]) -> list[str]:
+        """Move Video(s) to Folder...: choose the folder, then move."""
+        items = self.movable(items)
+        targets = self._move_targets(items)
+        if not items or not targets:
+            return []
+        target = self._ask_target_folder(targets, len(items))
+        if target is None:
+            return []
+        return self.move_recordings(items, target)
+
+    def move_recordings(self, items: list[RecordingItem], target: str) -> list[str]:
+        """Move ``items`` into the folder ``target``; returns the moved session ids.
+
+        The shown recording is released first (audio, frames, its transcription worker)
+        and opened again from its new place, where its transcription goes on. A
+        recording an agent waits on may move too: Process reports its new place.
+        """
+        items = [item for item in self.movable(items) if item.folder != target]
+        if not items:
+            return []
+        ids = {item.session_id for item in items}
+        current = self.recording.session_id if self.recording else self._current_item_id()
+        selected = [item.session_id for item in self.selected_items()]
+        if self.recording is not None and self.recording.session_id in ids:
+            self._load_generation += 1  # a load in flight is dropped
+            self._set_recording(None)  # releases the audio and the frames
+        if self.transcription.running in ids:
+            self.transcription.shutdown()
+        collect_garbage()  # file handles of the unloaded recording are closed here
+        moved: list[str] = []
+        failures: list[str] = []
+        for item in items:
+            try:
+                move_recording(item.paths, target)
+            except OSError as exc:
+                failures.append(f"{item.title} ({item.session_id}): {exc}")
+            else:
+                moved.append(item.session_id)
+        self.recordings.refresh()
+        self._restore_selection(current, selected)
+        self._show_status_message(
+            f"Moved {len(moved)} video{'s' if len(moved) != 1 else ''} to “{target}”"
+        )
+        if failures:
+            self._report_failure("Not moved", "\n".join(failures))
+        return moved
+
+    def delete_folder(self, folder: str) -> bool:
+        """Delete Folder: after one confirmation, delete every video of ``folder`` and
+        then the folder. A video that cannot be deleted keeps the folder. The default
+        folder cannot be deleted; deleting the main folder makes ``default`` the main
+        folder, deleting the pinned one leaves no folder pinned."""
+        if folder == DEFAULT_FOLDER:
+            return False
+        items = self.recordings.items_of(folder)
+        count = len(items)
+        videos = "1 video" if count == 1 else f"{count} videos"
+        if not self._confirm(
+            DELETE_FOLDER_LABEL,
+            f"Delete the folder “{folder}” and all {videos} in it?\n\nThis cannot be undone.",
+        ):
+            return False
+        if items and len(self.delete_recordings(items, confirm=False)) < count:
+            self._show_status_message(f"The folder “{folder}” was kept: not all videos went")
+            return False
+        try:
+            remove_folder(self.config.recording_folder, folder)
+        except (OSError, ValueError) as exc:
+            self._report_failure(
+                "Folder not deleted",
+                f"{self.config.recording_folder / folder}\n\n{exc}\n\n"
+                "It may still contain other files.",
+            )
+            self.refresh_recordings()
+            return False
+        self.refresh_recordings()
+        self._show_status_message(f"Deleted folder “{folder}”")
+        return True
 
     def _load_recording(self, item: RecordingItem) -> None:
         if (

@@ -241,6 +241,8 @@ def cmd_sessions(args: argparse.Namespace) -> dict[str, Any]:
             status = session_status(paths)
         except Exception as exc:
             status = {"session_id": paths.session_id, "status": "unknown", "message": str(exc)}
+        if paths.folder is not None:
+            status["folder"] = paths.folder  # the folder of a saved recording
         items.append(status)
     return {"recording_folder": str(cfg.recording_folder), "sessions": items}
 

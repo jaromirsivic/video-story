@@ -228,7 +228,7 @@ def test_instructions_button_dialog_file_and_process_event(
     assert editor.instructions == "Create an implementation plan."
     assert editor.instructions_button.text() == INSTRUCTIONS_SET_LABEL
     assert "Create an implementation plan." in editor.instructions_button.toolTip()
-    path = SessionPaths(folder, NEWEST).instructions_path(folder / NEWEST)
+    path = SessionPaths(folder, NEWEST).instructions_path(folder / "default" / NEWEST)
     assert read_instructions(path) == "Create an implementation plan."
 
     # Process hands them to the agent: editor event and the recording session.
@@ -259,15 +259,15 @@ def test_instructions_button_dialog_file_and_process_event(
 
 def test_instructions_reload_with_the_recording_and_clear(editor, qtbot, folder: Path):
     assert editor.set_instructions("Only the second half matters")
-    editor.list_view.setCurrentIndex(editor.recordings.index(1))
+    editor.list_view.setCurrentIndex(editor.recordings.index(2))
     _wait_loaded(qtbot, editor, OLDER)
     assert editor.instructions == "" and editor.instructions_button.text() == INSTRUCTIONS_LABEL
-    editor.list_view.setCurrentIndex(editor.recordings.index(0))
+    editor.list_view.setCurrentIndex(editor.recordings.index(1))
     _wait_loaded(qtbot, editor, NEWEST)
     assert editor.instructions == "Only the second half matters"
     assert editor.set_instructions("")
     assert editor.instructions == ""
-    assert not SessionPaths(folder, NEWEST).instructions_path(folder / NEWEST).exists()
+    assert not SessionPaths(folder, NEWEST).instructions_path(folder / "default" / NEWEST).exists()
 
 
 def test_instructions_dialog_contents(qtbot):

@@ -37,7 +37,7 @@ def folder(tmp_path: Path) -> Path:
 
 
 def _crop_file(folder: Path, session_id: str = NEWEST) -> Path:
-    return SessionPaths(folder, session_id).crop_path(folder / session_id)
+    return SessionPaths(folder, session_id).crop_path(folder / "default" / session_id)
 
 
 def _read_crop_json(folder: Path, session_id: str = NEWEST) -> dict:
@@ -286,14 +286,14 @@ def test_crop_restored_on_reload_and_clamped(qtbot, folder: Path):
     assert "length 00:00:01.50" in window.crop_label.text()
     stamp = _read_crop_json(folder)["updated_at"]
     # Switching recordings restores the other crop (clamped) without writing anything.
-    window.list_view.setCurrentIndex(window.recordings.index(1))
+    window.list_view.setCurrentIndex(window.recordings.index(2))
     _wait_loaded(qtbot, window, OLDER)
     assert (window.model.in_ms, window.model.out_ms) == (0, DURATION_MS)
     assert _read_crop_json(folder)["updated_at"] == stamp
     window.model.set_playhead(900)
     qtbot.keyClick(window.timeline, Qt.Key_I)
     assert _read_crop_json(folder, OLDER)["start_ms"] == 900
-    window.list_view.setCurrentIndex(window.recordings.index(0))
+    window.list_view.setCurrentIndex(window.recordings.index(1))
     _wait_loaded(qtbot, window, NEWEST)
     assert (window.model.in_ms, window.model.out_ms) == (600, 2100)
     window.close()
@@ -343,7 +343,7 @@ def test_process_on_another_recording_still_finishes_the_recording_session(qtbot
     editor_session = es.new_editor_session(cfg)
     paths = _editing_session(folder, NEWEST)
     window = _open(qtbot, folder, editor_session=editor_session, recording_session=NEWEST)
-    window.list_view.setCurrentIndex(window.recordings.index(1))
+    window.list_view.setCurrentIndex(window.recordings.index(2))
     _wait_loaded(qtbot, window, OLDER)
     window.model.set_in(1000)
     window._crop_updated()
@@ -409,7 +409,7 @@ def test_attach_request_selects_recording_adopts_sessions_and_raises(
     handled = window.check_attach_requests()
     assert [(r.editor_session, r.session_id) for r in handled] == [(second, third)]
     _wait_loaded(qtbot, window, third)
-    assert window.list_view.currentIndex().row() == 0
+    assert window.list_view.currentIndex().row() == 1
     assert window.editor_session == second and not window.editor_event_sent
     assert window.recording_session == third
     assert read_state(paths.state_path).pid == os.getpid()

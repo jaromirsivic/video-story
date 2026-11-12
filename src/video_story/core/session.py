@@ -3,11 +3,17 @@
 Layout inside the Recording Folder::
 
     <recording_folder>/
+      folders.json             # order, main, pinned and collapsed folders (core.folders)
       .work/<session_id>/      # while recording / processing
         state.json, lock, ui.log, recording.log, audio/, frames/, frames_info/
-      <session_id>/            # once the recording was saved (Stop, auto stop, recovery)
+      <folder>/<session_id>/   # once the recording was saved (Stop, auto stop, recovery)
         manifest.json, transcript.txt, transcript.json, recording.log, crop.json,
         instructions.txt, audio/, frames/, frames_info/, input/, archive/
+
+``<folder>`` is ``default`` (always there) or a folder the user created in the editor
+(:mod:`video_story.core.folders`). A recording is saved into the *main* folder; the user
+can move it to another folder later, so the final directory of a session is looked up
+by its id (:attr:`SessionPaths.final_dir`).
 
 ``audio/`` holds the microphone (``audio.wav``), the sound this computer played
 (``computer.wav``, Windows only, when it could be recorded) and ``tracks.json``, the
@@ -109,7 +115,11 @@ def new_session_id(root: Path | None = None, when: datetime | None = None) -> st
         return stamp
     candidate = stamp
     counter = 2
-    while (root / candidate).exists() or (root / WORK_DIR_NAME / candidate).exists():
+    while (
+        (root / candidate).exists()
+        or (root / WORK_DIR_NAME / candidate).exists()
+        or locate_final_dir(root, candidate) is not None
+    ):
         candidate = f"{stamp}-{counter}"
         counter += 1
     return candidate
@@ -119,25 +129,65 @@ def is_session_id(value: str) -> bool:
     return bool(_SESSION_ID_RE.match(value))
 
 
+def _is_folder_name(name: str) -> bool:
+    return not name.startswith(".") and not is_session_id(name)
+
+
+def locate_final_dir(recording_folder: Path, session_id: str) -> Path | None:
+    """``<recording_folder>/<folder>/<session_id>`` when it exists in some folder."""
+    try:
+        with os.scandir(recording_folder) as entries:
+            folders = [Path(e.path) for e in entries if _is_folder_name(e.name) and e.is_dir()]
+    except OSError:
+        return None
+    for folder in folders:
+        candidate = folder / session_id
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class SessionPaths:
-    """All paths of one session, derived from the recording folder and id."""
+    """All paths of one session, derived from the recording folder and id.
+
+    ``folder`` is the folder the saved recording lies in, when the caller knows it
+    (:func:`list_sessions`); otherwise :attr:`final_dir` looks it up. It does not take
+    part in comparisons: two paths of the same session are equal.
+    """
 
     recording_folder: Path
     session_id: str
+    folder: str | None = field(default=None, compare=False)
 
     @property
     def work_dir(self) -> Path:
         return self.recording_folder / WORK_DIR_NAME / self.session_id
 
+    def _existing_final_dir(self) -> Path | None:
+        if self.folder is not None:
+            known = self.recording_folder / self.folder / self.session_id
+            if known.is_dir():
+                return known
+        return locate_final_dir(self.recording_folder, self.session_id)
+
     @property
     def final_dir(self) -> Path:
-        return self.recording_folder / self.session_id
+        """Where the saved recording is: in its folder, or - not saved yet - where it
+        goes: the main folder (``default`` when the main folder is gone)."""
+        if self.folder is not None:
+            return self.recording_folder / self.folder / self.session_id
+        found = locate_final_dir(self.recording_folder, self.session_id)
+        if found is not None:
+            return found
+        from video_story.core.folders import main_folder  # folders imports this module
+
+        return self.recording_folder / main_folder(self.recording_folder) / self.session_id
 
     @property
     def current_dir(self) -> Path:
         """Final directory if the session was processed, otherwise the work directory."""
-        return self.final_dir if self.final_dir.exists() else self.work_dir
+        return self._existing_final_dir() or self.work_dir
 
     # Files inside the current directory ------------------------------------
 
@@ -221,17 +271,20 @@ class SessionPaths:
         stopped half way (a file was locked), and ``resume`` continues such a move
         instead of refusing the existing directory.
         """
-        if self.final_dir.exists():
-            if not resume or self.manifest_path(self.final_dir).exists():
-                raise FileExistsError(f"final directory already exists: {self.final_dir}")
-        self.final_dir.mkdir(parents=True, exist_ok=True)
+        # The target is chosen once: the main folder could change (or vanish) in the
+        # editor while the entries move, which must not split the recording.
+        final = self.final_dir
+        if final.exists():
+            if not resume or self.manifest_path(final).exists():
+                raise FileExistsError(f"final directory already exists: {final}")
+        final.mkdir(parents=True, exist_ok=True)
         entries = [e for e in self.work_dir.iterdir() if e.name not in WORK_ONLY_FILES]
         entries.sort(key=lambda e: (e.name == MANIFEST_FILE_NAME, e.name))
         for entry in entries:
             if entry.name.endswith(".tmp"):
                 continue  # leftover of an interrupted atomic write
-            _replace_with_retry(entry, self.final_dir / entry.name)
-        return self.final_dir
+            _replace_with_retry(entry, final / entry.name)
+        return final
 
     def discard(self, keep_state: bool = True) -> None:
         """Delete every file of this recording.
@@ -328,14 +381,26 @@ def find_session_paths(recording_folder: Path, session_id: str) -> SessionPaths:
 
 
 def list_sessions(recording_folder: Path) -> list[SessionPaths]:
-    """All sessions (work or final) under the recording folder, newest first."""
+    """All sessions (work or final, in every folder) under the recording folder, newest
+    first. A saved recording carries its ``folder``. Session directories lying directly
+    in the recording folder (the flat layout before folders) are not listed."""
     found: dict[str, SessionPaths] = {}
-    for base in (recording_folder / WORK_DIR_NAME, recording_folder):
-        if not base.exists():
-            continue
-        for entry in base.iterdir():
+    work = recording_folder / WORK_DIR_NAME
+    if work.is_dir():
+        for entry in work.iterdir():
             if entry.is_dir() and is_session_id(entry.name):
                 found[entry.name] = SessionPaths(recording_folder, entry.name)
+    if recording_folder.is_dir():
+        for folder in recording_folder.iterdir():
+            if not _is_folder_name(folder.name) or not folder.is_dir():
+                continue
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.is_dir() and is_session_id(entry.name):
+                    found[entry.name] = SessionPaths(recording_folder, entry.name, folder.name)
     return [found[k] for k in sorted(found, reverse=True)]
 
 
@@ -367,6 +432,7 @@ __all__ = [
     "find_session_paths",
     "is_session_id",
     "list_sessions",
+    "locate_final_dir",
     "new_session_id",
     "now_iso",
     "now_utc_iso",
