@@ -17,8 +17,10 @@ transcription (whisper.cpp through `pywhispercpp`, CPU only).
 
 What has been verified: recording on Windows 11 and on Fedora (X11); macOS on the GitHub
 Actions runner only (not on a physical Mac, Retina untested); the editor window on
-Windows only. Hosts: Claude Code on Windows end to end; Codex, Claude Desktop and ChatGPT
-are documented below but not yet exercised.
+Windows only. Hosts: Claude Code on Windows end to end (skills linked into
+`~/.claude/skills`). Codex and Cursor are described below from their documentation and
+have not been exercised yet ([tests/manual/hosts.md](../tests/manual/hosts.md) is the
+checklist for that); Claude Desktop and ChatGPT are documented but not exercised either.
 
 ## 1. Get the code and the model
 
@@ -109,58 +111,158 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `whisper_threads` | min(32, CPUs) | CPU threads for transcription (large-v3-turbo transcribes roughly 2-3x faster than real time on a desktop CPU) |
 | `ffmpeg_path` | `null` | explicit FFmpeg binary; `null` means PATH, then `bin/ffmpeg/` in the state folder, then in the code folder |
 
-## 3. Register the skill with your agent
+## 3. Register the skills with your agent
 
-The skill is the directory `skills/video-story` (a `SKILL.md`, `agents/openai.yaml`
-and the launcher scripts). Registering it means making that directory visible to the
-host. `scripts/install-hosts.ps1` (Windows) and `scripts/install-hosts.sh` (Linux)
-create the links described below.
+There are two skills, always registered together: `video-story` (recording) and
+`video-story-edit` (the editor and MP4 export). Each is a directory under `skills/`
+with a `SKILL.md`, `agents/openai.yaml` (Codex metadata) and the launcher scripts.
+A host can get them in one of three ways:
 
-There are two skills: `video-story` (recording) and `video-story-edit` (the editor and
-MP4 export). Register both the same way; the install scripts do.
+1. **Skill links** (recommended for a checkout): link the two directories into the
+   folder the host reads user skills from. The code stays where it is, a `git pull`
+   updates every host at once. `scripts/install-hosts.ps1` (Windows, junctions) and
+   `scripts/install-hosts.sh` (Linux, macOS, symbolic links) do it.
+2. **Plugin**: the host copies the repository into its plugin cache.
+3. **MCP server**: the alternative when a host cannot keep the window open when it is
+   started by a command.
 
-### Claude Code
+Use one way per host: a skill registered both as a link and as a plugin is listed
+twice.
 
-Personal skills live in `~/.claude/skills/<name>/`. Link the skill directories there:
+Status: Claude Code on Windows is verified end to end with skill links. Codex and Cursor
+are written from their documentation (linked below) and not yet exercised; run
+[tests/manual/hosts.md](../tests/manual/hosts.md) to check them.
+
+### What the window needs from the host
+
+The launcher (`run --detach`, `edit --detach`) starts the window as its own GUI process
+that must keep running after the command has returned. Video Story writes outside the
+agent's workspace (the recording folder, the state folder `~/.video-story`, the
+virtual environment next to the code), and the first run needs the network because uv
+creates the environment. Both skills tell the agent to run the launcher outside the
+host's sandbox and to ask you for that permission instead of retrying inside it:
+
+- **Codex** runs commands in a sandbox by default (`workspace-write`: writes only in the
+  workspace, no network) and asks for approval to go beyond it
+  ([Sandbox](https://developers.openai.com/codex/sandboxing),
+  [Agent approvals & security](https://developers.openai.com/codex/agent-approvals-security)).
+  On Windows its MXC sandbox stops "remaining child processes ... when the foreground
+  command exits" and the legacy sandboxes "use a private desktop"
+  ([Windows](https://learn.chatgpt.com/docs/windows/windows-sandbox)), so the window can
+  only live when the command runs outside the sandbox: approve that request.
+- **Cursor** sandboxes terminal commands on macOS and Linux and "will indicate when a
+  command runs outside the sandbox and ask for your approval"
+  ([Run Modes](https://cursor.com/docs/agent/security/run-modes)); the page describes
+  no sandbox for Windows.
+- **Claude Code** runs the command directly unless you enabled its sandbox.
+
+If the window still does not appear or closes with the command, use the MCP server
+(below) for that host.
+
+### Skill links
+
+| Host | Switch | Folder | Source |
+| --- | --- | --- | --- |
+| Claude Code | `-Claude` / `--claude` | `~/.claude/skills/` | [Claude Code skills](https://code.claude.com/docs/en/skills) ("Personal") |
+| Codex (CLI, IDE extension, ChatGPT desktop app) | `-Codex` / `--codex` | `~/.agents/skills/` | [Build skills](https://learn.chatgpt.com/docs/build-skills) ("USER `$HOME/.agents/skills`") |
+| Cursor (editor and `cursor-agent`) | `-Cursor` / `--cursor` | `~/.cursor/skills/`, only when needed | [Agent Skills](https://cursor.com/docs/skills) ("Skill directories") |
 
 ```powershell
-# Windows (junction, no administrator rights needed); run it in the repository folder
-$repo = (Get-Location).Path
-cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story" "$repo\skills\video-story"
-cmd /c mklink /J "$env:USERPROFILE\.claude\skills\video-story-edit" "$repo\skills\video-story-edit"
+# Windows, in the repository folder; no administrator rights needed
+& .\scripts\install-hosts.ps1 -Claude -Codex -Cursor   # any combination of the hosts
+& .\scripts\install-hosts.ps1 -Cursor -Remove          # removes only that host's links
 ```
 
 ```bash
-# Linux
-ln -s ~/video-story/skills/video-story ~/.claude/skills/video-story
-ln -s ~/video-story/skills/video-story-edit ~/.claude/skills/video-story-edit
+scripts/install-hosts.sh --claude --codex --cursor
+scripts/install-hosts.sh --cursor --remove
 ```
 
-Start a new Claude Code session and say "Start Video Story" or "Edit Video Story". The repository is also a
-Claude Code plugin (`.claude-plugin/plugin.json`) and a one-plugin marketplace
-(`.claude-plugin/marketplace.json`); installing it that way copies the repository into
-the plugin cache. Settings, the model and FFmpeg then live in `~/.video-story` and
-survive an update; the virtual environment is created again next to the new copy.
+The scripts print every link they create, keep or remove, and running them again
+changes nothing that is already right. They never delete a real folder, only links.
 
-### Codex (CLI and app)
+- **Codex** documents only `~/.agents/skills` for user skills; `~/.codex/skills`, where
+  older versions read them, is no longer mentioned. "If two skills share the same
+  `name`, Codex doesn't merge them; both can appear in skill selectors", so `-Codex`
+  removes a link to Video Story left in `~/.codex/skills`, and `-Remove` removes both.
+- **Cursor** reads `~/.cursor/skills` and `~/.agents/skills` and, "for compatibility",
+  `~/.claude/skills` and `~/.codex/skills`. When one of those already links to this
+  checkout (for example after `-Claude` or `-Codex`), `-Cursor` creates nothing, says
+  where Cursor loads the skill from, and drops its own earlier link in
+  `~/.cursor/skills` if there is one. With both Claude Code and Codex registered,
+  Cursor finds the skill in two folders that lead to the same files; its documentation
+  does not say how it lists such a pair (one of the manual checks).
 
-Codex discovers skills in `~/.codex/skills/`. Link the same directory:
+By hand (Windows junctions, Linux and macOS symbolic links):
 
 ```powershell
-$repo = (Get-Location).Path   # run it in the repository folder
-cmd /c mklink /J "$env:USERPROFILE\.codex\skills\video-story" "$repo\skills\video-story"
+$repo = (Get-Location).Path                   # run it in the repository folder
+$dir = "$env:USERPROFILE\.claude\skills"      # Codex: .agents\skills, Cursor: .cursor\skills
+New-Item -ItemType Directory -Force $dir | Out-Null
+foreach ($s in 'video-story', 'video-story-edit') { cmd /c mklink /J "$dir\$s" "$repo\skills\$s" }
+# remove a link with: cmd /c rmdir "$dir\video-story"   (never Remove-Item -Recurse)
 ```
 
 ```bash
-ln -s ~/video-story/skills/video-story ~/.codex/skills/video-story
+dir=~/.claude/skills                          # Codex: ~/.agents/skills, Cursor: ~/.cursor/skills
+mkdir -p "$dir"
+for s in video-story video-story-edit; do ln -s ~/video-story/skills/$s "$dir/$s"; done
+# remove a link with: rm "$dir/video-story"   (never rm -r)
 ```
 
-Open a new chat (or restart Codex) and ask for "$video-story" or "Start Video Story".
+Then start a new session and say "Start Video Story" or "Edit Video Story":
 
-### Claude Desktop (MCP)
+- Claude Code: a new session.
+- Codex: a new chat; Codex "detects skill changes automatically", restart it if the skill
+  does not appear. `/skills` lists them, `$video-story` invokes one explicitly.
+- Cursor: a new Agent chat (restart Cursor if the skill is missing); the skills are
+  listed in **Customize** and invoked explicitly with `/video-story`.
 
-Claude Desktop has no shell, so it uses the MCP server. Add to
-`claude_desktop_config.json`:
+### Plugin
+
+The repository is a plugin for all three hosts. It carries `.claude-plugin/plugin.json`
+(Claude Code) and a root `plugin.json` in the [Agent Plugins](https://agent-plugins.org)
+format, which Codex and Cursor read; the skills are found in `skills/`. It bundles no
+MCP server on purpose: the skills drive the CLI, and a bundled server would start with
+every session and offer a second set of tools. `.claude-plugin/marketplace.json` is a
+one-plugin marketplace named `video-story-local`.
+
+A plugin install copies the plugin folder, so install from a fresh clone, not from a
+development checkout: that would copy `.venv` and `models/`, and a copied `config.json`
+would keep the state in the copy (section 2), where the next update loses it. Settings, the model and FFmpeg live in `~/.video-story` and survive an update; the
+virtual environment is created again next to every new copy, so the first run after an
+install or update needs the network and permission to run outside the sandbox.
+
+- **Claude Code**: `/plugin marketplace add <path to the clone>` (start a relative path
+  with `./`), then `/plugin install video-story@video-story-local`
+  ([Discover plugins](https://code.claude.com/docs/en/discover-plugins)).
+- **Codex**: Codex reads "a legacy-compatible marketplace at
+  `$REPO_ROOT/.claude-plugin/marketplace.json`", so no extra file is needed
+  ([Package your plugin](https://developers.openai.com/plugins/build/plugins)). Add it
+  with `codex plugin marketplace add <path to the clone>`; in the CLI open `/plugins`,
+  pick the `video-story-local` tab and install `video-story`; in the ChatGPT desktop
+  app restart it and install from **Plugins**. Then start a new chat. Codex installs
+  the copy into `~/.codex/plugins/cache/video-story-local/video-story/local/`; the key
+  for enabling or disabling it in `config.toml` is `[plugins."video-story@video-story-local"]`.
+  The IDE extension does not support plugins: use skill links there.
+- **Cursor**: put a copy into `~/.cursor/plugins/local/video-story` - Cursor "skips a
+  symlink that points to a plugin repository elsewhere on disk", so clone it there:
+  `git clone <repository> ~/.cursor/plugins/local/video-story`. Restart Cursor or run
+  **Developer: Reload Window** and check that **Customize** lists both skills
+  ([Plugins](https://cursor.com/docs/plugins), "Test plugins locally"; on Enterprise
+  plans the admin setting **Allow Local Plugin Imports** must be on). **Customize**
+  also has **Import from Disk**, which the page names but does not describe. The Cursor
+  CLI loads a plugin folder for one run with `cursor-agent --plugin-dir <path>` (from
+  `cursor-agent --help`, version 2026.06.26; not in the web documentation).
+
+### MCP server
+
+The MCP server (`video-story mcp`) offers the same functions as tools. The host starts
+it itself, not as an agent command, so use it for a host that has no shell (Claude
+Desktop) or whose sandbox does not let the launcher keep the window open. Add it only
+where you need it; whether the window survives there is part of the manual check.
+
+Claude Desktop, `claude_desktop_config.json`:
 
 ```json
 {
@@ -172,6 +274,40 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
   }
 }
 ```
+
+Codex, `~/.codex/config.toml` (or `.codex/config.toml` in a trusted project; the
+desktop app, CLI and IDE extension share it -
+[Model Context Protocol](https://developers.openai.com/codex/mcp)):
+
+```toml
+[mcp_servers.video-story]
+command = "uv"
+args = ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
+tool_timeout_sec = 120
+```
+
+or `codex mcp add video-story -- uv run --project C:\path\to\video-story video-story mcp`
+(then add `tool_timeout_sec`). Codex gives a tool 60 s by default, exactly as long as
+`video_story_wait` waits by default; 120 s leaves room. `/mcp` in the CLI lists the
+server.
+
+Cursor, `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project -
+[MCP](https://cursor.com/docs/mcp)); `cursor-agent` reads the same files:
+
+```json
+{
+  "mcpServers": {
+    "video-story": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
+    }
+  }
+}
+```
+
+Cursor asks for approval before it uses an MCP tool unless the Run Mode allows it.
+The install scripts print these snippets with the real path for the hosts you named.
 
 Tools: `video_story_start`, `video_story_wait`, `video_story_status`,
 `video_story_describe`, `video_story_get_transcript`, `video_story_timeline`,
@@ -239,6 +375,10 @@ VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_recording.py test
 - `STATE_NOT_WRITABLE`: the state folder (`video-story config path` names it) cannot be
   created or written, so settings cannot be saved and `setup` cannot download. Make it
   writable or set `VIDEO_STORY_HOME` to a writable folder.
+- The window never appears, or `wait` reports `failed` soon after the `run --detach`
+  command has returned (Codex, Cursor): the command most likely ran inside
+  the host's sandbox. Approve running it outside the sandbox when the host asks, or use
+  the MCP server for that host (section 3).
 - `ALREADY_RUNNING`: a control window is open; finish or close it, or run
   `video-story sessions` to see it.
 - `WINDOW_EXITED`: the window process ended; read `ui.log` (window output, stays in

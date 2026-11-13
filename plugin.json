@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "video-story",
+  "version": "0.1.0",
+  "description": "Record a narrated screen session (microphone, every screen, cursor), transcribe it offline and act on the timed transcript with matching screenshots; edit and render recordings to MP4 with subtitles.",
+  "author": { "name": "Jaromir Sivic" },
+  "license": "MIT",
+  "keywords": ["screen recording", "transcript", "whisper", "narration", "screenshots", "cursor", "video editor", "mp4", "subtitles"]
+}

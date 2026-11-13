@@ -27,6 +27,15 @@ repository path, or reinstall the skill link.
 <skill-dir>/scripts/video-story.sh run --detach
 ```
 
+What the launcher needs from the host: `run --detach` starts the Video Story window as
+a separate GUI process that must keep running after the command has returned; it
+writes to the recording folder and to the state folder (`~/.video-story`, or the
+development checkout), both outside your workspace; and the first run needs the network
+(uv creates the environment). If your host runs commands in a sandbox, run
+`run --detach` - and the first command of a session - outside the sandbox: ask the user
+to approve running it outside the sandbox instead of retrying inside it (inside, the
+window may never appear or may close when the command ends).
+
 ## 2. Start a session
 
 1. Run `run --detach`. The result contains `session_id`. Tell the user in one line that

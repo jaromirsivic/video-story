@@ -22,8 +22,17 @@ Celý plugin (rozhraní, hlášky, skilly, kód) je anglicky. Přepis zachováv�
 | Windows 10/11 | Ověřeno, včetně více obrazovek s různým DPI. Hlavní platforma. |
 | Linux X11 | Nahrávání ověřeno (Fedora). Okno editoru neověřeno. Wayland není podporován. |
 | macOS 13+ | Ověřeno jen na runneru GitHub Actions; na fyzickém Macu (Retina, mikrofon) neověřeno. FFmpeg je nutné nainstalovat ručně. |
-| Claude Code | Ověřeno na Windows (skill připojený do `~/.claude/skills`). |
-| Codex, Claude Desktop (MCP stdio), ChatGPT (MCP přes HTTP a tunel) | Zdokumentováno, nevyzkoušeno. |
+| Claude Code | Ověřeno na Windows (skilly připojené do `~/.claude/skills`). |
+| Codex, Cursor | Napsáno podle dokumentace hostitelů, nevyzkoušeno; ruční kontrola je `tests/manual/hosts.md`. |
+| Claude Desktop (MCP stdio), ChatGPT (MCP přes HTTP a tunel) | Zdokumentováno, nevyzkoušeno. |
+
+Oba skilly se registrují vždy společně, jedním ze tří způsobů (podrobně `docs/installation.md`, kap. 3):
+
+- **Odkazy na skilly**: `scripts/install-hosts.ps1` / `.sh` s přepínači `-Claude`, `-Codex`, `-Cursor` (a `-Remove`) vytvoří junction nebo symlink do složky, kterou hostitel čte: Claude Code `~/.claude/skills`, Codex `~/.agents/skills` (odkaz ve starší `~/.codex/skills` odstraní, Codex by skill ukázal dvakrát), Cursor `~/.cursor/skills` – ale jen tehdy, když Cursor skill už nenačte z jiné složky, kterou také čte (`~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`). Skript je opakovatelný, nepotřebuje práva správce, maže jen odkazy a vypíše, co udělal.
+- **Plugin**: `.claude-plugin/plugin.json` a `marketplace.json` pro Claude Code, kořenový `plugin.json` ve formátu Agent Plugins pro Codex a Cursor; Codex čte i `.claude-plugin/marketplace.json`, Cursor se instaluje kopií do `~/.cursor/plugins/local/video-story`. MCP server se do pluginu záměrně nebalí (skilly ovládají CLI; přibalený server by se spouštěl s každou relací a nabízel druhou sadu nástrojů).
+- **MCP server** jako náhradní cesta pro hostitele, jehož sandbox nedovolí spouštěči udržet okno: konfigurace pro Claude Desktop, Codex (`~/.codex/config.toml`) a Cursor (`~/.cursor/mcp.json`); instalační skript ji vypíše pro zvolené hostitele.
+
+Spouštěč potřebuje od hostitele: okno je samostatný proces, který musí přežít konec příkazu; zapisuje se mimo pracovní adresář agenta (složka nahrávek, složka stavu, prostředí u kódu); první běh potřebuje síť. Skilly proto agentovi říkají, ať `run --detach` / `edit --detach` (a první příkaz relace) spustí mimo sandbox hostitele a o povolení požádá uživatele, místo aby to v sandboxu zkoušel znovu.
 
 ## 4. Nahrávací okno
 

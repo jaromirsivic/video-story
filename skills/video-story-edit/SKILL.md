@@ -24,6 +24,15 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
 <skill-dir>/scripts/video-story-edit.sh edit --detach
 ```
 
+What the launcher needs from the host: `edit --detach` starts the editor as a separate
+GUI process that must keep running after the command has returned; it writes to the
+recording folder and to the state folder (`~/.video-story`, or the development
+checkout), both outside your workspace; and the first run needs the network (uv creates
+the environment). If your host runs commands in a sandbox, run `edit --detach` - and
+the first command of a session - outside the sandbox: ask the user to approve running
+it outside the sandbox instead of retrying inside it (inside, the window may never
+appear or may close when the command ends).
+
 ## 2. Open the editor ("Edit Video Story") and wait for Process
 
 1. Run `edit --detach`. Add `--session <id>` when the user named a recording (ids look
