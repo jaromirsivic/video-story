@@ -45,8 +45,10 @@ JSON object on stderr with `code` and `message` and a non-zero exit code.
    text first, exactly as in section 4 of the video-story skill: run
    `timeline --session <session_id>` (the cropped range as one text timeline: speech
    with the cursor position, finished drawings with geometry and frame times, copied
-   text, cursor moves between screens, zoom, keypoints), decide from it which moments
-   really need a picture and fetch only those with
+   text, cursor moves between screens, zoom, keypoints; it is in the `timeline` field
+   when `timeline_inline` is true, otherwise read the whole file `timeline_file` with
+   your file reading tool - `--out <path>` writes it into your workspace), decide from
+   it which moments really need a picture and fetch only those with
    `frames --session <session_id> --at <ms> --screen <screenId> --no-drawings` (for a
    shape the `after` time of its `DRAW` line). The crop applies to every screen.
    Event `closed`: the user closed the editor without Process; say so in one line and

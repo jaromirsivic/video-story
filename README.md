@@ -30,6 +30,8 @@ audio/computer.wav     what the computer played (Windows), same format and rate
 audio/tracks.json      the audio tracks switched on in the editor (when changed)
 input/mouse.jsonl      the mouse (Windows, Mouse on): button, wheel, drag and gesture events, the
                        element under the mouse with its content (stored once by hash), window titles
+agent/                 derived files the agent reads (timeline.txt, mouse.jsonl): written by the
+                       `timeline` and `mouse` commands, rewritten by every call, safe to delete
 crop.json              {"start_ms", "end_ms"} chosen in the editor (absent = whole recording)
 instructions.txt       master instructions for the AI typed in the editor (absent = none)
 transcript.txt         [HH:MM:SS.mmm --> HH:MM:SS.mmm] text
@@ -75,7 +77,7 @@ Video Story also works on its own, without Claude Code or another agent: record,
 
 The starters need only [uv](https://docs.astral.sh/uv/) (Windows: `winget install astral-sh.uv`). The first start creates the Python environment and, when they are missing, downloads FFmpeg and the Whisper model (`video-story setup`, about 550 MB). Then the window opens in its own process and the console closes; when something goes wrong (uv missing, a window already open) the console stays open with the reason. On macOS, Finder opens `.sh` files in an editor: run the starter from Terminal, or make a copy named `start-video-story.command` to double-click it. Without an agent, **Process** only closes the editor and keeps the recording.
 
-Agents use `run --detach`, then `wait --session <id>` until the session is final. They read the user's instructions first, then `timeline --session <id>`: the cropped range as one text timeline (speech with the cursor position, finished drawings with their geometry and press/release times, removed shapes, copied text, cursor moves between screens, zoom, keypoints), so they decide from text which moments need a picture and fetch only those with `frames --session <id> --at <ms> --no-drawings`. See [skills/video-story/SKILL.md](skills/video-story/SKILL.md) for the agent workflow and [docs/installation.md](docs/installation.md) for setup and host registration (Claude Code, Codex, Claude Desktop, ChatGPT).
+Agents use `run --detach`, then `wait --session <id>` until the session is final. They read the user's instructions first, then `timeline --session <id>`: the cropped range as one text timeline (speech with the cursor position, finished drawings with their geometry and press/release times, removed shapes, copied text, cursor moves between screens, zoom, keypoints; written to the plain text file `timeline_file` - `<recording_dir>/agent/timeline.txt` or `--out <path>` - and repeated in the JSON only when it is short, so the output stays small for a recording of any length), so they decide from text which moments need a picture and fetch only those with `frames --session <id> --at <ms> --no-drawings`. See [skills/video-story/SKILL.md](skills/video-story/SKILL.md) for the agent workflow and [docs/installation.md](docs/installation.md) for setup and host registration (Claude Code, Codex, Claude Desktop, ChatGPT).
 
 ## Development
 

@@ -24,7 +24,7 @@ from video_story.core.config import Config  # noqa: E402
 from video_story.core.session import SessionPaths  # noqa: E402
 from video_story.core.transcript import Segment, Transcript, write_transcript  # noqa: E402
 from video_story.editor.recording import LoadedRecording  # noqa: E402
-from video_story.export import ExportError  # noqa: E402
+from video_story.export import ExportError, ExportResult, ffmpeg_export  # noqa: E402
 from video_story.export import archive as archive_mod  # noqa: E402
 from video_story.export.archive import (  # noqa: E402
     ArchiveError,
@@ -35,6 +35,7 @@ from video_story.export.archive import (  # noqa: E402
 from video_story.host import cli  # noqa: E402
 from video_story.host.events import build_timeline  # noqa: E402
 from video_story.host.runner import FrameIndex, describe_recording, frames_at  # noqa: E402
+from video_story.transcribe.ffmpeg import find_ffmpeg  # noqa: E402
 
 
 class FakeExporter:
@@ -57,6 +58,29 @@ class FakeExporter:
             progress(1.0, "done")
 
 
+class FakeVerifier:
+    """Stands in for the FFmpeg check of a written MP4; ``reject`` makes it fail for
+    that file name."""
+
+    def __init__(self, reject: str | None = None) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self.reject = reject
+
+    def __call__(self, video, duration_ms, config, cancel=None):
+        self.calls.append((video.name, duration_ms))
+        if video.name == self.reject:
+            raise ExportError("OUTPUT_TRUNCATED", "the video is cut short: simulated")
+
+
+@pytest.fixture(autouse=True)
+def verified(monkeypatch) -> FakeVerifier:
+    """The stand-in MP4s of :class:`FakeExporter` are no videos: the check that
+    ``archive_recording`` runs by default is replaced (and records its calls)."""
+    verifier = FakeVerifier()
+    monkeypatch.setattr(archive_mod, "verify_video", verifier)
+    return verifier
+
+
 @pytest.fixture
 def recording(tmp_path: Path) -> SessionPaths:
     return make_recording(tmp_path, NEWEST)
@@ -67,7 +91,9 @@ def _images(paths: SessionPaths, screen_id: str) -> list[Path]:
     return sorted(folder.glob(f"*_{screen_id}.png")) if folder.is_dir() else []
 
 
-def test_archive_renders_every_screen_and_deletes_frames_and_audio(recording: SessionPaths):
+def test_archive_renders_every_screen_and_deletes_frames_and_audio(
+    recording: SessionPaths, verified: FakeVerifier
+):
     exporter = FakeExporter()
     reported: list[float] = []
     state = archive_recording(
@@ -75,6 +101,8 @@ def test_archive_renders_every_screen_and_deletes_frames_and_audio(recording: Se
     )
     final = recording.final_dir
     assert exporter.calls == ["screen1", "screen2"]
+    # Every MP4 was checked against the length of the recording before anything went.
+    assert verified.calls == [("screen1.mp4", 2500), ("screen2.mp4", 2500)]
     assert state.status is ArchiveStatus.ARCHIVED and state.screens_done == ["screen1", "screen2"]
     for screen_id in ("screen1", "screen2"):
         mp4, jpg, srt = screen_outputs(recording, screen_id)
@@ -115,6 +143,97 @@ def test_archive_deletes_frames_screen_by_screen_and_resumes(recording: SessionP
     assert resumed.calls == ["screen2"]  # screen1 is not rendered again
     assert state.archived and state.error is None
     assert mp4.read_bytes() == b"mp4 of screen2"
+
+
+def test_archive_keeps_the_frames_of_a_video_that_fails_verification(recording: SessionPaths):
+    """FFmpeg exits with 0 and writes an MP4 with full-length audio even when it cut the
+    video at a frame it could not read: a written file alone must not delete anything."""
+    exporter = FakeExporter()
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(
+            recording, Config(), exporter=exporter, verifier=FakeVerifier(reject="screen1.mp4")
+        )
+    assert error.value.code == "OUTPUT_TRUNCATED"
+    assert "screen1.mp4" in str(error.value) and "nothing was deleted" in str(error.value)
+    assert exporter.calls == ["screen1"]  # stopped at the first screen
+    state = read_archive_state(recording)
+    assert state is not None and state.status is ArchiveStatus.ARCHIVING
+    assert state.screens_done == [] and "cut short" in (state.error or "")
+    assert len(_images(recording, "screen1")) == 5 and len(_images(recording, "screen2")) == 5
+    assert recording.audio_path(recording.final_dir).is_file()
+    assert not screen_outputs(recording, "screen1")[1].exists()  # no still either
+
+    # A later screen that fails keeps its own frames; the screen before it is done.
+    with pytest.raises(ArchiveError):
+        archive_recording(
+            recording, Config(), exporter=exporter, verifier=FakeVerifier(reject="screen2.mp4")
+        )
+    assert read_archive_state(recording).screens_done == ["screen1"]
+    assert _images(recording, "screen1") == [] and len(_images(recording, "screen2")) == 5
+    assert recording.audio_path(recording.final_dir).is_file()
+
+    # Once the video is whole (the frame is readable again) the archive finishes.
+    state = archive_recording(recording, Config(), exporter=exporter, verifier=FakeVerifier())
+    assert state.archived and state.error is None
+    assert exporter.calls == ["screen1", "screen1", "screen2", "screen2"]
+    assert not recording.frames_dir(recording.final_dir).exists()
+
+
+def test_archive_verifies_the_length_the_exporter_rendered(recording: SessionPaths):
+    """The verifier gets the duration the exporter reports and the caller's cancel check."""
+    seen: list[tuple[str, int, object]] = []
+
+    def exporter(request, config, progress=None, cancel=None):
+        request.output.write_bytes(b"mp4")
+        return ExportResult(
+            output=request.output,
+            srt=None,
+            screen_id=request.screen_id,
+            start_ms=0,
+            end_ms=2400,
+            duration_ms=2400,
+            width=2,
+            height=2,
+            fps=24,
+            frames_used=5,
+            ffmpeg="ffmpeg",
+        )
+
+    def cancel() -> bool:
+        return False
+
+    archive_recording(
+        recording,
+        Config(),
+        cancel=cancel,
+        exporter=exporter,
+        verifier=lambda video, ms, config, stop: seen.append((video.name, ms, stop)),
+    )
+    assert seen == [("screen1.mp4", 2400, cancel), ("screen2.mp4", 2400, cancel)]
+
+
+def test_archive_verification_cancelled(recording: SessionPaths):
+    def verifier(video, duration_ms, config, cancel=None):
+        raise ExportError("CANCELLED", "export cancelled")
+
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=FakeExporter(), verifier=verifier)
+    assert error.value.code == "CANCELLED"
+    assert read_archive_state(recording).screens_done == []
+    assert len(_images(recording, "screen1")) == 5
+
+
+def test_archive_checks_with_ffmpeg_by_default(recording: SessionPaths, monkeypatch):
+    """Without a verifier the real check runs: a file that is no video deletes nothing."""
+    if find_ffmpeg(Config()) is None:
+        pytest.skip("ffmpeg not available")
+    monkeypatch.setattr(archive_mod, "verify_video", ffmpeg_export.verify_video)
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=FakeExporter())
+    assert error.value.code == "OUTPUT_UNVERIFIED"
+    assert read_archive_state(recording).screens_done == []
+    assert len(_images(recording, "screen1")) == 5
+    assert recording.audio_path(recording.final_dir).is_file()
 
 
 def test_archive_needs_a_complete_transcript(tmp_path: Path):

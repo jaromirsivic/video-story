@@ -5,8 +5,11 @@ For every screen, in order (see :mod:`video_story.core.archive_state`):
 1. ``archive/<screenId>.mp4`` - the whole recording of that screen with the full audio
    track, rendered exactly like the editor's **Render** (cursor drawn as configured),
    plus ``archive/<screenId>.srt`` with the subtitles of the whole recording;
-2. ``archive/<screenId>.jpg`` - the frame closest to the middle of the recording;
-3. both checked, the screen recorded in ``screens_done`` of ``archive.json``;
+2. the MP4 verified: its video stream must cover the whole recording (FFmpeg exits
+   with 0 and full-length audio even when it cut the video at a frame it could not
+   read); a video that fails stops the archiving with nothing deleted;
+3. ``archive/<screenId>.jpg`` - the frame closest to the middle of the recording;
+   then the screen is recorded in ``screens_done`` of ``archive.json``;
 4. the frames of that screen deleted at once (they are not needed any more, and the
    next screen gets their disk space).
 
@@ -43,7 +46,7 @@ from video_story.core.transcript import transcript_status
 from video_story.host.runner import FrameIndex
 
 from . import CancelCheck, ExportError, ExportRequest, ExportResult
-from .ffmpeg_export import export_recording
+from .ffmpeg_export import export_recording, verify_video
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +58,9 @@ DELETE_DELAY_S = 0.2
 # progress(fraction 0..1 of the whole archive, text)
 ArchiveProgress = Callable[[float, str], None]
 Exporter = Callable[..., ExportResult]
+# verifier(mp4, duration_ms, config, cancel): raises ExportError unless the video stream
+# of the MP4 covers duration_ms (see video_story.export.ffmpeg_export.verify_video)
+Verifier = Callable[[Path, int, Config, CancelCheck | None], object]
 
 
 class ArchiveError(RuntimeError):
@@ -177,13 +183,20 @@ def archive_recording(
     progress: ArchiveProgress | None = None,
     cancel: CancelCheck | None = None,
     exporter: Exporter = export_recording,
+    verifier: Verifier | None = None,
 ) -> ArchiveState:
     """Archive the saved recording of ``paths`` (resuming a run that stopped).
 
     Raises :class:`ArchiveError` (``NOT_TRANSCRIBED``, ``NO_MANIFEST``, ``CANCELLED``,
     an export code ...) without losing what was done: ``archive.json`` keeps the
     screens already archived and the next call continues with the others.
+
+    No frame of a screen is deleted before ``verifier`` accepted the screen's MP4
+    (:func:`video_story.export.ffmpeg_export.verify_video` unless given): the exporter
+    checks its output too, this second look at the final file is what the deletion
+    relies on, whatever exporter was used.
     """
+    verify = verifier if verifier is not None else verify_video
     base = paths.final_dir
     if not paths.manifest_path(base).is_file():
         raise ArchiveError("NO_MANIFEST", f"no manifest.json in {base}")
@@ -239,7 +252,7 @@ def archive_recording(
 
             report(done_before, f"archiving {screen_id}")
             try:
-                exporter(
+                result = exporter(
                     ExportRequest(
                         paths=paths,
                         output=mp4,
@@ -261,6 +274,19 @@ def archive_recording(
                 state.error = f"{mp4.name} was not written"
                 write_archive_state(paths, state, base)
                 raise ArchiveError("ARCHIVE_FAILED", state.error)
+            # The exporter knows the length it rendered (it falls back to the frame
+            # times when the manifest has no duration); a stand-in may not say.
+            expected_ms = result.duration_ms if isinstance(result, ExportResult) else duration_ms
+            try:
+                verify(mp4, expected_ms, config, cancel)
+            except ExportError as exc:
+                state.error = (
+                    str(exc)
+                    if exc.code == "CANCELLED"
+                    else f"{mp4.name} is not a complete video, nothing was deleted: {exc}"
+                )
+                write_archive_state(paths, state, base)
+                raise ArchiveError(exc.code, state.error) from exc
             try:
                 _write_still(index, screen_id, duration_ms, jpg)
             except (OSError, ValueError) as exc:

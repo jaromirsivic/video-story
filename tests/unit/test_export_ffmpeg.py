@@ -1,6 +1,7 @@
 """End-to-end export of a synthetic recording through ffmpeg, verified with ffprobe.
 
-Skipped when ffmpeg or ffprobe is not available (GitHub runners have both on PATH).
+Skipped when ffmpeg or ffprobe is not available (GitHub runners have both on PATH);
+the tests with ``FakeRuns`` need neither.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import pytest
@@ -23,7 +25,7 @@ from video_story.core.naming import frame_filename, sidecar_filename
 from video_story.core.screens import RawScreen, assign_screen_ids
 from video_story.core.session import SessionPaths
 from video_story.core.transcript import Segment, Transcript, write_transcript
-from video_story.export import ExportError, ExportRequest, plan
+from video_story.export import ExportError, ExportRequest, ffmpeg_export, plan
 from video_story.export.cursor import CURSOR_SIZE
 from video_story.export.ffmpeg_export import export_recording
 from video_story.host import cli, mcp_server
@@ -522,6 +524,182 @@ def test_export_output_under_existing_file(
             Config(recording_folder=recording.recording_folder),
         )
     assert info.value.code == "OUTPUT_ERROR" and "afile" in str(info.value)
+
+
+# A video cut short ------------------------------------------------------------
+
+
+def test_export_leaves_out_a_frame_without_picture(
+    tools: tuple[Path, Path],
+    recording: SessionPaths,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    """A zero-byte frame used to end the video where it stood (ffmpeg takes a file it
+    cannot open for the end of the input and still exits with 0)."""
+    ffmpeg, ffprobe = tools
+    (recording.frames_dir() / frame_filename(1000, "screen1", "png")).write_bytes(b"")
+    output = tmp_path / "gap.mp4"
+    caplog.set_level("WARNING", logger="video_story.export.ffmpeg_export")
+    result = export_recording(
+        ExportRequest(recording, output, draw_cursor=False),
+        Config(recording_folder=recording.recording_folder, export_preset="ultrafast"),
+    )
+    assert result.frames_used == 3 and result.duration_ms == 2000
+    assert "1 frame(s) of screen1 have no picture" in caplog.text
+    assert "1_000_screen1.png" in caplog.text
+    info = probe(ffprobe, output)
+    [video] = [s for s in info["streams"] if s["codec_type"] == "video"]
+    assert abs(float(video["duration"]) - 2.0) <= 0.1  # the video stream, not the container
+    assert len(decode_all_frames(ffmpeg, output, SCREEN1)) == 48
+    # The frame before the gap stays until the next good one.
+    during = decode_frame(ffmpeg, output, 1.25, tmp_path / "gap.png")
+    assert _close(dominant_colour(during), COLOURS["screen1"][1])
+    after = decode_frame(ffmpeg, output, 1.75, tmp_path / "after.png")
+    assert _close(dominant_colour(after), COLOURS["screen1"][3])
+
+
+@pytest.mark.parametrize("ffmpeg_says_so", [True, False])
+def test_export_fails_when_a_frame_cannot_be_read_during_the_encode(
+    tools: tuple[Path, Path],
+    recording: SessionPaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ffmpeg_says_so: bool,
+):
+    """A frame that goes away after the plan was made (locked by an antivirus, a network
+    folder that dropped out): ffmpeg exits with 0, audio 2.0 s, video 1.0 s. With
+    ``ffmpeg_says_so`` its error line gives it away; without (other ffmpeg versions word
+    it differently) the frame count of the written file does."""
+    victim = recording.frames_dir() / frame_filename(1000, "screen1", "png")
+    real_list = ffmpeg_export.concat_list_text
+
+    def list_then_lose_a_frame(frames_dir, planned):
+        text = real_list(frames_dir, planned)
+        victim.unlink()
+        return text
+
+    monkeypatch.setattr(ffmpeg_export, "concat_list_text", list_then_lose_a_frame)
+    if not ffmpeg_says_so:
+        monkeypatch.setattr(ffmpeg_export, "INPUT_ERROR_MARKER", "<never logged>")
+    output = tmp_path / "cut.mp4"
+    output.write_bytes(b"previous export")
+    with pytest.raises(ExportError) as info:
+        export_recording(
+            ExportRequest(recording, output, draw_cursor=False),
+            Config(recording_folder=recording.recording_folder, export_preset="ultrafast"),
+        )
+    assert info.value.code == "OUTPUT_TRUNCATED"
+    counted = "holds 24 frames (1.0 s) instead of 2.0 s" in str(info.value)
+    assert counted or (ffmpeg_says_so and "1_000_screen1.png" in str(info.value))
+    assert not output.with_name("cut.part.mp4").exists()
+    assert output.read_bytes() == b"previous export"
+    assert not output.with_suffix(".srt").exists()
+
+
+def test_verify_video_counts_the_frames_of_the_video_stream(
+    tools: tuple[Path, Path], recording: SessionPaths, tmp_path: Path
+):
+    cfg = Config(recording_folder=recording.recording_folder)  # default preset: B-frames
+    output = tmp_path / "whole.mp4"
+    export_recording(ExportRequest(recording, output), cfg)
+    assert ffmpeg_export.verify_video(output, 2000, cfg) == 48
+    assert ffmpeg_export.verify_video(output, 2100, cfg) == 48  # within the tolerance
+    with pytest.raises(ExportError) as info:
+        ffmpeg_export.verify_video(output, 4000, cfg)  # the audio could be that long
+    assert info.value.code == "OUTPUT_TRUNCATED" and "48 frames" in str(info.value)
+
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not a video")
+    with pytest.raises(ExportError) as info:
+        ffmpeg_export.verify_video(broken, 2000, cfg)
+    assert info.value.code == "OUTPUT_UNVERIFIED"
+    with pytest.raises(ExportError) as info:
+        ffmpeg_export.verify_video(recording.audio_path(), 2000, cfg)  # no video stream
+    assert info.value.code == "OUTPUT_UNVERIFIED"
+    with pytest.raises(ExportError) as info:
+        ffmpeg_export.verify_video(output, 2000, cfg, cancel=lambda: True)
+    assert info.value.code == "CANCELLED"
+
+
+# The same without ffmpeg: its runs are replaced by what they would report.
+
+
+class FakeRuns:
+    """Stands in for ``_run_ffmpeg``: the encode writes the partial file and reports
+    ``encoded`` (an input error line or ``None``), the probe reports ``frames``."""
+
+    def __init__(self, frames: int | None, input_error: str | None = None) -> None:
+        self.frames = frames
+        self.input_error = input_error
+        self.probed: list[Path] = []
+
+    def __call__(self, cmd, cwd, duration_ms, progress, cancel):
+        run = SimpleNamespace(returncode=0, frames=None, input_error=None, stderr_tail=[])
+        if cmd[-3:] == ["-f", "null", "-"]:
+            self.probed.append(Path(cmd[cmd.index("-i") + 1]))
+            assert self.probed[-1].read_bytes() == b"new video"
+            run.frames = self.frames
+        else:
+            Path(cmd[-1]).write_bytes(b"new video")
+            run.input_error = self.input_error
+        return run
+
+
+def _export_with(runs: FakeRuns, recording: SessionPaths, output: Path, monkeypatch) -> None:
+    monkeypatch.setattr(ffmpeg_export, "ensure_ffmpeg", lambda config: Path("ffmpeg"))
+    monkeypatch.setattr(ffmpeg_export, "_run_ffmpeg", runs)
+    output.write_bytes(b"previous export")
+    export_recording(
+        ExportRequest(recording, output, write_srt=False),
+        Config(recording_folder=recording.recording_folder),
+    )
+
+
+def test_export_checks_the_written_video_before_it_replaces_the_output(
+    recording: SessionPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    output = tmp_path / "clip.mp4"
+    partial = output.with_name("clip.part.mp4")
+
+    # 2000 ms at 24 fps are 48 frames; 45 is the least that passes.
+    for frames in (48, 45):
+        runs = FakeRuns(frames)
+        _export_with(runs, recording, output, monkeypatch)
+        assert runs.probed == [partial]  # the partial file, before it got the name
+        assert output.read_bytes() == b"new video" and not partial.exists()
+
+    # ffmpeg exited with 0, but the video stream stops half way.
+    for frames in (44, 24, 0):
+        with pytest.raises(ExportError) as info:
+            _export_with(FakeRuns(frames), recording, output, monkeypatch)
+        assert info.value.code == "OUTPUT_TRUNCATED"
+        assert f"holds {frames} frames" in str(info.value)
+        assert output.read_bytes() == b"previous export" and not partial.exists()
+
+    # The file cannot be read back at all.
+    with pytest.raises(ExportError) as info:
+        _export_with(FakeRuns(None), recording, output, monkeypatch)
+    assert info.value.code == "OUTPUT_UNVERIFIED"
+    assert output.read_bytes() == b"previous export" and not partial.exists()
+
+    # ffmpeg said that it could not read an input: no need to count.
+    runs = FakeRuns(48, input_error="Impossible to open 'x.png'\nError during demuxing: nope")
+    with pytest.raises(ExportError) as info:
+        _export_with(runs, recording, output, monkeypatch)
+    assert info.value.code == "OUTPUT_TRUNCATED" and "Impossible to open" in str(info.value)
+    assert runs.probed == []
+    assert output.read_bytes() == b"previous export" and not partial.exists()
+
+
+def test_export_with_only_empty_frames(
+    recording: SessionPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    for t in TIMES:
+        (recording.frames_dir() / frame_filename(t, "screen1", "png")).write_bytes(b"")
+    with pytest.raises(ExportError) as info:
+        _export_with(FakeRuns(48), recording, tmp_path / "none.mp4", monkeypatch)
+    assert info.value.code == "NO_FRAMES" and "empty" in str(info.value)
 
 
 # CLI and MCP ------------------------------------------------------------------

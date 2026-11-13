@@ -16,7 +16,7 @@ from video_story.core.naming import frame_filename, sidecar_filename
 from video_story.core.screens import RawScreen, assign_screen_ids
 from video_story.core.session import SessionPaths, SessionState, Status, write_state
 from video_story.core.transcript import Segment, Transcript, write_transcript
-from video_story.host import mcp_server, runner
+from video_story.host import agent_output, mcp_server, runner
 from video_story.host.runner import LaunchInfo, SessionError
 
 SESSION_ID = "20260101-120000"
@@ -193,8 +193,20 @@ def test_describe(recording: SessionPaths, config_file: Path):
     assert result["ok"] is True
     assert result["recording_dir"] == str(recording.final_dir)
     assert result["manifest_content"]["recorded_duration_ms"] == 900
-    assert "ahoj" in result["transcript"]
+    assert "ahoj" in result["transcript_in_range"] and result["transcript_in_range_inline"]
+    assert "transcript" not in result  # not twice: get_transcript has the whole one
     assert Path(result["frames_dir"]).is_dir()
+
+
+def test_describe_leaves_a_long_transcript_to_the_paged_tools(
+    recording: SessionPaths, config_file: Path
+):
+    result = mcp_server.tool_describe(recording.session_id, config_file, inline_chars=10)
+    assert result["ok"] is True and "transcript_in_range" not in result
+    assert result["transcript_in_range_inline"] is False
+    assert result["transcript_in_range_lines"] == 2
+    assert "video_story_timeline" in result["transcript_in_range_note"]
+    assert "video_story_get_transcript" in result["transcript_in_range_note"]
 
 
 def test_get_transcript_formats(recording: SessionPaths, config_file: Path):
@@ -216,6 +228,98 @@ def test_timeline(recording: SessionPaths, config_file: Path):
     assert "SAY ahoj" not in part["timeline"] and "SAY svete" in part["timeline"]
     bad = mcp_server.tool_timeline(recording.session_id, 900, 100, config_file)
     assert bad["ok"] is False and bad["code"] == "USAGE"
+
+
+# paging (hosts without file access: no result grows with the recording) --------
+
+
+def test_timeline_pages_by_whole_lines(
+    recording: SessionPaths, config_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    whole = mcp_server.tool_timeline(recording.session_id, config_file=config_file)
+    assert (whole["first_line"], whole["next_line"]) == (1, None)
+    assert whole["timeline_lines"] == len(whole["timeline"].splitlines()) == 4
+    assert whole["timeline_chars"] == len(whole["timeline"])
+    assert "page_note" not in whole and "legend" in whole
+    # A max_chars below the minimum is raised to it: everything still fits one page.
+    tiny = mcp_server.tool_timeline(recording.session_id, config_file=config_file, max_chars=1)
+    assert tiny["next_line"] is None and tiny["timeline"] == whole["timeline"]
+
+    monkeypatch.setattr(agent_output, "PAGE_MIN_CHARS", 1)
+    text, first, pages = "", 1, 0
+    while first is not None:
+        page = mcp_server.tool_timeline(
+            recording.session_id, config_file=config_file, first_line=first, max_chars=70
+        )
+        assert page["ok"] is True and page["first_line"] == first
+        assert page["timeline"].endswith("\n") and len(page["timeline"]) <= 70
+        assert page["timeline_lines"] == 4 and page["counts"]["speech"] == 2
+        assert ("legend" in page) == (first == 1)  # explained once, with the first page
+        if page["next_line"] is not None:
+            assert f"first_line={page['next_line']}" in page["page_note"]
+        text += page["timeline"]
+        first = page["next_line"]
+        pages += 1
+    assert text == whole["timeline"] and pages > 1
+
+    past = mcp_server.tool_timeline(recording.session_id, config_file=config_file, first_line=99)
+    assert past["ok"] is True and past["timeline"] == "" and past["next_line"] is None
+    one = mcp_server.tool_timeline(
+        recording.session_id, config_file=config_file, first_line=2, max_chars=5
+    )  # a line longer than max_chars comes whole and alone
+    assert one["timeline"] == "0-400 SAY ahoj [cursor screen1 40,10]\n" and one["next_line"] == 3
+
+
+def test_get_transcript_pages(
+    recording: SessionPaths, config_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(agent_output, "PAGE_MIN_CHARS", 1)
+    session = recording.session_id
+    first = mcp_server.tool_get_transcript(session, "text", config_file, max_chars=40)
+    assert first["text"] == "[00:00:00.000 --> 00:00:00.400] ahoj\n"
+    assert (first["transcript_lines"], first["first_line"], first["next_line"]) == (2, 1, 2)
+    rest = mcp_server.tool_get_transcript(session, "text", config_file, first_line=2, max_chars=40)
+    assert rest["text"].endswith("svete\n") and rest["next_line"] is None
+    data = mcp_server.tool_get_transcript(session, "json", config_file, first_line=2, max_chars=5)
+    assert data["segments"] == [{"start_ms": 400, "end_ms": 900, "text": "svete"}]
+    assert (data["transcript_lines"], data["next_line"], data["language"]) == (2, None, "cs")
+
+
+def test_mouse_pages_actions_and_rest_points_in_time_order(
+    config_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from test_events import make_recording as make_events_recording
+    from test_mouse_timeline import Mouse, search
+
+    from video_story.core.input_events import ElementInfo, HoverRecord
+
+    paths = make_events_recording(tmp_path / "rec", {})
+    m = Mouse(paths)
+    for t in (1000, 2000, 3000):
+        m.click(t, 20, 15, search(f"value {t}"))
+    hover = m.writer.write(HoverRecord(t=1500, screen="screen1", x=70, y=70, gx=70, gy=70))
+    m.writer.write_element(1510, hover, ElementInfo(role="button", name="Save"), win=m.win_notepad)
+    m.close()
+
+    whole = mcp_server.tool_mouse(paths.session_id, config_file=config_file)
+    assert whole["ok"] is True and whole["next_line"] is None
+    assert (whole["action_count"], whole["rest_point_count"], whole["mouse_lines"]) == (3, 1, 4)
+    assert len(whole["actions"]) == 3 and len(whole["rest_points"]) == 1
+
+    monkeypatch.setattr(agent_output, "PAGE_MIN_CHARS", 1)
+    seen, first = [], 1
+    while first is not None:  # every record is longer than max_chars: one per page
+        page = mcp_server.tool_mouse(
+            paths.session_id, config_file=config_file, first_line=first, max_chars=10
+        )
+        (record,) = page["actions"] + page["rest_points"]
+        seen.append((record["kind"], record["t"]))
+        assert (page["action_count"], page["rest_point_count"]) == (3, 1)
+        first = page["next_line"]
+    assert seen == [("click", 1000), ("rest", 1500), ("click", 2000), ("click", 3000)]
+
+    one = mcp_server.tool_mouse(paths.session_id, at_ms=2000, config_file=config_file)
+    assert [a["t"] for a in one["actions"]] == [2000] and "next_line" not in one
 
 
 # frames -----------------------------------------------------------------------
@@ -433,6 +537,18 @@ def test_create_server_registers_tools(config_file: Path, recording: SessionPath
     ]
     wait = next(t for t in tools if t.name == "video_story_wait")
     assert set(wait.input_schema["properties"]) == {"session_id", "timeout_s"}
+    for name in ("video_story_timeline", "video_story_mouse", "video_story_get_transcript"):
+        paged = next(t for t in tools if t.name == name)
+        assert {"first_line", "max_chars"} <= set(paged.input_schema["properties"])
+    describe = next(t for t in tools if t.name == "video_story_describe")
+    assert set(describe.input_schema["properties"]) == {"session_id"}
+    page = anyio.run(
+        server.call_tool,
+        "video_story_timeline",
+        {"session_id": recording.session_id, "first_line": 3},
+    )
+    assert page.structured_content["first_line"] == 3
+    assert page.structured_content["timeline"].startswith("400-900 SAY svete")
 
     # Calling through the server exercises the wrappers and result conversion.
     status = anyio.run(server.call_tool, "video_story_status", {"session_id": recording.session_id})

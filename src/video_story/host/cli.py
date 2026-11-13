@@ -25,6 +25,7 @@ from video_story.core.config import (
     update_config,
 )
 from video_story.core.session import SessionPaths, new_session_id
+from video_story.host.agent_output import DEFAULT_INLINE_CHARS
 
 log = logging.getLogger("video_story")
 
@@ -231,27 +232,27 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_sessions(args: argparse.Namespace) -> dict[str, Any]:
+    """Recent sessions, one compact entry each (``status --session`` has the full state)."""
     from video_story.core.session import list_sessions
-    from video_story.host.runner import session_status
+    from video_story.host.runner import session_summary
 
     cfg = _load(args)
-    items = []
-    for paths in list_sessions(cfg.recording_folder)[: args.limit]:
-        try:
-            status = session_status(paths)
-        except Exception as exc:
-            status = {"session_id": paths.session_id, "status": "unknown", "message": str(exc)}
-        if paths.folder is not None:
-            status["folder"] = paths.folder  # the folder of a saved recording
-        items.append(status)
-    return {"recording_folder": str(cfg.recording_folder), "sessions": items}
+    found = list_sessions(cfg.recording_folder)
+    shown = found[: max(0, args.limit)]
+    return {
+        "recording_folder": str(cfg.recording_folder),
+        "total": len(found),
+        "truncated": len(shown) < len(found),
+        "note": "Newest first, compact; `status --session <id>` returns the full state.",
+        "sessions": [session_summary(paths) for paths in shown],
+    }
 
 
 def cmd_describe(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.host.runner import describe_recording
 
     cfg = _load(args)
-    return describe_recording(_session_paths(args, cfg))
+    return describe_recording(_session_paths(args, cfg), inline_chars=args.inline_chars)
 
 
 def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
@@ -272,7 +273,18 @@ def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
-    """Speech and screen events of the cropped range as one compact text timeline."""
+    """Speech and screen events of the cropped range as one compact text timeline.
+
+    The text goes to a file (``timeline_file``: plain text, one event per line) and is
+    repeated in the JSON only when it is short: stdout stays small however long the
+    recording is.
+    """
+    from video_story.host.agent_output import (
+        TIMELINE_FILE_NAME,
+        deliver_lines,
+        output_target,
+        split_lines,
+    )
     from video_story.host.events import build_timeline
     from video_story.host.runner import SessionError
 
@@ -282,14 +294,35 @@ def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
     if args.all:
         start_ms, end_ms = 0, 10**12
     try:
-        return build_timeline(paths, start_ms, end_ms, mouse=args.mouse)
+        result = build_timeline(paths, start_ms, end_ms, mouse=args.mouse)
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
+    text = result.pop("timeline")
+    target = output_target(args.out, paths.agent_dir() / TIMELINE_FILE_NAME)
+    done = deliver_lines(
+        split_lines(text), target, args.inline_chars, "timeline", "plain text, one event per line"
+    )
+    result["timeline_file"] = str(done.file) if done.file is not None else None
+    result["timeline_lines"] = done.lines
+    result["timeline_chars"] = done.chars
+    result["timeline_inline"] = done.inline
+    if done.note:
+        result["timeline_note"] = done.note
+    if done.inline:
+        result["timeline"] = text
+    return result
 
 
 def cmd_mouse(args: argparse.Namespace) -> dict[str, Any]:
-    """Every detail of the mouse actions: paths, bounds, ancestors, the whole content."""
-    from video_story.host.events import build_mouse_detail
+    """Every detail of the mouse actions: paths, bounds, ancestors, the whole content.
+
+    ``--at``: the one action, inline. Without it the actions and rest points of the
+    range go to a file (``mouse_file``: JSON Lines in time order) and are repeated in
+    the JSON only when they are short.
+    """
+    from video_story.host.agent_output import MOUSE_DETAIL_FILE_NAME, deliver_lines, output_target
+    from video_story.host.events import build_mouse_detail, mouse_record_lines, mouse_records
+    from video_story.host.mouse_timeline import DETAIL_PATH_POINTS
     from video_story.host.runner import SessionError
 
     cfg = _load(args)
@@ -297,10 +330,38 @@ def cmd_mouse(args: argparse.Namespace) -> dict[str, Any]:
     start_ms, end_ms = args.start_ms, args.end_ms
     if args.all:
         start_ms, end_ms = 0, 10**12
+    one = args.at is not None
     try:
-        return build_mouse_detail(paths, start_ms, end_ms, args.at)
+        result = build_mouse_detail(
+            paths, start_ms, end_ms, args.at, max_path_points=DETAIL_PATH_POINTS if one else None
+        )
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
+    if one or not result.get("recorded"):
+        return result
+    actions, rest_points = result.pop("actions"), result.pop("rest_points")
+    lines = mouse_record_lines(mouse_records({"actions": actions, "rest_points": rest_points}))
+    target = output_target(args.out, paths.agent_dir() / MOUSE_DETAIL_FILE_NAME)
+    done = deliver_lines(
+        lines,
+        target,
+        args.inline_chars,
+        "mouse",
+        'JSON Lines in time order, one action or rest point (kind "rest") per line, '
+        'each starting with its kind and time "t"',
+    )
+    result["action_count"] = len(actions)
+    result["rest_point_count"] = len(rest_points)
+    result["mouse_file"] = str(done.file) if done.file is not None else None
+    result["mouse_lines"] = done.lines
+    result["mouse_chars"] = done.chars
+    result["mouse_inline"] = done.inline
+    if done.note:
+        result["mouse_note"] = done.note
+    if done.inline:
+        result["actions"] = actions
+        result["rest_points"] = rest_points
+    return result
 
 
 def _require_audio(paths: Any, base: Path) -> None:
@@ -663,8 +724,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_sessions)
 
-    p = sub.add_parser("describe", help="paths, manifest and transcript of a recording")
+    inline_help = (
+        "also return the text in the JSON when it has at most N characters "
+        f"(default {DEFAULT_INLINE_CHARS}; 0 = never)"
+    )
+
+    p = sub.add_parser("describe", help="paths, manifest and crop of a recording")
     p.add_argument("--session")
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
     p.set_defaults(func=cmd_describe)
 
     p = sub.add_parser("frames", help="frames matching a moment of the timeline")
@@ -698,6 +765,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="mouse lines: auto (all, scrolls merged when there are very many), full, "
         "summary (scrolls merged per 10 s) or off",
     )
+    p.add_argument(
+        "--out",
+        help="write the timeline text here instead of <recording_dir>/agent/timeline.txt",
+    )
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
     p.set_defaults(func=cmd_timeline)
 
     p = sub.add_parser(
@@ -708,6 +780,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
     p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
     p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.add_argument(
+        "--out",
+        help="without --at: write the actions (JSON Lines) here instead of "
+        "<recording_dir>/agent/mouse.jsonl",
+    )
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
     p.set_defaults(func=cmd_mouse)
 
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")

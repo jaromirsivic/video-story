@@ -157,7 +157,18 @@ def test_describe_reports_crop_and_transcript_in_range(tmp_path: Path):
     cropped = describe_recording(paths)
     assert cropped["crop"] == {"start_ms": 1500, "end_ms": 4000}
     assert cropped["transcript_in_range"] == "[00:00:02.000 --> 00:00:03.000] second\n"
-    assert "first" in cropped["transcript"]  # the full transcript is still there
+    assert cropped["transcript_in_range_inline"] is True
+    assert (cropped["transcript_in_range_lines"], cropped["transcript_in_range_chars"]) == (1, 39)
+    # The whole transcript is not repeated: describe names its files instead.
+    assert "transcript" not in cropped
+    assert Path(cropped["transcript_txt"]).read_text(encoding="utf-8").count("\n") == 3
+
+    # A transcript longer than the limit is left out with a note (the size stays bounded).
+    long = describe_recording(paths, inline_chars=38)
+    assert "transcript_in_range" not in long and long["transcript_in_range_inline"] is False
+    assert "transcript_txt" in long["transcript_in_range_note"]
+    assert "timeline" in long["transcript_in_range_note"]
+    assert "transcript_in_range" not in describe_recording(paths, inline_chars=0)
 
 
 # Review fixes: liveness, stale requests, guards ------------------------------------

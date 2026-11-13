@@ -684,9 +684,11 @@ def build_mouse_detail(
     start_ms: int | None = None,
     end_ms: int | None = None,
     at_ms: int | None = None,
+    max_path_points: int | None = None,
 ) -> dict[str, Any]:
     """Everything recorded about the mouse actions of the cropped range (or
-    ``start_ms``..``end_ms``), or of the one action at ``at_ms``."""
+    ``start_ms``..``end_ms``), or of the one action at ``at_ms``. ``max_path_points``
+    thins the path of a long drag (output that is not written to a file)."""
     base = paths.current_dir
     manifest_path = paths.manifest_path(base)
     if not manifest_path.exists():
@@ -703,7 +705,30 @@ def build_mouse_detail(
     )
     if window.end_ms < window.start_ms:
         raise SessionError("USAGE", f"end_ms {window.end_ms} is before start_ms {window.start_ms}")
-    return {"session_id": paths.session_id, **mouse_detail(paths, manifest, window, at_ms)}
+    detail = mouse_detail(paths, manifest, window, at_ms, max_path_points)
+    return {"session_id": paths.session_id, **detail}
 
 
-__all__ = ["CLIPBOARD_EXCERPT_CHARS", "LEGEND", "build_mouse_detail", "build_timeline"]
+def mouse_records(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """The actions and rest points of :func:`build_mouse_detail` as one list in time
+    order (a rest point is marked ``kind: "rest"``; an action comes first at the same
+    time). One record is one line of the ``mouse`` file and one unit of an MCP page."""
+    records = [(a.get("t", 0), 0, a) for a in detail.get("actions") or []]
+    records += [(r.get("t", 0), 1, {"kind": "rest", **r}) for r in detail.get("rest_points") or []]
+    records.sort(key=lambda item: item[:2])  # stable: the order within a kind stays
+    return [record for _t, _rank, record in records]
+
+
+def mouse_record_lines(records: list[dict[str, Any]]) -> list[str]:
+    """``records`` as JSON Lines (``"t": <ms>`` is searchable as written)."""
+    return [json.dumps(record, ensure_ascii=False, default=str) for record in records]
+
+
+__all__ = [
+    "CLIPBOARD_EXCERPT_CHARS",
+    "LEGEND",
+    "build_mouse_detail",
+    "build_timeline",
+    "mouse_record_lines",
+    "mouse_records",
+]

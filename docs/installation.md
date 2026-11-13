@@ -145,9 +145,17 @@ Claude Desktop has no shell, so it uses the MCP server. Add to
 ```
 
 Tools: `video_story_start`, `video_story_wait`, `video_story_status`,
-`video_story_describe`, `video_story_get_transcript`, `video_story_timeline`, `video_story_list_frames`,
+`video_story_describe`, `video_story_get_transcript`, `video_story_timeline`,
+`video_story_mouse`, `video_story_list_frames`,
 `video_story_get_frame`, `video_story_config`, `video_story_doctor`, `video_story_edit`,
 `video_story_wait_editor`, `video_story_export`.
+
+No tool result grows with the length of the recording. `video_story_timeline`,
+`video_story_mouse` (without `at_ms`) and `video_story_get_transcript` return pages:
+`first_line` (1-based, default 1) and `max_chars` (default 20000, 1000-100000) select
+whole lines; the result carries the total (`timeline_lines`, `mouse_lines`,
+`transcript_lines`) and `next_line` - the `first_line` of the next call, `null` when
+the text is complete.
 
 ### ChatGPT
 
@@ -195,6 +203,10 @@ VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_recording.py test
 
 ## Troubleshooting
 
+- `ROOT_NOT_FOUND` (launcher, exit code 21): `scripts/video-story.cmd` / `.sh` found no
+  `pyproject.toml` three levels above itself, nor behind the junction or symlink the skill
+  is registered with. Register the skill again (`scripts/install-hosts`) or set
+  `VIDEO_STORY_ROOT` to the Video Story directory.
 - `ALREADY_RUNNING`: a control window is open; finish or close it, or run
   `video-story sessions` to see it.
 - `WINDOW_EXITED`: the window process ended; read `ui.log` (window output, stays in

@@ -39,6 +39,8 @@ SUMMARY_AFTER_LINES = 400
 SUMMARY_BUCKET_MS = 10_000
 HOVER_BEFORE_SPEECH_MS = 3000  # a rest point this long before a sentence still counts
 AT_TOLERANCE_MS = 1000
+# Points of a drag path in output that is not written to a file (`mouse --at`, MCP).
+DETAIL_PATH_POINTS = 200
 
 BUTTON_NAMES = {"x1": "x1 (back)", "x2": "x2 (forward)"}
 LEGEND = (
@@ -404,8 +406,23 @@ def _point_detail(p: Point) -> dict[str, Any]:
     return {"screen": p.screen, "x": p.x, "y": p.y, "gx": p.gx, "gy": p.gy}
 
 
-def _action_detail(loaded: _Loaded, a: MouseAction) -> dict[str, Any]:
+def _thin_path(points: list[Any], limit: int) -> list[Any]:
+    """At most ``limit`` points spread evenly over the path, the first and last kept."""
+    if limit < 2 or len(points) <= limit:
+        return points
+    step = (len(points) - 1) / (limit - 1)
+    return [points[round(i * step)] for i in range(limit)]
+
+
+def _action_detail(
+    loaded: _Loaded, a: MouseAction, max_path_points: int | None = None
+) -> dict[str, Any]:
     log = loaded.log
+    path = [_local(loaded, x, y) or {"gx": x, "gy": y} for x, y in a.path]
+    path_points = None
+    if max_path_points is not None and len(path) > max_path_points:
+        path_points = len(path)
+        path = _thin_path(path, max_path_points)
     data: dict[str, Any] = {
         "kind": a.kind,
         "t": a.t,
@@ -414,7 +431,8 @@ def _action_detail(loaded: _Loaded, a: MouseAction) -> dict[str, Any]:
         "clicks": a.clicks if a.kind != "drag" else None,
         "at": _point_detail(a.at),
         "end": _point_detail(a.end) if a.end else None,
-        "path": [_local(loaded, x, y) or {"gx": x, "gy": y} for x, y in a.path] or None,
+        "path": path or None,
+        "path_points": path_points,  # set when the path was thinned: its real point count
         "length_px": a.length_px or None,
         "axis": a.axis,
         "direction": a.direction,
@@ -440,10 +458,15 @@ def mouse_detail(
     manifest: dict[str, Any],
     window: Crop,
     at_ms: int | None = None,
+    max_path_points: int | None = None,
 ) -> dict[str, Any]:
     """Every mouse action (and rest point) in ``window`` with everything recorded about
     it; with ``at_ms`` only the action at that time (the time a timeline line starts
-    with, or the nearest one within AT_TOLERANCE_MS)."""
+    with, or the nearest one within AT_TOLERANCE_MS).
+
+    One action is bounded: names, ancestors and content are cut when recorded
+    (``core.input_events``); only the path of a very long drag is not, so
+    ``max_path_points`` thins it (``path_points`` then tells its real length)."""
     loaded = _load(paths, manifest)
     mouse = manifest.get("mouse") if isinstance(manifest.get("mouse"), dict) else None
     if loaded is None:
@@ -466,7 +489,7 @@ def mouse_detail(
         "range": window.to_dict(),
         "at_ms": at_ms,
         "params": loaded.params.to_dict(),
-        "actions": [_action_detail(loaded, a) for a in actions],
+        "actions": [_action_detail(loaded, a, max_path_points) for a in actions],
         "rest_points": [
             {
                 "t": h.t,
@@ -481,6 +504,7 @@ def mouse_detail(
 
 
 __all__ = [
+    "DETAIL_PATH_POINTS",
     "LEGEND",
     "MOUSE_MODES",
     "BUTTON_NAMES",

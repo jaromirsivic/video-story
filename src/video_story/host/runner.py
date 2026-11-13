@@ -36,12 +36,20 @@ from video_story.core.session import (
     write_state,
 )
 from video_story.core.transcript import format_segment_line, read_transcript, transcript_status
+from video_story.host.agent_output import DEFAULT_INLINE_CHARS, fits_inline
 from video_story.platform.process import gui_python, pid_alive, spawn_detached
 
 log = logging.getLogger(__name__)
 
 STARTUP_GRACE_S = 30.0
 POLL_INTERVAL_S = 0.5
+SUMMARY_MESSAGE_CHARS = 200  # `sessions`: a longer message is cut
+# `frames`: its JSON is shortened step by step while it is longer than this. `--window`
+# keeps the frames nearest to the moment; then the repeated shapes go, then a long
+# copied text is cut.
+FRAMES_MAX_CHARS = 20_000
+FRAMES_WINDOW_MAX = 24  # frames of `--window`, over all the selected screens
+FRAMES_CLIPBOARD_CHARS = 1_000
 
 
 class SessionError(RuntimeError):
@@ -195,6 +203,50 @@ def _processed_without_state(paths: SessionPaths) -> dict[str, Any]:
         frames_dir=str(paths.frames_dir(final)),
         frames_info_dir=str(paths.frames_info_dir(final)),
     ).to_dict()
+
+
+def session_summary(paths: SessionPaths) -> dict[str, Any]:
+    """What an agent needs to pick a recording (one entry of ``sessions``): a few short
+    fields, so twenty of them stay far below what a host cuts. ``status --session``
+    returns the full state."""
+    summary: dict[str, Any] = {"session_id": paths.session_id, "folder": paths.folder}
+    try:
+        state = session_status(paths)
+    except Exception as exc:  # noqa: BLE001 - one broken session must not hide the others
+        summary.update(status="unknown", message=str(exc)[:SUMMARY_MESSAGE_CHARS])
+        return summary
+    recording_dir = state.get("recording_dir")
+    started = state.get("recording_started_at")
+    updated = state.get("updated_at")
+    duration = state.get("recorded_duration_ms")
+    if "state_file" not in state:  # no state.json (its work directory is gone): the manifest
+        try:
+            manifest = json.loads(paths.manifest_path(paths.final_dir).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        started = manifest.get("started_at")
+        updated = manifest.get("finished_at")
+        duration = manifest.get("recorded_duration_ms")
+    archived = False
+    if recording_dir:
+        from video_story.core.archive_state import read_archive_state
+
+        archive = read_archive_state(paths, Path(recording_dir))
+        archived = bool(archive and archive.archived)
+    summary.update(
+        status=state.get("status"),
+        recording_dir=recording_dir,
+        recording_started_at=started,
+        recorded_duration_ms=duration,
+        updated_at=updated,
+        archived=archived,
+    )
+    # The message of a processed session only repeats the crop; elsewhere it says why.
+    if state.get("status") != str(Status.PROCESSED) and state.get("message"):
+        summary["message"] = str(state["message"])[:SUMMARY_MESSAGE_CHARS]
+    if state.get("error_code"):
+        summary["error_code"] = state["error_code"]
+    return summary
 
 
 def wait_for_session(paths: SessionPaths, timeout_s: float) -> dict[str, Any]:
@@ -420,24 +472,116 @@ def frames_at(
         ref = index.at(sid, at_ms)
         if ref is not None:
             result["frames"].append(ref.to_dict(include_drawings))
+    notes: list[str] = []
     if window_ms > 0:
-        result["window"] = {
-            sid: [
-                r.to_dict(include_drawings)
-                for r in index.window(sid, at_ms - window_ms, at_ms + window_ms)
-            ]
-            for sid in selected
-        }
+        per_screen = max(1, FRAMES_WINDOW_MAX // len(selected))
+        total = 0
+        result["window"] = {}
+        for sid in selected:
+            refs = index.window(sid, at_ms - window_ms, at_ms + window_ms)
+            total += len(refs)
+            if len(refs) > per_screen:  # the nearest ones, still in time order
+                nearest = sorted(refs, key=lambda r: abs(r.time_ms - at_ms))[:per_screen]
+                refs = sorted(nearest, key=lambda r: r.time_ms)
+            result["window"][sid] = [r.to_dict(include_drawings) for r in refs]
+        shown = sum(len(entries) for entries in result["window"].values())
+        if shown < total:
+            result["window_total"] = total
+            result["window_shown"] = shown
+            notes.append(
+                f"window lists the {per_screen} frames nearest to at_ms per screen ({shown} of "
+                f"{total}); use a smaller window or ask again around another time"
+            )
     if manifest is not None:
         result["screen_bounds"] = {s.id: s.to_manifest()["bounds"] for s in manifest.screens}
     archive = archive_info(paths, base)
     if archive is not None:
         result["archive"] = archive
+    notes += _shrink_frames(result)
+    result["truncated"] = bool(notes)
+    if notes:
+        result["truncated_note"] = "; ".join(notes) + "."
     return result
 
 
-def describe_recording(paths: SessionPaths) -> dict[str, Any]:
-    """Summary of a processed recording for agents (paths + transcript)."""
+def _without_drawings(entry: dict[str, Any]) -> bool:
+    """Replace the shapes of a frame entry by their ids (as ``--no-drawings`` does)."""
+    if "drawings" not in entry:
+        return False
+    drawings = entry.pop("drawings")
+    entry["drawing_ids"] = [d.get("id") for d in drawings if isinstance(d, dict)]
+    return True
+
+
+def _shrink_frames(result: dict[str, Any]) -> list[str]:
+    """Keep the result of :func:`frames_at` below ``FRAMES_MAX_CHARS``; returns what was
+    left out. A frame repeats every shape on the screen (a sketch has dozens) and may
+    carry a copied text of 64 KB, so the size does not follow from the frame count."""
+
+    def too_long() -> bool:
+        return len(json.dumps(result, ensure_ascii=False, default=str)) > FRAMES_MAX_CHARS
+
+    notes: list[str] = []
+    window = [entry for entries in (result.get("window") or {}).values() for entry in entries]
+    steps = (
+        (
+            window,
+            _without_drawings,
+            "window frames list drawing_ids instead of the shapes",
+        ),
+        (
+            window,
+            _slim_window_entry,
+            "window frames carry only time, image, sidecar and cursor",
+        ),
+        (
+            result["frames"],
+            _without_drawings,
+            "frames list drawing_ids instead of the shapes (the timeline describes them, "
+            "the sidecar has their geometry)",
+        ),
+        (
+            result["frames"],
+            _cut_clipboard,
+            f"clipboard is cut at {FRAMES_CLIPBOARD_CHARS} characters (clipboard_chars is "
+            "its length, the sidecar has all of it)",
+        ),
+    )
+    for entries, change, note in steps:
+        if not too_long():
+            break
+        if sum(change(entry) for entry in entries):
+            notes.append(note)
+    return notes
+
+
+def _slim_window_entry(entry: dict[str, Any]) -> bool:
+    kept = {k: entry[k] for k in ("screen", "time_ms", "image", "sidecar", "cursor")}
+    if len(kept) == len(entry):
+        return False
+    entry.clear()
+    entry.update(kept)
+    return True
+
+
+def _cut_clipboard(entry: dict[str, Any]) -> bool:
+    text = entry.get("clipboard")
+    if not isinstance(text, str) or len(text) <= FRAMES_CLIPBOARD_CHARS:
+        return False
+    entry["clipboard_chars"] = len(text)
+    entry["clipboard"] = text[:FRAMES_CLIPBOARD_CHARS] + "..."
+    return True
+
+
+def describe_recording(
+    paths: SessionPaths, inline_chars: int = DEFAULT_INLINE_CHARS
+) -> dict[str, Any]:
+    """Summary of a processed recording for agents: paths, manifest, crop, instructions.
+
+    The size does not grow with the recording: the transcript of the cropped range
+    (``transcript_in_range``) is included only when it has at most ``inline_chars``
+    characters; otherwise a note points to the transcript files and the timeline.
+    """
     base = paths.current_dir
     manifest_path = paths.manifest_path(base)
     data: dict[str, Any] = {
@@ -473,9 +617,6 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
             "The transcript is incomplete (the editor transcribes in the background); "
             f"segments reach {status.transcribed_ms} ms. `video-story transcribe` completes it."
         )
-    txt = paths.transcript_txt_path(base)
-    if txt.exists():
-        data["transcript"] = txt.read_text(encoding="utf-8")
     json_path = paths.transcript_json_path(base)
     if json_path.exists():
         try:
@@ -485,7 +626,19 @@ def describe_recording(paths: SessionPaths) -> dict[str, Any]:
         if transcript is not None:
             segments = transcript.segments_in_range(crop.start_ms, crop.end_ms)
             lines = [format_segment_line(s) for s in segments]
-            data["transcript_in_range"] = "\n".join(lines) + ("\n" if lines else "")
+            chars = sum(len(line) + 1 for line in lines)
+            inline = fits_inline(lines, inline_chars) or not lines
+            data["transcript_in_range_lines"] = len(lines)
+            data["transcript_in_range_chars"] = chars
+            data["transcript_in_range_inline"] = inline
+            if inline:
+                data["transcript_in_range"] = "\n".join(lines) + ("\n" if lines else "")
+            else:
+                data["transcript_in_range_note"] = (
+                    f"The transcript of the cropped range ({len(lines)} lines, {chars} "
+                    "characters) is not inline: read the file `transcript_txt` (the whole "
+                    "recording, one segment per line) or use `timeline`."
+                )
     return data
 
 
@@ -504,5 +657,6 @@ __all__ = [
     "launch_control_window",
     "resolve_session",
     "session_status",
+    "session_summary",
     "wait_for_session",
 ]

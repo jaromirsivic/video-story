@@ -39,11 +39,17 @@ def replace_with_retry(
             time.sleep(delay)
 
 
-def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
-    """Write ``text`` to ``path`` through a ``.tmp`` sibling and an atomic rename."""
+def atomic_write_text(
+    path: Path, text: str, encoding: str = "utf-8", newline: str | None = None
+) -> None:
+    """Write ``text`` to ``path`` through a ``.tmp`` sibling and an atomic rename.
+
+    ``newline`` is passed to ``open``: ``"\\n"`` keeps LF line ends on Windows too (the
+    default translates them to the platform's).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding=encoding)
+    tmp.write_text(text, encoding=encoding, newline=newline)
     try:
         replace_with_retry(tmp, path)
     except OSError:

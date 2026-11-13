@@ -8,7 +8,7 @@ Layout inside the Recording Folder::
         state.json, lock, ui.log, recording.log, audio/, frames/, frames_info/
       <folder>/<session_id>/   # once the recording was saved (Stop, auto stop, recovery)
         manifest.json, transcript.txt, transcript.json, recording.log, crop.json,
-        instructions.txt, audio/, frames/, frames_info/, input/, archive/
+        instructions.txt, audio/, frames/, frames_info/, input/, archive/, agent/
 
 ``<folder>`` is ``default`` (always there) or a folder the user created in the editor
 (:mod:`video_story.core.folders`). A recording is saved into the *main* folder; the user
@@ -29,6 +29,11 @@ with a still ``<screenId>.jpg`` and subtitles ``<screenId>.srt``, then deletes
 ``input/mouse.jsonl`` holds the mouse actions and the elements under the mouse (see
 :mod:`video_story.core.input_events`); it exists only when Mouse was switched on and the
 platform could record it. Archiving keeps it.
+
+``agent/`` holds only files derived for agents (``timeline.txt``, ``mouse.jsonl``: the
+output of the ``timeline`` and ``mouse`` commands, see :mod:`video_story.host.agent_output`).
+Every call rewrites them, so they are safe to lose: moving a recording to another folder
+carries them along, finalisation drops the ones written into the work directory.
 
 ``state.json``, ``lock`` and ``ui.log`` never leave the work directory: ``state.json`` is
 the agent's contract, and ``ui.log`` is the stdout/stderr of the detached window process,
@@ -65,6 +70,7 @@ AUDIO_TRACKS_FILE_NAME = "tracks.json"  # which audio tracks are switched on
 ARCHIVE_DIR_NAME = "archive"
 INPUT_DIR_NAME = "input"
 MOUSE_FILE_NAME = "mouse.jsonl"  # mouse actions, elements under the mouse
+AGENT_DIR_NAME = "agent"  # files derived for agents (timeline.txt, ...), rewritten by each call
 STATE_FILE_NAME = "state.json"
 LOCK_FILE_NAME = "lock"
 LOG_FILE_NAME = "recording.log"
@@ -227,6 +233,10 @@ class SessionPaths:
     def archive_dir(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / ARCHIVE_DIR_NAME
 
+    def agent_dir(self, base: Path | None = None) -> Path:
+        """Files derived for agents (``agent/``): rewritten by each call, safe to lose."""
+        return (base or self.current_dir) / AGENT_DIR_NAME
+
     def log_path(self, base: Path | None = None) -> Path:
         return (base or self.current_dir) / LOG_FILE_NAME
 
@@ -283,6 +293,11 @@ class SessionPaths:
         for entry in entries:
             if entry.name.endswith(".tmp"):
                 continue  # leftover of an interrupted atomic write
+            if entry.name == AGENT_DIR_NAME:
+                # Derived files an agent may be reading right now: an open file must
+                # not stop the move, and the next `timeline` call writes them again.
+                shutil.rmtree(entry, ignore_errors=True)
+                continue
             _replace_with_retry(entry, final / entry.name)
         return final
 
@@ -405,6 +420,7 @@ def list_sessions(recording_folder: Path) -> list[SessionPaths]:
 
 
 __all__ = [
+    "AGENT_DIR_NAME",
     "ARCHIVE_DIR_NAME",
     "AUDIO_16K_FILE_NAME",
     "AUDIO_DIR_NAME",

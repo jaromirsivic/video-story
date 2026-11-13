@@ -18,7 +18,9 @@ The skill directory contains `scripts/video-story.cmd` (Windows) and
 `scripts/video-story.sh` (Linux, macOS). Call them with an absolute path; they run the
 plugin through `uv` (the first run creates the environment, which can take a minute).
 Every command prints one JSON object on stdout; errors are a JSON object on stderr with
-`code` and `message` and a non-zero exit code.
+`code` and `message` and a non-zero exit code. `ROOT_NOT_FOUND`: the launcher could not
+find the plugin directory - set the environment variable `VIDEO_STORY_ROOT` to the
+repository path, or reinstall the skill link.
 
 ```text
 <skill-dir>\scripts\video-story.cmd run --detach
@@ -101,7 +103,7 @@ suggest: read them before anything else, keep them in mind for every request you
 out, and let them shape the result (its form, language, scope). An empty string means
 the user typed none; then the speech alone is your brief.
 
-**Step 2 - the timeline.** One call returns the whole part to act on as text:
+**Step 2 - the timeline.** One call gives the whole part to act on as text:
 
 ```text
 <launcher> timeline --session <session_id>
@@ -109,8 +111,18 @@ the user typed none; then the speech alone is your brief.
 
 `crop` is the part of the recording the user wants you to act on (the whole recording
 unless they cropped it in the editor); `timeline` covers exactly that range
-(`--start-ms`/`--end-ms` or `--all` change it). Its `timeline` field holds one event per
-line, ordered by time in milliseconds since the recording started:
+(`--start-ms`/`--end-ms` or `--all` change it). Where the text is:
+
+- `timeline_inline` true (a short recording, up to 12000 characters): in the `timeline`
+  field.
+- `timeline_inline` false: there is no `timeline` field. Read the file `timeline_file`
+  with your file reading tool - all `timeline_lines` lines of it before you act. It is
+  plain UTF-8 text, so it can be read in parts and searched.
+- If you can only read files inside your workspace, add `--out <path in the workspace>`.
+  `--inline-chars N` changes the limit (`0`: never inline). `timeline_file: null`: the
+  file could not be written and the text is inline (`timeline_note` says why).
+
+One event per line, ordered by time in milliseconds since the recording started:
 
 ```text
 0 START cursor screen1 2208,202
@@ -226,7 +238,11 @@ the drag path - is in:
 <launcher> mouse --session <session_id> --at <ms>
 ```
 
-(`--at` is the time a mouse line starts with; without it every action of the range).
+(`--at` is the time a mouse line starts with.) Without `--at` every action and rest
+point of the range is written to the file `mouse_file` (JSON Lines in time order, a
+rest point has `kind: "rest"`; search it for `"t": <ms>`), with `--out` and
+`--inline-chars` as for `timeline`; `actions` and `rest_points` are in the result only
+when `mouse_inline` is true.
 
 **Step 3 - pick the moments that need a picture.** Read the whole timeline once, work
 out what the user asks for and list the requests in order. For each, decide whether the
@@ -254,7 +270,9 @@ dialog here", the look of something). Skip the rest.
   `{screen, x, y}`), plus `shift`, `closed`, `group`, `segment` and `part_of` when they
   apply (see `DRAW`).
 - Avoid `--screen all` and `--window` unless one image does not settle it; they list
-  many frames.
+  many frames. `--window` lists at most 24 frames (the nearest ones), and a result
+  that would get too long is shortened: `truncated` true, `truncated_note` says what
+  was left out (shapes, a long `clipboard`) - the frame's sidecar has it.
 
 Frames are named `<seconds>_<millis>_<screenId>.<png|jpg>` in `frames_dir`; their
 sidecars `<same>.json` lie in `frames_info_dir` (`frames_info/`), the microphone in
@@ -270,8 +288,10 @@ recording older than `archive_after_days`) has no frame images and no audio any 
 them; `timeline` still works (sidecars and transcript stay), `frames` returns
 `image: null`, and `describe`/`timeline`/`frames` carry an `archive` object with the
 paths. `describe --session <session_id>` returns the paths, the
-manifest (screens, capture interval, keypoints), `instructions`, the whole transcript and
-`transcript_in_range`; you rarely need it next to `timeline`.
+manifest (screens, capture interval, keypoints), `instructions` and, only when it is
+short, the transcript of the cropped range (`transcript_in_range`; otherwise
+`transcript_in_range_note`). The whole transcript is the file `transcript_txt`. You
+rarely need `describe` next to `timeline`.
 
 ## 5. Act
 
@@ -303,7 +323,9 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
   recording, when the user asks you to work with a recording whose transcript is not
   complete (`describe` and `timeline` report `transcript_complete` false with a
   `transcript_note`).
-- `sessions` - recent sessions; `status --session <id>` - one session.
+- `sessions` - the recent sessions, newest first, one short entry each (id, status,
+  folder, `recording_dir`, start, duration, `archived`; `--limit N`, default 20);
+  `status --session <id>` - the full state of one session.
 - `mcp` - run the MCP server (stdio by default) for hosts without shell access.
 
 ## Limits

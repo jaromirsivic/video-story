@@ -26,7 +26,12 @@ from video_story.core.manifest import MouseInfo, read_manifest, write_manifest
 from video_story.core.session import SessionPaths
 from video_story.core.transcript import Segment
 from video_story.host import mouse_timeline
-from video_story.host.events import build_mouse_detail, build_timeline
+from video_story.host.events import (
+    build_mouse_detail,
+    build_timeline,
+    mouse_record_lines,
+    mouse_records,
+)
 
 PARAMS = MouseSystemParams(480, (4, 4), (4, 4))
 LONG = "Dlouhý odstavec dokumentu. " * 30  # 810 characters
@@ -274,3 +279,38 @@ def test_held_injected_and_modifiers_are_noted(tmp_path: Path):
         paths.mouse_log_path(paths.final_dir).read_text(encoding="utf-8").splitlines()[-1]
     )
     assert raw["type"] == "up"
+
+
+def test_a_long_drag_path_is_thinned_only_where_no_file_takes_it(tmp_path: Path):
+    paths, m = recording(tmp_path)
+    m.button("down", 1000, 0, 0)
+    for i in range(1, 60):  # a zigzag: every point survives the simplification
+        x, y = i, (i % 2) * 40
+        m.writer.write(MoveRecord(t=1000 + i * 20, screen="screen1", x=x, y=y, gx=x, gy=y))
+    m.button("up", 2300, 60, 0)
+    m.close()
+
+    (full,) = build_mouse_detail(paths, at_ms=1000)["actions"]
+    assert len(full["path"]) > 50 and "path_points" not in full
+    (thin,) = build_mouse_detail(paths, at_ms=1000, max_path_points=10)["actions"]
+    assert len(thin["path"]) == 10 and thin["path_points"] == len(full["path"])
+    assert thin["path"][0] == full["path"][0] and thin["path"][-1] == full["path"][-1]
+    assert thin["length_px"] == full["length_px"]  # measured on the whole path
+    assert mouse_timeline._thin_path([1, 2, 3], 5) == [1, 2, 3]
+    assert mouse_timeline._thin_path(list(range(11)), 3) == [0, 5, 10]
+
+
+def test_mouse_records_merge_actions_and_rest_points_by_time():
+    detail = {
+        "actions": [{"kind": "click", "t": 10}, {"kind": "scroll", "t": 30}],
+        "rest_points": [{"t": 5, "at": {}}, {"t": 30, "at": {}}],
+    }
+    records = mouse_records(detail)
+    assert [(r["kind"], r["t"]) for r in records] == [
+        ("rest", 5),
+        ("click", 10),
+        ("scroll", 30),  # an action before a rest point of the same time
+        ("rest", 30),
+    ]
+    assert mouse_record_lines(records)[0] == '{"kind": "rest", "t": 5, "at": {}}'
+    assert mouse_records({"actions": [], "rest_points": []}) == []

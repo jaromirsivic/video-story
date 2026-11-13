@@ -7,7 +7,10 @@ Every tool
 returns a JSON-serialisable dict; expected failures are reported as
 ``{"ok": false, "code": ..., "message": ...}`` instead of raising, so the agent can read
 the reason and react. ``get_frame`` additionally returns the screenshot as MCP image
-content so chat hosts without file access can look at it.
+content so chat hosts without file access can look at it. For the same reason a text
+that grows with the recording (``timeline``, ``mouse``, ``get_transcript``) comes in pages
+(``first_line`` / ``max_chars`` / ``next_line``, see :mod:`video_story.host.agent_output`)
+where the CLI writes a file: no tool result is unbounded.
 
 The plain ``tool_*`` functions hold the behaviour and are unit tested directly;
 :func:`create_server` wraps them into an :class:`MCPServer` and :func:`serve` runs it
@@ -36,7 +39,21 @@ from video_story.core.config import (
 )
 from video_story.core.naming import parse_frame_filename
 from video_story.core.session import SessionPaths
-from video_story.host.events import build_mouse_detail, build_timeline
+from video_story.host.agent_output import (
+    DEFAULT_INLINE_CHARS,
+    PAGE_DEFAULT_CHARS,
+    Page,
+    clamp_page_chars,
+    page_lines,
+    split_lines,
+)
+from video_story.host.events import (
+    build_mouse_detail,
+    build_timeline,
+    mouse_record_lines,
+    mouse_records,
+)
+from video_story.host.mouse_timeline import DETAIL_PATH_POINTS
 from video_story.host.runner import (
     POLL_INTERVAL_S,
     FrameRef,
@@ -73,7 +90,10 @@ status is "processed", read the "instructions" first, then call video_story_time
 cropped range as one text timeline (speech with the cursor position, finished drawings
 with their geometry and times, copied text, keypoints and - when recorded - the clicks,
 drags and scrolls with the element under the mouse and its content; video_story_mouse
-has every detail of them). Decide from that text which
+has every detail of them). Long results come in pages (video_story_timeline,
+video_story_mouse, video_story_get_transcript): while "next_line" is not null, call the
+tool again with first_line set to it and read every page before acting. Decide from
+that text which
 moments really need a picture and only then call video_story_get_frame for those (one
 frame each, at the times the timeline names); video_story_describe and
 video_story_get_transcript return paths and the plain transcript. Act on a recording only
@@ -139,6 +159,22 @@ def clamp_timeout(timeout_s: float) -> float:
     except (TypeError, ValueError):
         value = 60.0
     return max(WAIT_TIMEOUT_MIN_S, min(WAIT_TIMEOUT_MAX_S, value))
+
+
+def _page_fields(page: Page, total_name: str, tool: str) -> dict[str, Any]:
+    """What every paged tool says about its page: the total, where the page starts and
+    where the next one does (``next_line`` null: this page ends the text)."""
+    fields: dict[str, Any] = {
+        total_name: page.total_lines,
+        "first_line": page.first_line,
+        "next_line": page.next_line,
+    }
+    if page.next_line is not None:
+        fields["page_note"] = (
+            f"Lines {page.first_line}-{page.last_line} of {page.total_lines}: call {tool} "
+            f"again with first_line={page.next_line} and the same other arguments for the rest."
+        )
+    return fields
 
 
 def _coerce_config_value(value: str | None) -> Any:
@@ -228,37 +264,68 @@ def tool_status(session_id: str, config_file: Path | None = None) -> dict[str, A
     return _guard(lambda: session_status(_paths(_load(config_file), session_id)))
 
 
-def tool_describe(session_id: str, config_file: Path | None = None) -> dict[str, Any]:
-    """Paths, manifest content and transcript text of a recording."""
-    return _guard(lambda: describe_recording(_paths(_load(config_file), session_id)))
+def tool_describe(
+    session_id: str, config_file: Path | None = None, inline_chars: int = DEFAULT_INLINE_CHARS
+) -> dict[str, Any]:
+    """Paths, manifest content, crop and instructions of a recording; the transcript of
+    the cropped range only when it has at most ``inline_chars`` characters (the paged
+    tools have a long one)."""
+
+    def run() -> dict[str, Any]:
+        data = describe_recording(_paths(_load(config_file), session_id), inline_chars)
+        if "transcript_in_range_note" in data:
+            data["transcript_in_range_note"] = (
+                f"The transcript of the cropped range ({data['transcript_in_range_lines']} "
+                f"lines, {data['transcript_in_range_chars']} characters) is not inline: call "
+                "video_story_timeline (or video_story_get_transcript), which return it in pages."
+            )
+        return data
+
+    return _guard(run)
 
 
 def tool_get_transcript(
-    session_id: str, format: str = "text", config_file: Path | None = None
+    session_id: str,
+    format: str = "text",
+    config_file: Path | None = None,
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
 ) -> dict[str, Any]:
-    """The transcript as plain text (``text``) or as timed segments (``json``)."""
+    """The transcript as plain text (``text``) or as timed segments (``json``), one page
+    of at most ``max_chars`` characters from line (segment) ``first_line``."""
 
     def run() -> dict[str, Any]:
         paths = _paths(_load(config_file), session_id)
         base = paths.current_dir
+        limit = clamp_page_chars(max_chars)
         if format == "json":
             path = paths.transcript_json_path(base)
             if not path.exists():
                 raise SessionError("NO_TRANSCRIPT", f"no transcript.json in {base}")
             data = json.loads(path.read_text(encoding="utf-8"))
+            segments = data.get("segments", [])
+            page = page_lines(
+                [json.dumps(s, ensure_ascii=False) for s in segments], first_line, limit
+            )
             return {
                 "session_id": paths.session_id,
                 "language": data.get("language"),
                 "model": data.get("model"),
                 "backend": data.get("backend"),
                 "time_unit": data.get("time_unit", "ms since recording start"),
-                "segments": data.get("segments", []),
+                **_page_fields(page, "transcript_lines", "video_story_get_transcript"),
+                "segments": segments[page.first_line - 1 : page.last_line],
             }
         if format == "text":
             path = paths.transcript_txt_path(base)
             if not path.exists():
                 raise SessionError("NO_TRANSCRIPT", f"no transcript.txt in {base}")
-            return {"session_id": paths.session_id, "text": path.read_text(encoding="utf-8")}
+            page = page_lines(split_lines(path.read_text(encoding="utf-8")), first_line, limit)
+            return {
+                "session_id": paths.session_id,
+                **_page_fields(page, "transcript_lines", "video_story_get_transcript"),
+                "text": page.text,
+            }
         raise SessionError("USAGE", f"unknown format {format!r}; use 'text' or 'json'")
 
     return _guard(run)
@@ -270,11 +337,24 @@ def tool_timeline(
     end_ms: int | None = None,
     config_file: Path | None = None,
     mouse: str = "auto",
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
 ) -> dict[str, Any]:
-    """Speech and screen events of the cropped range (or ``start_ms``..``end_ms``)."""
-    return _guard(
-        lambda: build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms, mouse)
-    )
+    """Speech and screen events of the cropped range (or ``start_ms``..``end_ms``), one
+    page of at most ``max_chars`` characters from line ``first_line`` (whole lines only)."""
+
+    def run() -> dict[str, Any]:
+        result = build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms, mouse)
+        lines = split_lines(result.pop("timeline"))
+        page = page_lines(lines, first_line, clamp_page_chars(max_chars))
+        if page.first_line > 1:
+            result.pop("legend", None)  # the first page explained the lines
+        result["timeline_chars"] = page.total_chars
+        result.update(_page_fields(page, "timeline_lines", "video_story_timeline"))
+        result["timeline"] = page.text
+        return result
+
+    return _guard(run)
 
 
 def tool_mouse(
@@ -283,11 +363,33 @@ def tool_mouse(
     start_ms: int | None = None,
     end_ms: int | None = None,
     config_file: Path | None = None,
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
 ) -> dict[str, Any]:
-    """Every detail of the mouse actions of the cropped range, or of the one at ``at_ms``."""
-    return _guard(
-        lambda: build_mouse_detail(_paths(_load(config_file), session_id), start_ms, end_ms, at_ms)
-    )
+    """Every detail of the one mouse action at ``at_ms``, or - page by page, in time
+    order - of the actions and rest points of the cropped range."""
+
+    def run() -> dict[str, Any]:
+        detail = build_mouse_detail(
+            _paths(_load(config_file), session_id),
+            start_ms,
+            end_ms,
+            at_ms,
+            max_path_points=DETAIL_PATH_POINTS,
+        )
+        if at_ms is not None or not detail.get("recorded"):
+            return detail
+        records = mouse_records(detail)
+        page = page_lines(mouse_record_lines(records), first_line, clamp_page_chars(max_chars))
+        shown = records[page.first_line - 1 : page.last_line]
+        detail["action_count"] = len(detail["actions"])
+        detail["rest_point_count"] = len(detail["rest_points"])
+        detail.update(_page_fields(page, "mouse_lines", "video_story_mouse"))
+        detail["actions"] = [r for r in shown if r.get("kind") != "rest"]
+        detail["rest_points"] = [r for r in shown if r.get("kind") == "rest"]
+        return detail
+
+    return _guard(run)
 
 
 def tool_list_frames(
@@ -599,21 +701,32 @@ def create_server(config_file: Path | None = None) -> MCPServer:
 
     def video_story_describe(session_id: str) -> dict[str, Any]:
         """Paths, manifest content (screens, duration, capture interval, keypoints), the
-        full transcript text, the stored crop {start_ms, end_ms}, transcript_in_range
-        (only the segments inside the crop) and "instructions" (the user's master
-        instructions for the whole recording, "" when none) of a processed recording."""
+        stored crop {start_ms, end_ms} and "instructions" (the user's master
+        instructions for the whole recording, "" when none) of a processed recording.
+        transcript_in_range (the segments inside the crop) is included only when it is
+        short (transcript_in_range_inline); otherwise transcript_in_range_note says
+        which paged tool to call."""
         return tool_describe(session_id, config_file)
 
-    def video_story_get_transcript(session_id: str, format: str = "text") -> dict[str, Any]:
-        """The transcript: format "text" returns timestamped lines, "json" returns
-        segments with start_ms, end_ms and text."""
-        return tool_get_transcript(session_id, format, config_file)
+    def video_story_get_transcript(
+        session_id: str,
+        format: str = "text",
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
+    ) -> dict[str, Any]:
+        """The transcript of the whole recording: format "text" returns timestamped
+        lines, "json" returns segments with start_ms, end_ms and text. Paged: at most
+        max_chars characters from line (segment) first_line; transcript_lines is the
+        total, next_line the first_line of the next call (null: complete)."""
+        return tool_get_transcript(session_id, format, config_file, first_line, max_chars)
 
     def video_story_timeline(
         session_id: str,
         start_ms: int | None = None,
         end_ms: int | None = None,
         mouse: str = "auto",
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
     ) -> dict[str, Any]:
         """Read this first after the instructions: the whole cropped range as one text
         timeline (no images). Lines: SAY (speech with the cursor screen and position),
@@ -624,21 +737,33 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         and its content (and "over ..." in SAY: what the pointer rested on). Times are
         ms; pass them to video_story_get_frame only where the words and coordinates are
         not enough. start_ms / end_ms override the crop; mouse is auto, full, summary
-        (scrolls merged per 10 s) or off."""
-        return tool_timeline(session_id, start_ms, end_ms, config_file, mouse)
+        (scrolls merged per 10 s) or off. Paged: "timeline" holds whole lines from
+        first_line (1-based), at most max_chars characters (1000..100000, default
+        20000); timeline_lines is the total. While next_line is not null the timeline
+        is incomplete: call again with first_line = next_line and the same other
+        arguments until it is null, before you act (the legend comes with the first
+        page only)."""
+        return tool_timeline(
+            session_id, start_ms, end_ms, config_file, mouse, first_line, max_chars
+        )
 
     def video_story_mouse(
         session_id: str,
         at_ms: int | None = None,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
     ) -> dict[str, Any]:
         """Everything recorded about the mouse actions the timeline lists: the element
         (role, name, bounds in pixels of the screen image, ancestors, window), its whole
-        content up to 4096 characters, the selection, drag paths. at_ms (the time a
-        timeline line starts with) returns that one action; without it every action of
-        the cropped range (start_ms / end_ms override the crop)."""
-        return tool_mouse(session_id, at_ms, start_ms, end_ms, config_file)
+        content up to 4096 characters, the selection, drag paths (at most 200 points;
+        path_points is the real count). at_ms (the time a timeline line starts with)
+        returns that one action - prefer it. Without it the actions and rest points of
+        the cropped range (start_ms / end_ms override the crop) come in time order page
+        by page: first_line / max_chars / next_line work as in video_story_timeline,
+        action_count and rest_point_count are the totals."""
+        return tool_mouse(session_id, at_ms, start_ms, end_ms, config_file, first_line, max_chars)
 
     def video_story_list_frames(
         session_id: str,
@@ -649,9 +774,11 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     ) -> dict[str, Any]:
         """Screenshots taken at at_ms (latest frame at or before it). screen: "cursor"
         (the screen the cursor was on), "all" or a screen id like "screen2"; window_ms > 0
-        also lists every frame within at_ms +/- window_ms. Returns paths and cursor
-        positions, not images: use video_story_get_frame to see one. include_drawings
-        false lists only the drawing ids per frame (video_story_timeline has the shapes)."""
+        also lists the frames within at_ms +/- window_ms (at most 24, the nearest ones).
+        Returns paths and cursor positions, not images: use video_story_get_frame to see
+        one. include_drawings false lists only the drawing ids per frame
+        (video_story_timeline has the shapes). "truncated" true: the result was
+        shortened to stay small, truncated_note says how."""
         return tool_list_frames(session_id, at_ms, screen, window_ms, config_file, include_drawings)
 
     def video_story_get_frame(

@@ -62,6 +62,7 @@ state = archive_recording(
     Config(recording_folder=final.parent),
     progress=lambda f, _t: emit({"event": "progress", "phase": "archiving", "fraction": f}),
     exporter=exporter,
+    verifier=lambda *args: None,  # the stand-in MP4 is not a video
 )
 emit({"event": "done", "status": str(state.status), "leftovers": state.leftovers, "ok": True})
 """
