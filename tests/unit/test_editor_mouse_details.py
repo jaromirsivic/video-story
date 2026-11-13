@@ -24,7 +24,7 @@ from video_story.core.input_events import (  # noqa: E402
 )
 from video_story.core.naming import sidecar_filename  # noqa: E402
 from video_story.core.screens import RawScreen, assign_screen_ids  # noqa: E402
-from video_story.editor.mouse_activity import PRESSED_FILL, WHEEL_FILL  # noqa: E402
+from video_story.editor.mouse_activity import PRESSED_FILL  # noqa: E402
 from video_story.editor.mouse_details import (  # noqa: E402
     NOW_MARK,
     ClipboardChange,
@@ -217,8 +217,8 @@ def test_dialog_fills_every_field_and_colours_held_buttons(qtbot):
     assert dialog.button_boxes["left"].text() == "Left\n0.5 s"
     assert PRESSED_FILL not in dialog.button_boxes["right"].styleSheet()
     dialog.show_moment(details().at(3050))
-    assert WHEEL_FILL in dialog.wheel_arrows["down"].styleSheet()
-    assert WHEEL_FILL not in dialog.wheel_arrows["up"].styleSheet()
+    assert PRESSED_FILL in dialog.wheel_arrows["down"].styleSheet()  # red, not yellow
+    assert PRESSED_FILL not in dialog.wheel_arrows["up"].styleSheet()
     assert PRESSED_FILL not in dialog.button_boxes["left"].styleSheet()
     dialog.show_message(LOADING)
     assert dialog.where_label.text() == LOADING

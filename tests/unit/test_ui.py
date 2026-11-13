@@ -731,10 +731,14 @@ def test_drawings_are_cleared_when_drawing_mode_ends(qtbot, controller):
         real_hide = overlay.hide
         overlay.hide = lambda: (hidden_with.append(len(overlay.shapes())), real_hide())
         overlay._user_close()  # Esc / Close / the cross
-        assert hidden_with == [0]  # cleared while still shown, then hidden
+        assert overlay.shapes() == [] and overlay.leaving  # cleared at once
+        qtbot.waitUntil(lambda: hidden_with == [0], timeout=2000)  # hidden after the flash
         assert not w.draw_button.isChecked()
         w.draw_button.click()
         assert overlay.is_visible() and overlay.shapes() == []
+        w.draw_button.click()  # Draw / Ctrl+Space ends drawing with the green flash too
+        assert not overlay.is_visible() and overlay.leaving
+        qtbot.waitUntil(lambda: not overlay.leaving, timeout=2000)
     finally:
         w._close_overlay()  # its application-wide shortcuts must not outlive the test
         w._done = True

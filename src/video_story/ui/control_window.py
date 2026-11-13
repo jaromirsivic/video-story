@@ -675,9 +675,11 @@ class ControlWindow(QWidget):
                 self.raise_()
         elif self._overlay is not None:
             # Clear while the overlay is still shown: hiding then paints it empty, so the
-            # old shapes do not flash when drawing starts again.
+            # old shapes do not flash when drawing starts again. leave() flashes the
+            # border green before the overlay disappears.
             self._clear_overlay()
-            self._overlay.hide()  # type: ignore[attr-defined]
+            leave = getattr(self._overlay, "leave", None) or self._overlay.hide  # type: ignore[attr-defined]
+            leave()
 
     def _apply_drawing_grid(self) -> None:
         """The grid spacing Ctrl snaps to while drawing (Settings > Drawing Grid)."""

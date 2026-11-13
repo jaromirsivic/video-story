@@ -26,7 +26,10 @@ from video_story.editor.recordings_view import (  # noqa: E402
     RecordingDelegate,
 )
 from video_story.editor.window import (  # noqa: E402
+    COLLAPSE_ALL_LABEL,
     DELETE_FOLDER_LABEL,
+    EXPAND_ALL_LABEL,
+    FOLDERS_MENU_TEXT,
     MOVE_DOWN_LABEL,
     MOVE_UP_LABEL,
     SET_MAIN_LABEL,
@@ -111,6 +114,29 @@ def test_clicking_a_header_collapses_and_it_is_remembered(editor, qtbot, folder)
     second.list_view.setCurrentIndex(second.recordings.index(second.recordings.row_of(OLDER)))
     assert not second.recordings.is_collapsed("Clients")
     assert not second.list_view.isRowHidden(second.recordings.row_of(OLDER))
+
+
+def test_collapse_all_and_expand_all_from_the_dots_menu(editor, folder):
+    button = editor.folders_menu_button
+    assert button.text() == FOLDERS_MENU_TEXT and button.isVisible()
+    menu = button.menu()
+    actions = _actions(menu)
+    assert list(actions) == [COLLAPSE_ALL_LABEL, EXPAND_ALL_LABEL]
+    menu.aboutToShow.emit()
+    assert actions[COLLAPSE_ALL_LABEL].isEnabled() and not actions[EXPAND_ALL_LABEL].isEnabled()
+    actions[COLLAPSE_ALL_LABEL].trigger()
+    model, view = editor.recordings, editor.list_view
+    assert all(model.is_collapsed(name) for name in ("default", "Clients"))
+    assert all(view.isRowHidden(model.row_of(s)) for s in (THIRD, NEWEST, OLDER))
+    assert not view.isRowHidden(0) and not view.isRowHidden(model.header_row("Clients"))
+    stored = json.loads((folder / "folders.json").read_text(encoding="utf-8"))["collapsed"]
+    assert stored == ["default", "Clients"]
+    menu.aboutToShow.emit()
+    assert not actions[COLLAPSE_ALL_LABEL].isEnabled() and actions[EXPAND_ALL_LABEL].isEnabled()
+    actions[EXPAND_ALL_LABEL].trigger()
+    assert not any(model.is_collapsed(name) for name in ("default", "Clients"))
+    assert not any(view.isRowHidden(model.row_of(s)) for s in (THIRD, NEWEST, OLDER))
+    assert json.loads((folder / "folders.json").read_text(encoding="utf-8"))["collapsed"] == []
 
 
 def test_pin_tooltips_and_a_click_on_the_pin(editor, qtbot):

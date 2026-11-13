@@ -66,8 +66,8 @@ class MouseWidget(QWidget):
 
     def _update_tooltip(self) -> None:
         self.setToolTip(
-            "Mouse at the playhead: a pressed button is red, a turning wheel and its"
-            " direction yellow. Click for everything recorded about it."
+            "Mouse at the playhead: a pressed button, a turning wheel and its"
+            " direction are red. Click for everything recorded about it."
             if self._recorded
             else "Mouse actions were not recorded. Click for the clipboard."
         )

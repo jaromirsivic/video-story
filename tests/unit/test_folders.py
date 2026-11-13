@@ -122,6 +122,15 @@ def test_collapsed_folders_are_remembered(tmp_path: Path):
     assert not fo.load_folders(tmp_path).is_collapsed("A")
 
 
+def test_collapse_all_and_expand_all(tmp_path: Path):
+    _folders(tmp_path, "A", "B")
+    state = fo.set_all_collapsed(tmp_path, True)
+    assert state.collapsed == ["default", "A", "B"]
+    assert fo.load_folders(tmp_path).collapsed == ["default", "A", "B"]
+    assert fo.set_all_collapsed(tmp_path, False).collapsed == []
+    assert fo.load_folders(tmp_path).collapsed == []
+
+
 def test_the_file_is_checked_against_the_disk(tmp_path: Path):
     for name in ("zeta", "Alpha", ".hidden"):
         (tmp_path / name).mkdir()

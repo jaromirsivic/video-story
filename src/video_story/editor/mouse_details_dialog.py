@@ -6,7 +6,7 @@ red line. Panels from top to bottom, each across the whole width, short fields s
 side inside a panel and multi-line fields across it (see :mod:`.mouse_details`):
 
 ``Buttons and wheel``  five boxes (Left, Middle, Right, X1 back, X2 forward; red while
-                       held) and four wheel arrows (yellow while turning that way)
+                       held) and four wheel arrows (red while turning that way)
 ``Action``             the action in progress, its time, modifiers, injected, start,
                        now, end, scroll / gesture
 ``Element under mouse`` when it was read, role, name, bounds, parents, drop target and
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from video_story.core.timeline import format_timestamp
 
-from .mouse_activity import PRESSED_FILL, WHEEL_FILL
+from .mouse_activity import PRESSED_FILL
 from .mouse_details import (
     BUTTONS,
     RECENT_AFTER,
@@ -258,8 +258,7 @@ class MouseDetailsDialog(QDialog):
         )
         held = f"border: 1px solid {border.name()}; border-radius: 4px; color: #ffffff;"
         held += f" background: {PRESSED_FILL};"
-        turning = f"border: 1px solid {border.name()}; border-radius: 4px; color: #000000;"
-        turning += f" background: {WHEEL_FILL};"
+        turning = held  # a turning wheel is red like a held button
         self._styles = {"idle": idle, "held": held, "turning": turning}
         buttons, wheels = self._lit
         for button, box in self.button_boxes.items():

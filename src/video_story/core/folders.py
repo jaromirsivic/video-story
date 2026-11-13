@@ -312,6 +312,17 @@ def set_collapsed(recording_folder: Path, name: str, collapsed: bool) -> FolderS
     return state
 
 
+def set_all_collapsed(recording_folder: Path, collapsed: bool) -> FolderState:
+    """Close (``True``) or open every folder's accordion: Collapse all / Expand all.
+    ``folders.json`` is written once."""
+    state = load_folders(recording_folder)
+    wanted = list(state.order) if collapsed else []
+    if state.collapsed != wanted:
+        state.collapsed = wanted
+        save_folders(recording_folder, state)
+    return state
+
+
 def remove_folder(recording_folder: Path, name: str) -> FolderState:
     """Delete the (empty) directory of ``name``: the caller deleted its recordings.
 
@@ -407,6 +418,7 @@ __all__ = [
     "pin",
     "remove_folder",
     "save_folders",
+    "set_all_collapsed",
     "set_collapsed",
     "set_main",
     "unpin",

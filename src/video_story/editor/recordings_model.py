@@ -24,7 +24,13 @@ from typing import Any
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, QPersistentModelIndex, Qt
 
 from video_story.core.archive_state import ArchiveStatus, read_archive_state
-from video_story.core.folders import DEFAULT_FOLDER, FolderState, load_folders, set_collapsed
+from video_story.core.folders import (
+    DEFAULT_FOLDER,
+    FolderState,
+    load_folders,
+    set_all_collapsed,
+    set_collapsed,
+)
 from video_story.core.manifest import read_manifest
 from video_story.core.session import SessionPaths, list_sessions
 from video_story.core.transcript import read_transcript, transcript_status
@@ -390,6 +396,30 @@ class RecordingsModel(QAbstractListModel):
         )
         index = self.index(row)
         self.dataChanged.emit(index, index)
+        return True
+
+    def set_all_collapsed(self, collapsed: bool) -> bool:
+        """Collapse all / Expand all: close or open every folder's accordion (one write
+        of ``folders.json``); returns True when any folder changed."""
+        rows = [
+            row
+            for row, value in enumerate(self._rows)
+            if isinstance(value, FolderHeader) and value.collapsed != collapsed
+        ]
+        if not rows:
+            return False
+        try:
+            self.folder_state = set_all_collapsed(self.recording_folder, collapsed)
+        except OSError as exc:
+            log.warning("cannot store the collapsed folders: %s", exc)
+            self.folder_state.collapsed = list(self.folders) if collapsed else []
+        for row in rows:
+            header = self._rows[row]
+            assert isinstance(header, FolderHeader)
+            self._rows[row] = FolderHeader(
+                header.name, header.count, header.main, header.pinned, collapsed
+            )
+        self.dataChanged.emit(self.index(rows[0]), self.index(rows[-1]))
         return True
 
     # QAbstractListModel -----------------------------------------------------

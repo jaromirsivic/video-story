@@ -13,11 +13,13 @@ from PySide6.QtWidgets import QApplication
 
 from video_story.core.screens import RawScreen, assign_screen_ids
 from video_story.ui.overlay import (
+    FLASH_RED,
     MAX_ZOOM,
     DrawingOverlay,
     OverlayWindow,
     Shape,
     Tool,
+    flash_border_px,
     shape_to_json,
 )
 from video_story.ui.palette import DEFAULT_COLOR, PALETTE, PaletteColor, find_color
@@ -327,7 +329,8 @@ def test_escape_emits_closed_and_hides(overlay, qtbot):
     with qtbot.waitSignal(overlay.closed, timeout=1000):
         qtbot.keyClick(window, Qt.Key.Key_Escape)
     assert not overlay.is_visible()
-    assert all(not w.isVisible() for w in overlay.windows)
+    assert overlay.leaving  # the green flash first, then the windows go
+    qtbot.waitUntil(lambda: all(not w.isVisible() for w in overlay.windows), timeout=2000)
 
 
 def test_hide_and_close_do_not_emit_closed(overlay, qtbot):
@@ -376,6 +379,89 @@ def test_user_close_emits_closed_before_hiding(overlay, qtbot):
     overlay.closed.connect(lambda: (seen.append(overlay.is_visible()), overlay.clear()))
     overlay._user_close()
     assert seen == [True] and not overlay.is_visible() and overlay.shapes() == []
+
+
+def test_flash_border_thickness_is_20_px_or_1_percent():
+    assert flash_border_px(2560, 1600) == 26
+    assert flash_border_px(1600, 2560) == 26  # the longer side, whatever the orientation
+    assert flash_border_px(1920, 1080) == 20
+    assert flash_border_px(1280, 720) == 20
+
+
+def _flash_colors(overlay: DrawingOverlay, qtbot, until) -> list[str | None]:
+    """The flash colors seen (each once, in order) until ``until()`` holds."""
+    seen: list[str | None] = []
+
+    def note() -> bool:
+        color = overlay.flash_color
+        name = color.name() if color is not None else None
+        if not seen or seen[-1] != name:
+            seen.append(name)
+        return until()
+
+    qtbot.waitUntil(note, timeout=3000)
+    return seen
+
+
+def test_show_flashes_red_and_drawing_works_at_once(qtbot):
+    overlay = DrawingOverlay()
+    try:
+        overlay.show()
+        for window in overlay.windows:
+            qtbot.addWidget(window)
+        _park_toolbar(overlay)
+        assert overlay.flash_color == FLASH_RED
+        drag(overlay.windows[0], [(100, 100), (160, 160)])  # during the flash
+        assert len(overlay.shapes()) == 1
+        colors = _flash_colors(overlay, qtbot, lambda: overlay.flash_color is None)
+        assert colors == ["#ff0000", "#8b0000", "#ff0000", "#8b0000", None]
+        assert overlay.is_visible() and len(overlay.shapes()) == 1
+    finally:
+        overlay.close()
+
+
+def test_flash_is_not_a_shape(overlay):
+    """The border is painted on the windows only: never in drawings, ids or Undo."""
+    overlay._start_flash((FLASH_RED,))
+    assert overlay.flash_color == FLASH_RED
+    assert overlay.drawings() == [] and overlay.drawing_now() is None
+    assert overlay.shapes() == []
+    window = overlay.windows[0]
+    image = window.grab().toImage()
+    assert image.pixelColor(2, 2) == FLASH_RED  # painted in the corner of the screen
+
+
+def test_leave_clears_at_once_then_flashes_green_and_hides(overlay, qtbot):
+    window = overlay.windows[0]
+    drag(window, [(100, 100), (160, 160)])
+    overlay.set_sketch(True)
+    overlay.leave()
+    # At once: shapes gone, back on the screens, sidecars say "not drawing".
+    assert overlay.shapes() == [] and not overlay.sketch and overlay.background() is None
+    assert overlay.leaving and window.isVisible()
+    # The windows swallow the mouse meanwhile: nothing is drawn.
+    drag(window, [(200, 200), (260, 260)])
+    assert overlay.shapes() == []
+    colors = _flash_colors(overlay, qtbot, lambda: not window.isVisible())
+    assert colors == ["#00e000", "#006400", None]
+    assert not overlay.leaving and not overlay.is_visible()
+
+
+def test_show_during_leave_starts_again_with_red(overlay, qtbot):
+    overlay.leave()
+    assert overlay.leaving
+    overlay.show()
+    assert not overlay.leaving and overlay.is_visible()
+    assert overlay.flash_color == FLASH_RED
+    qtbot.wait(700)  # the old green flash must not hide the overlay
+    assert overlay.is_visible() and overlay.windows[0].isVisible()
+
+
+def test_hide_and_close_skip_the_flash(overlay):
+    overlay.leave()
+    overlay.hide()
+    assert not overlay.leaving and overlay.flash_color is None
+    assert all(not w.isVisible() for w in overlay.windows)
 
 
 def _recorded_screens():

@@ -14,7 +14,6 @@ from video_story.core.input_events import ButtonRecord, MouseLog, WheelRecord  #
 from video_story.editor.mouse_activity import (  # noqa: E402
     MIN_LIT_MS,
     PRESSED_FILL,
-    WHEEL_FILL,
     LitSpan,
     MouseActivity,
     mouse_svg,
@@ -132,7 +131,9 @@ def test_svg_fills_follow_the_lit_controls_and_the_theme():
     light = fills(mouse_svg({"vertical-scroll-module", "button-3", "scroll-up"}, dark=False))
     assert "background" not in light  # the widget's background shows through
     assert light["vertical-scroll-module"] == PRESSED_FILL
-    assert light["button-3"] == WHEEL_FILL and light["scroll-up"] == WHEEL_FILL
+    # The wheel and its arrow are red like a pressed button: no yellow any more.
+    assert light["button-3"] == PRESSED_FILL and light["scroll-up"] == PRESSED_FILL
+    assert "#ffe600" not in light.values()
     assert light["scroll-down"] == "#ffffff" and light["mouse-body"] == "#ffffff"
     dark_svg = mouse_svg({"button-1"}, dark=True, stroke_width=9)
     dark = fills(dark_svg)

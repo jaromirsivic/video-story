@@ -59,6 +59,14 @@ at the screen edges into one shape per screen (the same ``group``; the pieces of
 arrow without the head are lines with ``part_of: "arrow"``). Undo and the eraser treat
 the pieces of one split shape as one.
 
+Flash border: when drawing mode starts (:meth:`DrawingOverlay.show`) a border of
+:func:`flash_border_px` (20 px or 1 % of the screen's longer side) flashes around every
+screen in red / dark red / red / dark red, 250 ms each, while the user may already draw.
+:meth:`DrawingOverlay.leave` (Draw, Ctrl+Space, Esc, the cross) removes the shapes and
+the sketch canvas at once, flashes green / dark green and only then hides the windows;
+meanwhile they swallow the mouse. The border is painted by the windows, not a shape: it
+shows in the recorded frames but never in the drawings, Undo or the timeline.
+
 Zoom: drawing mode works like a canvas. When it is entered, every screen is grabbed
 once; the mouse wheel zooms that screen's picture in (up to 800 %) around the cursor
 and back out to 100 %, and the middle mouse button pans while zoomed. At 100 % the live
@@ -173,6 +181,21 @@ SHIFT_POLL_MS = 30  # how often Shift and Ctrl are polled while the overlay is s
 SKETCH_SHORTCUT = "S"
 SKETCH_LABEL = "Sketch"  # the button while the screens are shown (switches to sketch)
 SCREEN_LABEL = "Screen"  # the button while sketching (switches back to the screens)
+# The border flashed around every screen when drawing mode starts and ends (not a shape).
+FLASH_MIN_PX = 20  # border thickness in pixels of the screen, at least ...
+FLASH_SCREEN_RATIO = 0.01  # ... or 1 % of the screen's longer side, whichever is more
+FLASH_STEP_MS = 250  # how long each color of the flash is shown
+FLASH_RED = QColor("#FF0000")
+FLASH_DARK_RED = QColor("#8B0000")
+FLASH_GREEN = QColor("#00E000")
+FLASH_DARK_GREEN = QColor("#006400")
+OPEN_FLASH = (FLASH_RED, FLASH_DARK_RED, FLASH_RED, FLASH_DARK_RED)  # drawing starts
+CLOSE_FLASH = (FLASH_GREEN, FLASH_DARK_GREEN)  # drawing ends; the overlay then disappears
+
+
+def flash_border_px(width: int, height: int) -> int:
+    """Thickness of the flash border in pixels of a ``width`` x ``height`` screen."""
+    return max(FLASH_MIN_PX, round(FLASH_SCREEN_RATIO * max(width, height)))
 
 
 class Tool(StrEnum):
@@ -899,7 +922,23 @@ class OverlayWindow(QWidget):
         span = self._controller._span_view_shape(self)
         if span is not None:
             paint_shape(painter, span)  # the line or arrow being drawn (maybe from elsewhere)
+        flash = self._controller.flash_color
+        if flash is not None:
+            self._paint_flash(painter, flash)
         painter.end()
+
+    def _paint_flash(self, painter: QPainter, color: QColor) -> None:
+        """The border around the screen when drawing starts or ends: painted on top of
+        everything, never zoomed, and not a shape (not in drawings, Undo or the timeline)."""
+        ratio = self.devicePixelRatioF() or 1.0
+        width = flash_border_px(round(self.width() * ratio), round(self.height() * ratio)) / ratio
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        rect = QRectF(self.rect())
+        inner = rect.adjusted(width, width, -width, -width)
+        border = QPainterPath()
+        border.addRect(rect)
+        border.addRect(inner)  # odd-even fill: only the frame between the two rectangles
+        painter.fillPath(border, color)
 
     def _paint_grid(self, painter: QPainter) -> None:
         """The snapping grid (Ctrl held on the sketch canvas): 1 px lines on the multiples
@@ -928,6 +967,9 @@ class OverlayWindow(QWidget):
         return super().event(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if self._controller.leaving:
+            event.accept()  # drawing ended: no zoom while the overlay disappears
+            return
         steps = event.angleDelta().y() / 120.0
         if (
             not steps
@@ -944,6 +986,9 @@ class OverlayWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         button = event.button()
         controller = self._controller
+        if controller.leaving:
+            event.accept()  # drawing ended: swallow the click until the overlay is gone
+            return
         controller._note_ctrl(_ctrl_in(event))
         if button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             controller._note_shift(_shift_in(event))  # may end connected lines
@@ -1159,7 +1204,7 @@ class OverlayWindow(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Alt+F4 and similar: leave drawing mode like Esc instead of destroying the window.
-        if self._controller.is_visible():
+        if self._controller.is_visible() or self._controller.leaving:
             event.ignore()
             self._controller._user_close()
         else:
@@ -1513,6 +1558,16 @@ class DrawingOverlay(QObject):
         self._shift_timer = QTimer(self)
         self._shift_timer.setInterval(SHIFT_POLL_MS)
         self._shift_timer.timeout.connect(self._poll_shift)
+        # The border flashed when drawing starts (red) and ends (green): the color shown
+        # now, the colors still to come and what to do after the last one.
+        self._flash: QColor | None = None
+        self._flash_steps: list[QColor] = []
+        self._flash_done: Callable[[], None] | None = None
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(FLASH_STEP_MS)
+        self._flash_timer.timeout.connect(self._next_flash)
+        self._leaving = False  # drawing ended, the overlay disappears after the green flash
 
     # -- public API ---------------------------------------------------------------
 
@@ -1545,6 +1600,17 @@ class DrawingOverlay(QObject):
 
     def is_visible(self) -> bool:
         return self._visible
+
+    @property
+    def leaving(self) -> bool:
+        """True while drawing has ended but the windows still show the green flash: they
+        swallow the mouse and draw nothing; :meth:`hide` follows once the flash is over."""
+        return self._leaving
+
+    @property
+    def flash_color(self) -> QColor | None:
+        """The color of the border flashed around every screen right now, or ``None``."""
+        return self._flash
 
     @property
     def shift_held(self) -> bool:
@@ -1598,6 +1664,9 @@ class DrawingOverlay(QObject):
         screens = QGuiApplication.screens()
         if not screens:
             raise RuntimeError("no screens available")
+        if self._leaving:
+            self.hide()  # Draw again during the green flash: finish leaving, start anew
+        starting = not self._visible
         if len(self._windows) != len(screens):
             self._destroy_windows()
             self._windows = [OverlayWindow(self, index) for index in range(len(screens))]
@@ -1633,8 +1702,39 @@ class DrawingOverlay(QObject):
         self._schedule_toolbar_raise()
         self._refresh_drawings()
         self._update_shift_timer()
+        if starting:
+            self._start_flash(OPEN_FLASH)  # red border: drawing has started (draw at once)
+
+    def leave(self) -> None:
+        """Leave drawing mode as the user does (Draw, Ctrl+Space, Esc, the cross): the
+        shapes go and the screens come back (no sketch, no zoom) at once, the border
+        flashes green for :data:`CLOSE_FLASH` and then the overlay is hidden. Until then
+        the windows swallow the mouse (nothing reaches the applications below, nothing is
+        drawn). Shapes are cleared, so ``REMOVED`` is recorded now, not after the flash."""
+        if not self._visible:
+            return
+        self.clear()
+        self._visible = False  # the sidecars say "not drawing" from now on
+        self._leaving = True
+        self._enable_shortcuts(False)
+        self._floating = None
+        self._set_sketch_state(False)
+        if self._toolbar is not None:
+            self._toolbar.end_drag()
+            self._toolbar.hide()
+        for window in self._windows:
+            window.cancel_gesture()
+            window.reset_zoom()
+            window.update()
+        self._ctrl = False
+        self._refresh_drawings()
+        self._update_shift_timer()
+        self._start_flash(CLOSE_FLASH, done=self.hide)
 
     def hide(self) -> None:
+        """Hide the overlay at once (no flash); the shapes stay for the next :meth:`show`."""
+        self._stop_flash()
+        self._leaving = False
         self._visible = False
         self._enable_shortcuts(False)
         self._floating = None
@@ -2265,10 +2365,45 @@ class DrawingOverlay(QObject):
     def _user_close(self) -> None:
         if not self._visible:
             return
-        # Tell the owner first: it clears the shapes while the windows are still shown,
-        # so that hide() paints them empty (see hide()).
+        # Tell the owner first (it clears the shapes while the windows are still shown),
+        # then flash green and disappear (see leave()).
         self.closed.emit()
-        self.hide()
+        self.leave()
+
+    # -- the flash border ------------------------------------------------------------
+
+    def _start_flash(
+        self, colors: tuple[QColor, ...], done: Callable[[], None] | None = None
+    ) -> None:
+        """Show ``colors`` one after another, :data:`FLASH_STEP_MS` each, then ``done``."""
+        self._flash_steps = list(colors[1:])
+        self._flash = colors[0]
+        self._flash_done = done
+        self._flash_timer.start()
+        self._update_windows()
+
+    def _next_flash(self) -> None:
+        if self._flash_steps:
+            self._flash = self._flash_steps.pop(0)
+            self._flash_timer.start()
+            self._update_windows()
+            return
+        done = self._flash_done
+        self._flash = None
+        self._flash_done = None
+        self._update_windows()
+        if done is not None:
+            done()
+
+    def _stop_flash(self) -> None:
+        self._flash_timer.stop()
+        self._flash = None
+        self._flash_steps = []
+        self._flash_done = None
+
+    def _update_windows(self) -> None:
+        for window in self._windows:
+            window.update()
 
 
 __all__ = [

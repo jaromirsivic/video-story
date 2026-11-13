@@ -228,6 +228,10 @@ DELETE_ONE_LABEL = "Delete Video"
 ARCHIVE_ONE_LABEL = "Archive Video"
 MOVE_ONE_LABEL = "Move Video to Folder..."
 NEW_FOLDER_TOOLTIP = "Create new folder"
+FOLDERS_MENU_TEXT = "⋯"
+FOLDERS_MENU_TOOLTIP = "Folders"
+COLLAPSE_ALL_LABEL = "Collapse all"
+EXPAND_ALL_LABEL = "Expand all"
 SET_MAIN_LABEL = "Set as Main Folder"
 SET_MAIN_TOOLTIP = "New recordings are saved to the main folder"
 MOVE_UP_LABEL = "Move Up"
@@ -561,6 +565,23 @@ class EditorWindow(QMainWindow):
         self.new_folder_button.setIconSize(QSize(SEARCH_ICON_SIZE + 2, SEARCH_ICON_SIZE + 2))
         self.new_folder_button.clicked.connect(self.create_folder)
         title_row.addWidget(self.new_folder_button)
+        # "..." right of it: a menu with Collapse all / Expand all for the folders.
+        self.folders_menu_button = QToolButton()
+        self.folders_menu_button.setText(FOLDERS_MENU_TEXT)
+        self.folders_menu_button.setToolTip(FOLDERS_MENU_TOOLTIP)
+        self.folders_menu_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.folders_menu_button.setAutoRaise(True)
+        self.folders_menu_button.setFixedSize(30, 26)
+        self.folders_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.folders_menu_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        folders_menu = QMenu(self.folders_menu_button)
+        self.collapse_all_action = folders_menu.addAction(COLLAPSE_ALL_LABEL)
+        self.collapse_all_action.triggered.connect(lambda: self.set_all_folders_collapsed(True))
+        self.expand_all_action = folders_menu.addAction(EXPAND_ALL_LABEL)
+        self.expand_all_action.triggered.connect(lambda: self.set_all_folders_collapsed(False))
+        folders_menu.aboutToShow.connect(self._update_folders_menu)
+        self.folders_menu_button.setMenu(folders_menu)
+        title_row.addWidget(self.folders_menu_button)
         left_layout.addLayout(title_row)
         self.list_view = RecordingsListView()
         self.list_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1346,6 +1367,18 @@ class EditorWindow(QMainWindow):
         menu = self.folder_menu(folder)
         menu.exec(global_pos)
         menu.deleteLater()
+
+    def _update_folders_menu(self) -> None:
+        """Grey out what would change nothing (all folders already closed / open)."""
+        model = self.recordings
+        states = [model.is_collapsed(folder) for folder in model.folders]
+        self.collapse_all_action.setEnabled(not all(states))
+        self.expand_all_action.setEnabled(any(states))
+
+    def set_all_folders_collapsed(self, collapsed: bool) -> None:
+        """Collapse all (``True``) / Expand all (the "..." menu right of New Folder)."""
+        if self.recordings.set_all_collapsed(collapsed):
+            self.list_view.apply_collapsed()
 
     def create_folder(self) -> str | None:
         """Create new folder (the button right of "Recordings"): ask for the name, create

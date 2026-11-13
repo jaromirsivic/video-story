@@ -62,7 +62,10 @@ rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors (Shift make
 square, a circle, a closed brush shape or connected lines; Ctrl snaps the points to a
 grid, `GRID on` / `GRID off` in the timeline), and **Sketch**
 (`S`) swaps every screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH
-off` in the timeline). The window can also be
+off` in the timeline). A thick colored border around every screen in the frames is
+not a drawing, only a signal to the user: red / dark red during the first second after
+drawing starts, green / dark green during the half second after it ends; it never
+appears in the timeline or among the shapes. The window can also be
 hidden to the system tray (a click on the tray icon shows it again). The user can press
 **Stop** (`Ctrl+Alt+S`), then choose **Video Editor** (the default: the editor opens at once and
 transcribes while the user crops - the green arrow under the narration track says

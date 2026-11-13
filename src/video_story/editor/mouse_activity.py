@@ -2,9 +2,9 @@
 
 The editor draws ``assets/mouse.svg`` (top view, every control has its own id) next to
 the transport (:mod:`video_story.editor.mouse_view`). As the playhead moves, a pressed
-button is filled red and a turned wheel yellow together with the arrow of the direction
-it turned; the outline stays black (white in the dark theme) and everything else keeps
-the body colour (white, dark in the dark theme):
+button is filled red and so is a turned wheel together with the arrow of the direction
+it turned (one colour for everything in use); the outline stays black (white in the
+dark theme) and everything else keeps the body colour (white, dark in the dark theme):
 
 =================  ===========================================================
 ``left``           ``button-1`` red
@@ -13,9 +13,9 @@ the body colour (white, dark in the dark theme):
                    stay in the body colour
 ``x2`` (forward)   ``button-4`` red (the front side button)
 ``x1`` (back)      ``button-5`` red (the rear side button)
-wheel up / down    ``button-3`` (the wheel) and ``scroll-up`` / ``scroll-down`` yellow
+wheel up / down    ``button-3`` (the wheel) and ``scroll-up`` / ``scroll-down`` red
 wheel right / left ``horizontal-scroll-wheel`` and ``scroll-right`` / ``scroll-left``
-                   yellow
+                   red
 =================  ===========================================================
 
 A button counts as pressed from its ``down`` to its ``up`` in ``input/mouse.jsonl``, a
@@ -43,8 +43,7 @@ SVG_SIZE = (756.0, 740.0)  # the viewBox of the picture
 
 MIN_LIT_MS = 200  # a click or one notch stays visible at least this long
 
-PRESSED_FILL = "#e53935"  # red: a pressed button
-WHEEL_FILL = "#ffe600"  # bright yellow: a turning wheel and its arrow
+PRESSED_FILL = "#e53935"  # red: a pressed button, a turning wheel and its arrow
 LIGHT = {"stroke": "#000000", "fill": "#ffffff"}
 DARK = {"stroke": "#ffffff", "fill": "#1f1f1f"}
 
@@ -61,8 +60,8 @@ WHEEL_IDS = {
     ("h", True): ("horizontal-scroll-wheel", "scroll-right"),
     ("h", False): ("horizontal-scroll-wheel", "scroll-left"),
 }
-RED_IDS = frozenset(BUTTON_IDS.values())
-YELLOW_IDS = frozenset(i for ids in WHEEL_IDS.values() for i in ids)
+# Everything lit is red: the pressed buttons and the turning wheels with their arrows.
+RED_IDS = frozenset(BUTTON_IDS.values()) | frozenset(i for ids in WHEEL_IDS.values() for i in ids)
 
 
 @dataclass(frozen=True)
@@ -163,8 +162,6 @@ def mouse_svg(lit: Iterable[str], dark: bool, stroke_width: float = 4.0) -> byte
         elif element.get("fill") is not None:
             if element_id in lit and element_id in RED_IDS:
                 element.set("fill", PRESSED_FILL)
-            elif element_id in lit and element_id in YELLOW_IDS:
-                element.set("fill", WHEEL_FILL)
             else:
                 element.set("fill", colors["fill"])
     return ET.tostring(root, encoding="utf-8")
@@ -175,7 +172,6 @@ __all__ = [
     "MIN_LIT_MS",
     "PRESSED_FILL",
     "SVG_SIZE",
-    "WHEEL_FILL",
     "WHEEL_IDS",
     "LitSpan",
     "MouseActivity",
