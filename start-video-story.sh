@@ -29,16 +29,15 @@ command -v uv >/dev/null 2>&1 || fail "uv is not installed. Install it with:
   curl -LsSf https://astral.sh/uv/install.sh | sh
 or from https://docs.astral.sh/uv/ and start Video Story again." 20
 
-MODEL=models/ggml-large-v3-turbo-q5_0.bin
-need_setup=
-[ -f "$MODEL" ] || need_setup=1
-if ! command -v ffmpeg >/dev/null 2>&1 && ! ls bin/ffmpeg/*/ffmpeg >/dev/null 2>&1; then
-  need_setup=1
-fi
-if [ -n "$need_setup" ]; then
+# "setup --check" knows where the model and FFmpeg are looked for (the state folder,
+# then this folder, PATH); exit code 0: nothing is missing.
+setup_ready() {
+  uv run --project . video-story --log-level WARNING setup --check >/dev/null
+}
+if ! setup_ready; then
   echo "First start: preparing FFmpeg and the Whisper model, about 550 MB. This takes a few minutes."
   uv run --project . video-story setup || fail "Video Story could not start; the message above says why."
-  [ -f "$MODEL" ] || fail "Video Story could not start; the message above says why."
+  setup_ready || fail "Video Story could not start; the message above says why."
 fi
 
 echo "Starting Video Story..."

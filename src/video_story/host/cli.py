@@ -19,8 +19,11 @@ from video_story import __version__
 from video_story.core.config import (
     Config,
     ConfigError,
+    StateFolderError,
+    config_location,
     config_path,
     load_config,
+    resolve_state_root,
     save_config,
     update_config,
 )
@@ -33,6 +36,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_UNSUPPORTED = 3
+EXIT_SETUP_NEEDED = 4  # `setup --check`: the model or FFmpeg is missing (JSON on stdout)
+EXIT_CODE_KEY = "_exit_code"  # a command result may carry a non-zero exit code
 
 
 class CliError(Exception):
@@ -101,7 +106,7 @@ def _session_paths(args: argparse.Namespace, cfg: Config) -> SessionPaths:
 def cmd_config(args: argparse.Namespace) -> dict[str, Any]:
     path = _config_file(args) or config_path()
     if args.action == "path":
-        return {"path": str(path), "exists": path.exists()}
+        return config_location(_config_file(args), "--config")
     if args.action == "get":
         cfg = load_config(path)
         data = cfg.to_json_dict()
@@ -166,7 +171,30 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
     return run_doctor(_load(args), fix=args.fix)
 
 
+def setup_status(cfg: Config) -> dict[str, Any]:
+    """``setup --check``: is anything missing that ``setup`` downloads? Fast: the model
+    is only looked for (not verified) and nothing is created."""
+    from video_story.transcribe.ffmpeg import find_ffmpeg
+
+    model = cfg.resolved_model_path()
+    ffmpeg = find_ffmpeg(cfg)
+    found = {"model": model.is_file(), "ffmpeg": ffmpeg is not None}
+    missing = [name for name, there in found.items() if not there]
+    state = resolve_state_root()
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "model": str(model) if model.is_file() else None,
+        "ffmpeg": str(ffmpeg) if ffmpeg else None,
+        "state_root": str(state.path),
+        "state_reason": state.reason,
+        EXIT_CODE_KEY: EXIT_SETUP_NEEDED if missing else EXIT_OK,
+    }
+
+
 def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
+    if args.check:
+        return setup_status(_load(args))
     from video_story.host.doctor import run_doctor
 
     return run_doctor(_load(args), fix=True, download_model=True)
@@ -728,7 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Video Story: record narrated screen sessions for AI agents.",
     )
     parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING or ERROR")
-    parser.add_argument("--config", help="path to config.json (default: plugin directory)")
+    parser.add_argument(
+        "--config", help="path to config.json (default: the state folder, see `config path`)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("version", help="show the plugin version")
@@ -875,6 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("setup", help="prepare the environment: FFmpeg and the whisper model")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help=f"only report what is missing; exit code {EXIT_SETUP_NEEDED} when setup is needed",
+    )
     p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("mcp", help="run the MCP server (stdio by default)")
@@ -934,6 +969,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         emit_error("CONFIG_INVALID", str(exc))
         return EXIT_USAGE
+    except StateFolderError as exc:
+        emit_error(exc.code, str(exc))
+        return EXIT_ERROR
     except KeyboardInterrupt:
         emit_error("INTERRUPTED", "interrupted")
         return 130
@@ -941,8 +979,9 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("command failed")
         emit_error("INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
         return EXIT_ERROR
+    exit_code = result.pop(EXIT_CODE_KEY, EXIT_OK)
     emit(result)
-    return EXIT_OK
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover

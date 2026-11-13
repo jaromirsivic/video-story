@@ -12,16 +12,16 @@ if /i "%~1"=="edit" set "VS_COMMAND=edit"
 where uv >nul 2>nul
 if errorlevel 1 goto :no_uv
 
-set "VS_SETUP="
-if not exist "models\ggml-large-v3-turbo-q5_0.bin" set "VS_SETUP=1"
-where ffmpeg >nul 2>nul
-if errorlevel 1 if not exist "bin\ffmpeg\windows-x86_64\ffmpeg.exe" if not exist "bin\ffmpeg\windows-arm64\ffmpeg.exe" set "VS_SETUP=1"
-if not defined VS_SETUP goto :start
+rem "setup --check" knows where the model and FFmpeg are looked for (the state folder,
+rem then this folder, PATH); exit code 0: nothing is missing.
+uv run --project . video-story --log-level WARNING setup --check >nul
+if not errorlevel 1 goto :start
 
 echo First start: preparing FFmpeg and the Whisper model, about 550 MB. This takes a few minutes.
 uv run --project . video-story setup
 if errorlevel 1 goto :failed
-if not exist "models\ggml-large-v3-turbo-q5_0.bin" goto :failed
+uv run --project . video-story --log-level WARNING setup --check >nul
+if errorlevel 1 goto :failed
 
 :start
 echo Starting Video Story...

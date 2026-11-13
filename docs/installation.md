@@ -10,7 +10,7 @@ transcription (whisper.cpp through `pywhispercpp`, CPU only).
 | --- | --- | --- | --- |
 | uv | `winget install astral-sh.uv` or the installer from docs.astral.sh | distribution package or the installer from docs.astral.sh | installer from docs.astral.sh or Homebrew |
 | Python 3.12 | downloaded by uv automatically (`uv python install 3.12` if downloads are set to manual) | same | same |
-| FFmpeg | optional on PATH; otherwise `video-story doctor --fix` downloads a static build into `bin/ffmpeg/` | same; distribution package recommended | install it yourself (`brew install ffmpeg`); the automatic download is not available on macOS yet |
+| FFmpeg | optional on PATH; otherwise `video-story doctor --fix` downloads a static build into `bin/ffmpeg/` of the state folder (see Configuration) | same; distribution package recommended | install it yourself (`brew install ffmpeg`); the automatic download is not available on macOS yet |
 | Audio | any input device | PortAudio (`portaudio` package) and an input device (PipeWire/PulseAudio/ALSA) | any input device; macOS asks for **Microphone** permission for the terminal or host application |
 | Display | Windows 10/11, any number of screens, per-monitor DPI supported | X11 session (Wayland is not supported yet) with `python-xlib` (installed by uv) | screens and cursor through CoreGraphics (no extra packages); macOS asks for **Screen Recording** permission |
 | Disk | at least 1 GB free on the disk of the recording folder (Record refuses below that and a running recording stops there); expect about 3 GB per hour with two screens at the defaults | same | same |
@@ -29,9 +29,10 @@ uv sync
 ```
 
 The multilingual Whisper large-v3-turbo model, 5-bit quantised
-(`ggml-large-v3-turbo-q5_0.bin`, 548 MB), belongs in `models/`. It is not part of the
-repository. Either copy an existing file there or let the setup command download it
-from Hugging Face (SHA-256
+(`ggml-large-v3-turbo-q5_0.bin`, 548 MB), belongs in `models/` of the state folder
+(see Configuration: `~/.video-story/models/`, or `models/` in the repository of a
+development checkout). It is not part of the repository. Either copy an existing file
+there or let the setup command download it from Hugging Face (SHA-256
 `394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` is verified):
 
 ```bash
@@ -39,12 +40,40 @@ uv run video-story setup
 ```
 
 `setup` also downloads FFmpeg when it is not on PATH. `uv run video-story doctor`
-reports every check (screens, audio input, FFmpeg, model, backend, recording folder)
-without downloading anything.
+reports every check (screens, audio input, state folder, FFmpeg, model, backend,
+recording folder) and where the model and FFmpeg were found, without downloading
+anything. `uv run video-story setup --check` only says whether something is missing
+(exit code 0: ready, 4: run `setup`); the starters use it.
 
 ## 2. Configuration
 
-`config.json` lives in the repository root (it is ignored by Git). It is created with
+### Where Video Story keeps its files
+
+Video Story keeps its own files - `config.json`, the model (`models/`) and a
+downloaded FFmpeg (`bin/ffmpeg/<os>-<arch>/`) - in one **state folder**, separate from
+the code, so an update of the plugin (a new copy in the plugin cache) keeps the
+settings and does not download the model again. The state folder is, in this order:
+
+1. the folder in the environment variable `VIDEO_STORY_HOME`, when it is set;
+2. the repository itself, when `config.json` is there - a development checkout keeps
+   everything next to the code as before, nothing is moved;
+3. otherwise `~/.video-story` (`C:\Users\<you>\.video-story` on Windows), the same
+   rule on Windows, Linux and macOS.
+
+The model and FFmpeg are looked for in the state folder first and then next to the
+code (`models/`, `bin/ffmpeg/` in the code folder: a distribution may bundle them);
+`whisper_model_path`, `ffmpeg_path` and PATH keep their precedence. `setup` and
+`doctor --fix` always download into the state folder; when it cannot be created or
+written they fail with `STATE_NOT_WRITABLE` instead of writing elsewhere.
+`uv run video-story config path` prints the `config.json` in use, the state folder and
+why it was chosen; `--config <file>` overrides the file. Recordings are not part of the
+state: they stay in `recording_folder`. The virtual environment (`.venv`) stays with
+the code. `VIDEO_STORY_ROOT` only tells the launchers (and the program) where the code
+is.
+
+### Settings
+
+`config.json` (in the state folder; ignored by Git in a checkout) is created with
 defaults on first save. The Settings button of the control window edits the first seven
 keys of the table below (Recording Folder, Capture Interval, Image Format, JPEG Quality,
 Audio Input, Auto Stop Recording, Keep Recordings) and offers **Open Folder** (the
@@ -75,10 +104,10 @@ uv run video-story config set audio_input "Microphone (Realtek(R) Audio)"
 | `export_crf` | 18 | libx264 quality (lower is better, 0 to 51) |
 | `export_audio_bitrate_k` | 192 | AAC bitrate in kb/s |
 | `editor_draw_cursor` | `true` | draw the recorded cursor into the preview and the exported video |
-| `whisper_model_path` | `null` | `null` means `models/ggml-large-v3-turbo-q5_0.bin` |
+| `whisper_model_path` | `null` | `null` means `models/ggml-large-v3-turbo-q5_0.bin` in the state folder, then in the code folder |
 | `whisper_backend` | `pywhispercpp` | or `whisper-cli` with `whisper_cli_path` pointing to a whisper.cpp binary |
 | `whisper_threads` | min(32, CPUs) | CPU threads for transcription (large-v3-turbo transcribes roughly 2-3x faster than real time on a desktop CPU) |
-| `ffmpeg_path` | `null` | explicit FFmpeg binary; `null` means PATH, then `bin/ffmpeg/` |
+| `ffmpeg_path` | `null` | explicit FFmpeg binary; `null` means PATH, then `bin/ffmpeg/` in the state folder, then in the code folder |
 
 ## 3. Register the skill with your agent
 
@@ -110,8 +139,8 @@ ln -s ~/video-story/skills/video-story-edit ~/.claude/skills/video-story-edit
 Start a new Claude Code session and say "Start Video Story" or "Edit Video Story". The repository is also a
 Claude Code plugin (`.claude-plugin/plugin.json`) and a one-plugin marketplace
 (`.claude-plugin/marketplace.json`); installing it that way copies the repository into
-the plugin cache, so prefer the link while the model and the virtual environment live
-next to the code.
+the plugin cache. Settings, the model and FFmpeg then live in `~/.video-story` and
+survive an update; the virtual environment is created again next to the new copy.
 
 ### Codex (CLI and app)
 
@@ -207,6 +236,9 @@ VIDEO_STORY_INTEGRATION=1 uv run pytest tests/integration/test_recording.py test
   `pyproject.toml` three levels above itself, nor behind the junction or symlink the skill
   is registered with. Register the skill again (`scripts/install-hosts`) or set
   `VIDEO_STORY_ROOT` to the Video Story directory.
+- `STATE_NOT_WRITABLE`: the state folder (`video-story config path` names it) cannot be
+  created or written, so settings cannot be saved and `setup` cannot download. Make it
+  writable or set `VIDEO_STORY_HOME` to a writable folder.
 - `ALREADY_RUNNING`: a control window is open; finish or close it, or run
   `video-story sessions` to see it.
 - `WINDOW_EXITED`: the window process ended; read `ui.log` (window output, stays in

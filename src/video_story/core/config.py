@@ -1,8 +1,10 @@
-"""Plugin configuration (`config.json`).
+"""Plugin configuration (`config.json`) and the two roots the plugin works with.
 
-The configuration lives in the plugin installation directory (the repository root)
-as required by the specification. When that directory is not writable the user
-configuration directory is used instead and the chosen path is logged.
+The *code root* holds the sources (``pyproject.toml``); in a distribution it may be
+read-only and is replaced by every update. The *state root* holds everything the
+plugin keeps between runs: ``config.json``, ``models/`` (the whisper model) and
+``bin/ffmpeg/`` (a downloaded FFmpeg). See :func:`resolve_state_root` for which folder
+that is. Recordings live elsewhere (``recording_folder``).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from platformdirs import user_config_dir, user_videos_dir
+from platformdirs import user_videos_dir
 
 from video_story.core.fileio import atomic_write_text
 
@@ -23,6 +25,9 @@ log = logging.getLogger(__name__)
 
 CONFIG_FILE_NAME = "config.json"
 CONFIG_PATH_ENV = "VIDEO_STORY_CONFIG"
+CODE_ROOT_ENV = "VIDEO_STORY_ROOT"  # overrides the code root (as for the launchers)
+STATE_HOME_ENV = "VIDEO_STORY_HOME"  # overrides the state root (tests, special setups)
+STATE_DIR_NAME = ".video-story"  # the state root in the user's home folder
 
 CAPTURE_INTERVAL_MIN_MS = 1
 CAPTURE_INTERVAL_MAX_MS = 1000
@@ -76,16 +81,82 @@ class ConfigError(ValueError):
         self.message = message
 
 
-def plugin_root() -> Path:
-    """Return the plugin installation directory (repository root).
+class StateFolderError(RuntimeError):
+    """The state root (or the file asked for) cannot be created or written."""
+
+    code = "STATE_NOT_WRITABLE"
+
+
+StateMode = Literal["environment", "development", "user"]
+
+_STATE_REASONS: dict[str, str] = {
+    "environment": f"{STATE_HOME_ENV} is set",
+    "development": f"development: {CONFIG_FILE_NAME} is in the code folder",
+    "user": "user folder",
+}
+
+
+@dataclass(frozen=True)
+class StateRoot:
+    """The folder with the plugin's own state and why it was chosen."""
+
+    path: Path
+    mode: StateMode
+
+    @property
+    def reason(self) -> str:
+        return _STATE_REASONS[self.mode]
+
+
+def code_root() -> Path:
+    """The folder with the code (``pyproject.toml``), possibly read-only.
 
     The package is installed in editable mode from ``src/video_story``; the root is
     therefore three levels above this file. ``VIDEO_STORY_ROOT`` overrides it.
     """
-    override = os.environ.get("VIDEO_STORY_ROOT")
+    override = os.environ.get(CODE_ROOT_ENV)
     if override:
         return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parents[3]
+
+
+def resolve_state_root() -> StateRoot:
+    """Where ``config.json``, ``models/`` and ``bin/`` live, in this order:
+
+    1. ``VIDEO_STORY_HOME`` when set;
+    2. the code root when it contains ``config.json`` (a development checkout keeps
+       its whole state next to the code, as before);
+    3. ``~/.video-story`` (the same rule on Windows, Linux and macOS).
+
+    Nothing is created here.
+    """
+    override = os.environ.get(STATE_HOME_ENV)
+    if override:
+        return StateRoot(Path(override).expanduser().resolve(), "environment")
+    code = code_root()
+    if (code / CONFIG_FILE_NAME).is_file():
+        return StateRoot(code, "development")
+    return StateRoot(Path.home() / STATE_DIR_NAME, "user")
+
+
+def state_root() -> Path:
+    return resolve_state_root().path
+
+
+def ensure_state_root() -> Path:
+    """Create the state root when needed and check that it is writable."""
+    root = resolve_state_root()
+    try:
+        root.path.mkdir(parents=True, exist_ok=True)
+        probe = root.path / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise StateFolderError(
+            f"cannot write the Video Story state folder {root.path} ({root.reason}): {exc}. "
+            f"Make it writable or set {STATE_HOME_ENV} to a writable folder."
+        ) from exc
+    return root.path
 
 
 def default_recording_folder() -> Path:
@@ -97,7 +168,19 @@ def default_recording_folder() -> Path:
 
 
 def default_model_path() -> Path:
-    return plugin_root() / "models" / MODEL_FILE_NAME
+    """Where ``setup`` downloads the model to: always the state root."""
+    return state_root() / "models" / MODEL_FILE_NAME
+
+
+def model_search_paths() -> list[Path]:
+    """The model in the state root first, then in the code root (a bundled copy)."""
+    paths = [default_model_path(), code_root() / "models" / MODEL_FILE_NAME]
+    return list(dict.fromkeys(paths))
+
+
+def find_default_model() -> Path:
+    """The first existing model of :func:`model_search_paths`, else the download target."""
+    return next((p for p in model_search_paths() if p.is_file()), default_model_path())
 
 
 def default_whisper_threads() -> int:
@@ -145,7 +228,8 @@ class Config:
         return "png" if self.image_format == "png" else "jpg"
 
     def resolved_model_path(self) -> Path:
-        return self.whisper_model_path or default_model_path()
+        """``whisper_model_path``, else the model in the state root, else the code root."""
+        return self.whisper_model_path or find_default_model()
 
     def to_json_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -281,29 +365,40 @@ def config_from_dict(data: dict[str, Any]) -> Config:
 # Persistence -----------------------------------------------------------------
 
 
-def _is_writable_dir(path: Path) -> bool:
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".write-test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
-        return True
-    except OSError:
-        return False
-
-
 def config_path() -> Path:
-    """Location of ``config.json``: env override, plugin root, or user config dir."""
+    """Location of ``config.json``: ``VIDEO_STORY_CONFIG``, else the state root.
+
+    Nothing is created here; a state root that cannot be written makes
+    :func:`save_config` fail instead of writing somewhere else.
+    """
     override = os.environ.get(CONFIG_PATH_ENV)
     if override:
         return Path(override).expanduser()
-    root = plugin_root()
-    candidate = root / CONFIG_FILE_NAME
-    if candidate.exists() or _is_writable_dir(root):
-        return candidate
-    fallback = Path(user_config_dir("VideoStory", appauthor=False)) / CONFIG_FILE_NAME
-    log.warning("Plugin root %s is not writable; using %s", root, fallback)
-    return fallback
+    return state_root() / CONFIG_FILE_NAME
+
+
+def config_location(
+    explicit: Path | None = None, explicit_source: str = "--config"
+) -> dict[str, Any]:
+    """Where ``config.json`` is and why, with the state folder in use (``config path``).
+
+    ``explicit`` is a file given by the caller (``--config``), named ``explicit_source``.
+    """
+    path = explicit or config_path()
+    if explicit is not None:
+        source = explicit_source
+    elif os.environ.get(CONFIG_PATH_ENV):
+        source = CONFIG_PATH_ENV
+    else:
+        source = "state folder"
+    state = resolve_state_root()
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "source": source,
+        "state_root": str(state.path),
+        "state_reason": state.reason,
+    }
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -321,7 +416,13 @@ def load_config(path: Path | None = None) -> Config:
 def save_config(config: Config, path: Path | None = None) -> Path:
     """Write the configuration atomically and return the path used."""
     path = path or config_path()
-    atomic_write_text(path, json.dumps(config.to_json_dict(), indent=2) + "\n")
+    try:
+        atomic_write_text(path, json.dumps(config.to_json_dict(), indent=2) + "\n")
+    except OSError as exc:
+        raise StateFolderError(
+            f"cannot write the configuration {path}: {exc}. Make the folder writable or set "
+            f"{STATE_HOME_ENV} to a writable folder."
+        ) from exc
     return path
 
 
@@ -355,15 +456,26 @@ __all__ = [
     "ARCHIVE_AFTER_MAX_DAYS",
     "ARCHIVE_AFTER_MIN_DAYS",
     "ARCHIVE_AFTER_NEVER",
+    "CODE_ROOT_ENV",
+    "STATE_DIR_NAME",
+    "STATE_HOME_ENV",
     "Config",
     "ConfigError",
+    "StateFolderError",
+    "StateRoot",
+    "code_root",
     "config_from_dict",
+    "config_location",
     "config_path",
     "default_model_path",
     "default_recording_folder",
+    "ensure_state_root",
+    "find_default_model",
     "load_config",
-    "plugin_root",
+    "model_search_paths",
     "replace",
+    "resolve_state_root",
     "save_config",
+    "state_root",
     "update_config",
 ]

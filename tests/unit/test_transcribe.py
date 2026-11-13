@@ -136,11 +136,15 @@ def test_find_ffmpeg_precedence(tmp_path: Path, monkeypatch):
     on_path = tmp_path / "path" / exe
     on_path.parent.mkdir()
     on_path.write_bytes(b"")
-    root = tmp_path / "root"
-    bundled = ff.bundled_ffmpeg_path(root)
-    bundled.parent.mkdir(parents=True)
-    bundled.write_bytes(b"")
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(root))
+    state, code = tmp_path / "state", tmp_path / "code"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(code))
+    downloaded = ff.bundled_ffmpeg_path(state)
+    bundled = ff.bundled_ffmpeg_path(code)
+    for copy in (downloaded, bundled):
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(b"")
+    assert ff.bundled_ffmpeg_path() == downloaded, "the state root is the default"
 
     monkeypatch.setattr(ff.shutil, "which", lambda name: str(on_path))
     assert ff.find_ffmpeg(Config(ffmpeg_path=configured)) == configured
@@ -148,22 +152,35 @@ def test_find_ffmpeg_precedence(tmp_path: Path, monkeypatch):
     # Missing configured path falls through to PATH.
     assert ff.find_ffmpeg(Config(ffmpeg_path=tmp_path / "nope")) == on_path
     assert ff.find_ffmpeg(Config()) == on_path
+    assert ff.ffmpeg_origin(Config(), on_path) == "PATH"
+    assert ff.ffmpeg_origin(Config(ffmpeg_path=configured.parent), configured) == "ffmpeg_path"
 
+    # Without PATH: the state root first, then a copy bundled with the code.
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
+    assert ff.find_ffmpeg(Config()) == downloaded
+    assert ff.ffmpeg_origin(Config(), downloaded) == "state folder"
+    downloaded.unlink()
     assert ff.find_ffmpeg(Config()) == bundled
+    assert ff.ffmpeg_origin(Config(), bundled) == "code folder"
     bundled.unlink()
     assert ff.find_ffmpeg(Config()) is None
 
 
 def test_ensure_ffmpeg_raises_without_download(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path))
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
-    with pytest.raises(ff.FfmpegNotFound, match="setup"):
+    with pytest.raises(ff.FfmpegNotFound, match="setup") as raised:
         ff.ensure_ffmpeg(Config())
+    # The message names both folders that were searched.
+    assert str(tmp_path / "state") in str(raised.value)
+    assert str(tmp_path / "code") in str(raised.value)
 
 
 def test_ensure_ffmpeg_downloads_into_bundled_dir(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path))
+    """Downloads go to the state root, never next to the code."""
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(tmp_path))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
     target: list[Path] = []
 

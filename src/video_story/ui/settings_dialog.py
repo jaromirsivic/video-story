@@ -66,7 +66,7 @@ class SettingsDialog(QDialog):
 
     ``current_session_id`` is the session of the open control window. ``config_file``
     is the file to save
-    to (default: the plugin's ``config.json``). ``save_guard(config)`` returns a context
+    to (default: ``config.json`` in the state folder). ``save_guard(config)`` returns a context
     manager entered around the save: the control window uses it to move its session to
     a newly chosen Recording Folder; an exception from it keeps the dialog open.
     """

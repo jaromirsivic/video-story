@@ -83,6 +83,7 @@ def test_doctor_all_green(healthy, tmp_path: Path):
         "audio",
         "computer_audio",
         "mouse",
+        "state",
         "ffmpeg",
         "model",
         "backend",
@@ -213,6 +214,74 @@ def test_doctor_unwritable_recording_folder(healthy, tmp_path: Path):
     blocker.write_text("x", encoding="utf-8")
     check = _by_name(doctor.run_doctor(cfg.with_values(recording_folder=str(blocker))))
     assert check["recording_folder"]["ok"] is False and check["recording_folder"]["hint"]
+
+
+def test_doctor_reports_the_state_folder(healthy, tmp_path: Path, monkeypatch):
+    cfg, _ = healthy
+    state = tmp_path / "state"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    report = doctor.run_doctor(cfg)
+    check = _by_name(report)["state"]
+    assert check["ok"] and check["detail"] == f"{state} (VIDEO_STORY_HOME is set), not created yet"
+    assert report["state_root"] == str(state)
+    assert report["state_reason"] == "VIDEO_STORY_HOME is set"
+    assert not state.exists(), "a plain doctor creates nothing"
+    check = _by_name(doctor.run_doctor(cfg, fix=True))["state"]
+    assert check["ok"] and check["detail"].endswith("is writable") and state.is_dir()
+
+
+def test_doctor_model_lookup_and_download_target(healthy, tmp_path: Path, monkeypatch):
+    """The model in the state root, else in the code root; downloads go to the state."""
+    cfg, _ = healthy
+    cfg = cfg.with_values(whisper_model_path=None)
+    state, code = tmp_path / "state", tmp_path / "code"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(code))
+    bundled = code / "models" / "ggml-large-v3-turbo-q5_0.bin"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"model-bytes")
+    report = doctor.run_doctor(cfg)
+    assert report["model"] == str(bundled)
+    assert _by_name(report)["model"]["detail"].endswith("(code folder)")
+
+    bundled.write_bytes(b"corrupt")  # a broken bundled copy: setup downloads a good one
+    downloads: list[Path] = []
+
+    def fake_download(url, dest, *, expected_sha256=None, **kwargs):
+        downloads.append(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"model-bytes")
+
+    monkeypatch.setattr(doctor, "download_file", fake_download)
+    report = doctor.run_doctor(cfg, download_model=True)
+    target = state / "models" / "ggml-large-v3-turbo-q5_0.bin"
+    assert downloads == [target] and report["model"] == str(target)
+    assert _by_name(report)["model"]["detail"].endswith("(state folder)")
+    assert bundled.read_bytes() == b"corrupt", "the code root is never written"
+
+    target.unlink()
+    bundled.unlink()
+    detail = _by_name(doctor.run_doctor(cfg))["model"]["detail"]
+    assert detail == f"model not found: {target} (nor {bundled})"
+
+
+def test_doctor_unwritable_state_folder_blocks_downloads(healthy, tmp_path: Path, monkeypatch):
+    cfg, _ = healthy
+    cfg = cfg.with_values(whisper_model_path=None)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(blocker / "state"))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
+    monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: None)
+    calls: list[str] = []
+    monkeypatch.setattr(doctor, "download_file", lambda *a, **k: calls.append("model"))
+    monkeypatch.setattr(doctor, "ensure_ffmpeg", lambda *a, **k: calls.append("ffmpeg"))
+    report = doctor.run_doctor(cfg, fix=True, download_model=True)
+    check = _by_name(report)["state"]
+    assert check["ok"] is False and str(blocker / "state") in check["detail"]
+    assert "VIDEO_STORY_HOME" in check["hint"]
+    assert calls == [], "nothing is downloaded anywhere else"
+    assert report["ok"] is False
 
 
 def test_mouse_is_optional_and_never_fails_the_doctor():

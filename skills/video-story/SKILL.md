@@ -321,8 +321,10 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
   the editor starts (one MP4 per screen, one `.m4a` per audio track; frames and WAV
   audio are deleted); no recording is
   deleted automatically.
-- `doctor` - checks screens, audio input, FFmpeg and the whisper model;
-  `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
+- `doctor` - checks screens, audio input, the state folder, FFmpeg and the whisper
+  model; `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.
+  Settings, model and FFmpeg live in the state folder (`~/.video-story`, or the
+  repository of a development checkout; `config path` names it and says why).
 - `transcribe <recording_dir>` - redo (or complete) the transcription of an existing
   recording, when the user asks you to work with a recording whose transcript is not
   complete (`describe` and `timeline` report `transcript_complete` false with a

@@ -426,7 +426,10 @@ def test_get_frame_usage_errors(recording: SessionPaths, config_file: Path):
 
 def test_config_get_set_path(config_file: Path):
     path = mcp_server.tool_config("path")
-    assert path == {"ok": True, "path": str(config_file), "exists": True}
+    assert path["ok"] is True and path["path"] == str(config_file) and path["exists"] is True
+    assert path["source"] == "VIDEO_STORY_CONFIG" and path["state_reason"] == (
+        "VIDEO_STORY_HOME is set"
+    )
     got = mcp_server.tool_config("get", "capture_interval_ms")
     assert got["value"] == 500
     whole = mcp_server.tool_config("get")

@@ -1,8 +1,10 @@
 """FFmpeg discovery, optional download of a static build and audio conversion.
 
-Lookup order: ``config.ffmpeg_path`` -> ``ffmpeg`` on ``PATH`` -> the bundled copy in
-``<plugin root>/bin/ffmpeg/<os>-<arch>/``. Downloads happen only from
-``video-story setup`` / ``doctor --fix``, never during a recording.
+Lookup order: ``config.ffmpeg_path`` -> ``ffmpeg`` on ``PATH`` -> the downloaded copy in
+``<state root>/bin/ffmpeg/<os>-<arch>/`` -> a copy bundled with the code in
+``<code root>/bin/ffmpeg/<os>-<arch>/`` (see :mod:`video_story.core.config` for both
+roots). Downloads go to the state root and happen only from ``video-story setup`` /
+``doctor --fix``, never during a recording.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from video_story.core.config import Config, plugin_root
+from video_story.core.config import Config, code_root, state_root
 from video_story.host.downloads import (
     DownloadError,
     ProgressCallback,
@@ -107,19 +109,26 @@ def executable_name(base: str, os_name: str | None = None) -> str:
 
 
 def bundled_ffmpeg_dir(root: Path | None = None) -> Path:
+    """``<root>/bin/ffmpeg/<os>-<arch>``; the state root (download target) by default."""
     os_name, arch = platform_tag()
-    return (root or plugin_root()) / "bin" / "ffmpeg" / f"{os_name}-{arch}"
+    return (root or state_root()) / "bin" / "ffmpeg" / f"{os_name}-{arch}"
 
 
 def bundled_ffmpeg_path(root: Path | None = None) -> Path:
     return bundled_ffmpeg_dir(root) / executable_name("ffmpeg")
 
 
+def bundled_ffmpeg_candidates() -> list[Path]:
+    """The downloaded copy in the state root first, then one bundled with the code."""
+    return list(dict.fromkeys([bundled_ffmpeg_path(), bundled_ffmpeg_path(code_root())]))
+
+
 # Discovery --------------------------------------------------------------------
 
 
 def find_ffmpeg(config: Config) -> Path | None:
-    """Configured path, then ``PATH``, then the bundled copy; ``None`` when absent."""
+    """Configured path, then ``PATH``, then the copy in the state root, then the one in
+    the code root; ``None`` when absent."""
     if config.ffmpeg_path is not None:
         candidate = Path(config.ffmpeg_path).expanduser()
         if candidate.is_dir():
@@ -130,10 +139,30 @@ def find_ffmpeg(config: Config) -> Path | None:
     found = shutil.which("ffmpeg")
     if found:
         return Path(found)
-    bundled = bundled_ffmpeg_path()
-    if bundled.is_file():
-        return bundled
-    return None
+    return next((p for p in bundled_ffmpeg_candidates() if p.is_file()), None)
+
+
+def ffmpeg_origin(config: Config, path: Path) -> str:
+    """Where a found ffmpeg comes from: ``ffmpeg_path``, ``state folder``, ``code folder``
+    or ``PATH``."""
+    resolved = Path(path).resolve()
+    if config.ffmpeg_path is not None:
+        configured = Path(config.ffmpeg_path).expanduser()
+        if configured.is_dir():
+            configured = configured / executable_name("ffmpeg")
+        if resolved == configured.resolve():
+            return "ffmpeg_path"
+    if resolved == bundled_ffmpeg_path().resolve():
+        return "state folder"
+    if resolved == bundled_ffmpeg_path(code_root()).resolve():
+        return "code folder"
+    return "PATH"
+
+
+def ffmpeg_search_text() -> str:
+    """The places searched, for messages: config, PATH and both bundled folders."""
+    folders = ", ".join(str(p.parent) for p in bundled_ffmpeg_candidates())
+    return f"config ffmpeg_path, PATH, {folders}"
 
 
 def ensure_ffmpeg(
@@ -146,7 +175,7 @@ def ensure_ffmpeg(
     if download:
         return download_ffmpeg(bundled_ffmpeg_dir(), progress=progress)
     raise FfmpegNotFound(
-        "ffmpeg was not found (config ffmpeg_path, PATH or the bundled copy). "
+        f"ffmpeg was not found ({ffmpeg_search_text()}). "
         "Run `video-story setup` to download it, or install ffmpeg and set ffmpeg_path."
     )
 
@@ -457,6 +486,7 @@ __all__ = [
     "FfmpegError",
     "FfmpegNotFound",
     "FfmpegSource",
+    "bundled_ffmpeg_candidates",
     "bundled_ffmpeg_dir",
     "bundled_ffmpeg_path",
     "candidate_sources",
@@ -465,6 +495,8 @@ __all__ = [
     "ensure_ffmpeg",
     "executable_name",
     "extract_binaries",
+    "ffmpeg_origin",
+    "ffmpeg_search_text",
     "ffmpeg_version",
     "find_ffmpeg",
     "platform_tag",

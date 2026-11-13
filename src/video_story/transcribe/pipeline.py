@@ -38,7 +38,7 @@ from video_story.core.transcript import (
     write_transcript,
 )
 
-from .ffmpeg import convert_to_16k_mono, ensure_ffmpeg, find_ffmpeg
+from .ffmpeg import convert_to_16k_mono, ensure_ffmpeg, ffmpeg_search_text, find_ffmpeg
 from .whisper_backend import (
     WHISPER_SAMPLE_RATE,
     TranscriptionBackend,
@@ -70,7 +70,7 @@ def missing_requirements(config: Config) -> list[str]:
     if not model.is_file():
         missing.append(f"the Whisper model ({model})")
     if find_ffmpeg(config) is None:
-        missing.append("FFmpeg")
+        missing.append(f"FFmpeg (looked in: {ffmpeg_search_text()})")
     if config.whisper_backend == "whisper-cli" and (
         config.whisper_cli_path is None or not Path(config.whisper_cli_path).is_file()
     ):

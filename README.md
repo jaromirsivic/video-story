@@ -73,6 +73,8 @@ uv run video-story doctor     # environment report
 uv run video-story run        # opens the control window and waits for the result
 ```
 
+Settings (`config.json`), the model and a downloaded FFmpeg live in the state folder `~/.video-story`, apart from the code, so a plugin update keeps them; a development checkout with `config.json` in the repository keeps them in the repository, and `VIDEO_STORY_HOME` overrides both. `video-story config path` says which folder is used and why (details in [docs/installation.md](docs/installation.md#where-video-story-keeps-its-files)).
+
 ### Starting without an agent
 
 Video Story also works on its own, without Claude Code or another agent: record, then watch, crop, correct subtitles and render the recording in the editor. Start it from the repository root with:
@@ -98,4 +100,4 @@ The code is split into `core` (pure logic), `capture` (recording threads), `plat
 
 ## License
 
-MIT. The Whisper model and whisper.cpp are MIT licensed; FFmpeg builds carry their own licenses (see `bin/ffmpeg/*/SOURCE.json` when downloaded).
+MIT. The Whisper model and whisper.cpp are MIT licensed; FFmpeg builds carry their own licenses (see `bin/ffmpeg/*/SOURCE.json` in the state folder when downloaded).

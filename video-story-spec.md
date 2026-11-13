@@ -64,7 +64,13 @@ Dialog **Settings** nabízí položky v tomto pořadí; ostatní klíče `config
 
 Změna **Recording Folder** platí okamžitě i pro už otevřené okno: jeho relace se přesune do nové složky, takže nahrávka, editor i čekající agent pracují s novou složkou. Během nahrávání nastavení otevřít nelze.
 
-`config.json` leží v kořeni instalace pluginu (mimo Git); pokud tam nejde zapisovat, použije se uživatelský konfigurační adresář.
+**Kde leží stav.** Vlastní soubory pluginu – `config.json`, model (`models/`) a stažený FFmpeg (`bin/ffmpeg/<os>-<arch>/`) – leží v jedné **složce stavu**, oddělené od kódu, aby je aktualizace pluginu (nová kopie v cache pluginů) nesmazala. Složka stavu je, v tomto pořadí:
+
+1. proměnná prostředí `VIDEO_STORY_HOME`, je-li nastavená (testy, zvláštní instalace);
+2. kořen kódu, pokud v něm leží `config.json` (vývojový checkout: vše zůstává u kódu jako dřív, nic se nepřesouvá);
+3. jinak `~/.video-story` (na Windows `C:\Users\<uživatel>\.video-story`), stejně na všech systémech.
+
+Model a FFmpeg se hledají nejdřív ve složce stavu, potom vedle kódu (distribuce je tam může přibalit jen ke čtení); `whisper_model_path`, `ffmpeg_path` a PATH mají přednost jako dosud. `setup` a `doctor --fix` stahují vždy do složky stavu. Nejde-li ji vytvořit nebo do ní zapsat, uložení nastavení i stahování selže s chybou `STATE_NOT_WRITABLE` – jinam se nic nezapisuje. `config path` vypíše použitý `config.json`, složku stavu a proč byla zvolena (`state_root`, `state_reason`); `--config <soubor>` určí jiný soubor. `VIDEO_STORY_ROOT` znamená jen kořen kódu (spouštěče). Nahrávky do stavu nepatří (leží v `recording_folder`), prostředí `.venv` zůstává u kódu.
 
 ## 6. Co se zaznamenává
 
@@ -199,7 +205,7 @@ Další příkazy: `status`, `transcribe`, `export`, `config`, `devices`, `scree
 | Nahrávací okno spadne nebo se ho nepodaří uložit | Soubory zůstanou v pracovní složce. Příští spuštění nahrávacího okna nebo editoru nahrávku dokončí (manifest ze snímků a zvuku, keypointy zůstanou) a zařadí do seznamu editoru. Agentovi se nepředá. |
 | Přepis selže | V editoru tlačítko Retry transcription; relace agenta trvá. |
 | Editor spadne | Relace skončí stavem `cancelled`; nahrávka i částečný přepis zůstávají. |
-| Chybí model nebo FFmpeg | Oznámí se při stisku Record; `video-story setup` je stáhne. |
+| Chybí model nebo FFmpeg | Oznámí se při stisku Record i s místy, kde se hledaly; `video-story setup` je stáhne do složky stavu (kap. 5). Spouštěče `start-video-story.bat`/`.sh` se ptají `setup --check` (kód 0: vše je, 4: chybí) a `setup` spustí jen tehdy. |
 | FFmpeg při Renderu nebo archivaci nepřečte některý snímek (drží ho antivirus, vypadla síťová složka) | Export selže s `OUTPUT_TRUNCATED` místo tiše zkráceného videa; archivace nic nesmaže. Snímek nulové délky se vynechá. |
 | Zvukovou stopu nejde při archivaci převést nebo její `.m4a` vyjde kratší než WAV | Archivace skončí chybou (`archive.json`), nesmaže se nic a nahrávka se vrátí jako běžná (stav `failed`, kap. 8). |
 | Archivace selže (FFmpeg, málo místa, přepis, pád pracovního procesu) | Dokud není hotová žádná obrazovka: stav `failed`, nahrávka je znovu běžná a upravitelná, důvod je ve stavovém řádku a v tooltipu řádku; automatickou archivaci zkusí editor při startu znovu, dokud neselhala třikrát. Po hotové obrazovce: nahrávka zůstane zamčená a příští start editoru archivaci dokončí. |

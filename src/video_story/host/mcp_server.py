@@ -33,6 +33,8 @@ from mcp.server.mcpserver import Context, Image, MCPServer
 from video_story.core.config import (
     Config,
     ConfigError,
+    StateFolderError,
+    config_location,
     config_path,
     load_config,
     update_config,
@@ -146,6 +148,8 @@ def _guard(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         return _error(exc.code, str(exc))
     except ConfigError as exc:
         return _error("CONFIG_INVALID", str(exc))
+    except StateFolderError as exc:
+        return _error(exc.code, str(exc))
     except FileNotFoundError as exc:
         return _error("NOT_FOUND", str(exc))
     except RuntimeError as exc:  # e.g. an unreadable state.json
@@ -547,7 +551,7 @@ def tool_config(
 
     def run() -> dict[str, Any]:
         if action == "path":
-            return {"path": str(path), "exists": path.exists()}
+            return config_location(config_file, "server --config")
         if action == "get":
             data = load_config(path).to_json_dict()
             if key:

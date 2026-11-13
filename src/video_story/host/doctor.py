@@ -17,13 +17,25 @@ from typing import Any
 
 from video_story import __version__
 from video_story.capture.audio_recorder import AudioError, list_input_devices
-from video_story.core.config import MODEL_FILE_NAME, Config, config_path
+from video_story.core.config import (
+    MODEL_FILE_NAME,
+    STATE_HOME_ENV,
+    Config,
+    StateFolderError,
+    config_path,
+    default_model_path,
+    ensure_state_root,
+    model_search_paths,
+    resolve_state_root,
+)
 from video_story.core.screens import assign_screen_ids
 from video_story.host.downloads import DownloadError, download_file, file_digest
 from video_story.platform import get_platform
 from video_story.transcribe.ffmpeg import (
     FfmpegNotFound,
     ensure_ffmpeg,
+    ffmpeg_origin,
+    ffmpeg_search_text,
     ffmpeg_version,
     find_ffmpeg,
 )
@@ -58,6 +70,8 @@ class DoctorReport:
     ffmpeg: Path | None = None
     model: Path | None = None
     config_path: Path | None = None
+    state_root: Path | None = None
+    state_reason: str = ""
 
     def add(self, check: Check) -> Check:
         self.checks.append(check)
@@ -74,6 +88,8 @@ class DoctorReport:
             "ffmpeg": str(self.ffmpeg) if self.ffmpeg else None,
             "model": str(self.model) if self.model else None,
             "config_path": str(self.config_path) if self.config_path else None,
+            "state_root": str(self.state_root) if self.state_root else None,
+            "state_reason": self.state_reason,
         }
 
 
@@ -205,6 +221,27 @@ def _elements_state(platform: Any) -> str:
     return f"elements recorded ({inspector.name})"
 
 
+def check_state(report: DoctorReport, prepare: bool) -> Check:
+    """The state folder (config, model, FFmpeg) in use and why; ``prepare`` creates it
+    (before downloads). An existing folder must be writable."""
+    root = resolve_state_root()
+    report.state_root = root.path
+    report.state_reason = root.reason
+    detail = f"{root.path} ({root.reason})"
+    if not prepare and not root.path.is_dir():
+        return Check("state", True, f"{detail}, not created yet")
+    try:
+        ensure_state_root()
+    except StateFolderError as exc:
+        return Check(
+            "state",
+            False,
+            str(exc),
+            f"Make the folder writable or set {STATE_HOME_ENV} to a writable folder.",
+        )
+    return Check("state", True, f"{detail} is writable")
+
+
 def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
     path = find_ffmpeg(config)
     if path is None and fix:
@@ -216,7 +253,7 @@ def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
         return Check(
             "ffmpeg",
             False,
-            "ffmpeg not found (config ffmpeg_path, PATH, bundled copy)",
+            f"ffmpeg not found ({ffmpeg_search_text()})",
             f"{SETUP_HINT} It downloads a static FFmpeg build, "
             "or install ffmpeg and set ffmpeg_path in config.json.",
         )
@@ -224,7 +261,7 @@ def check_ffmpeg(config: Config, fix: bool, report: DoctorReport) -> Check:
     if version is None:
         return Check("ffmpeg", False, f"{path} does not run", "Reinstall ffmpeg.")
     report.ffmpeg = path
-    return Check("ffmpeg", True, f"ffmpeg {version} at {path}")
+    return Check("ffmpeg", True, f"ffmpeg {version} at {path} ({ffmpeg_origin(config, path)})")
 
 
 def model_status(path: Path) -> tuple[bool, str]:
@@ -241,16 +278,36 @@ def model_status(path: Path) -> tuple[bool, str]:
     return True, f"{MODEL_FILE_NAME} OK ({size} bytes, SHA-256 verified) at {path}"
 
 
+def model_origin(config: Config, path: Path) -> str:
+    """``whisper_model_path``, ``state folder`` or ``code folder`` (a bundled copy)."""
+    if config.whisper_model_path is not None:
+        return "whisper_model_path"
+    return "state folder" if path == default_model_path() else "code folder"
+
+
+def _model_status_text(config: Config, path: Path) -> tuple[bool, str]:
+    ok, detail = model_status(path)
+    if ok:
+        return ok, f"{detail} ({model_origin(config, path)})"
+    others = [p for p in model_search_paths() if p != path]
+    if config.whisper_model_path is None and others and not path.is_file():
+        detail += " (nor " + ", ".join(str(p) for p in others) + ")"
+    return ok, detail
+
+
 def check_model(config: Config, download_model: bool, report: DoctorReport) -> Check:
     path = config.resolved_model_path()
-    ok, detail = model_status(path)
+    ok, detail = _model_status_text(config, path)
     if not ok and download_model:
+        # The download always goes to the state root (or to an explicit whisper_model_path).
+        target = config.whisper_model_path or default_model_path()
         try:
-            log.info("Downloading whisper model to %s", path)
-            download_file(MODEL_URL, path, expected_sha256=MODEL_SHA256)
+            log.info("Downloading whisper model to %s", target)
+            download_file(MODEL_URL, target, expected_sha256=MODEL_SHA256)
         except DownloadError as exc:
             return Check("model", False, f"download failed: {exc}", "Retry `video-story setup`.")
-        ok, detail = model_status(path)
+        path = config.resolved_model_path()
+        ok, detail = _model_status_text(config, path)
     if ok:
         report.model = path
         return Check("model", True, detail)
@@ -348,8 +405,10 @@ def run_doctor(config: Config, fix: bool = False, download_model: bool = False) 
     report.add(check_audio(config))
     report.add(check_computer_audio(config))
     report.add(check_mouse(config, platform))
-    report.add(check_ffmpeg(config, fix, report))
-    report.add(check_model(config, download_model, report))
+    # Downloads go to the state folder: none when it cannot be written.
+    writable = report.add(check_state(report, prepare=fix or download_model)).ok
+    report.add(check_ffmpeg(config, fix and writable, report))
+    report.add(check_model(config, download_model and writable, report))
     report.add(check_backend(config))
     report.add(check_live_transcription(config))
     report.add(check_recording_folder(config))
