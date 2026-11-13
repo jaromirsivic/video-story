@@ -72,12 +72,18 @@ recording could not be saved; see `message`. The next start of Video Story recov
 such a recording into the editor's list, but it is not yours to act on). For
 `cancelled` and `failed` tell the user in one line what happened and stop.
 
-While recording, the control window offers **Keypoint** (`Ctrl+Alt+K`): it marks the
-current moment as important (the button counts down 3, 2, 1 before the next one), and
+While recording, the control window offers **Pause** / **Resume** (`Ctrl+Alt+P`: nothing
+is recorded meanwhile, the paused time is cut out of the recording and the timeline shows
+`PAUSE`), **Keypoint** (`Ctrl+Alt+K`): it marks the current moment as important (the
+button counts down 3, 2, 1 before the next one), **Mute Mic** (`Ctrl+Alt+M`) and
+**Mute PC** (`Ctrl+Alt+L`), which record silence instead of the microphone or what the
+computer plays until pressed again (`MUTE` / `UNMUTE` in the timeline), and
 **Draw** (`Ctrl+Space` or `Ctrl+F1`) switches the drawing layer on and off (leaving it
-removes the shapes; the timeline shows them as `REMOVED`). While drawing, the user picks
-rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors (Shift makes a
-square, a circle, a closed brush shape or connected lines; Ctrl snaps the points to a
+removes the shapes; the timeline shows them as `REMOVED`; while paused the drawing is
+frozen). While drawing, the user picks
+rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors (the right mouse
+button always draws an arrow; Shift makes a square, a circle, a closed brush shape,
+connected lines or an arrow with a head at both ends; Ctrl snaps the points to a
 grid, `GRID on` / `GRID off` in the timeline), and **Sketch**
 (`S`) swaps every screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH
 off` in the timeline). A thick colored border around every screen in the frames is
@@ -152,6 +158,10 @@ One event per line, ordered by time in milliseconds since the recording started:
 43000 CLIPBOARD "Say what you want to get out of this recording, ..." (225 chars)
 51000 CURSOR -> screen2 412,388
 60000 KEYPOINT 1
+65000 PAUSE 42 s (the user paused the recording here; the 42 s are cut out, nothing was recorded meanwhile)
+66000 MUTE mic
+68500 DRAW #3 arrow #FF0000 screen1 ends 300,400 900,400 (double-headed, Shift) (pressed 67000, released 68500; frames before 66500, after 69000)
+69000 UNMUTE mic
 70500 ZOOM screen1 2.441x region 135,244 1049x656
 72300 CLICK left screen1 812,440 on edit "Search" in toolbar "Find bar" in "Settings" [notepad.exe] value "video story mouse" (frames before 72000, after 72500)
 73010-73230 DOUBLE-CLICK left screen1 300,220 on document "Návrh.docx" selected "souvislá" (frames before 73000, after 73500)
@@ -169,7 +179,9 @@ One event per line, ordered by time in milliseconds since the recording started:
 - `DRAW #id` is a finished shape: `tool` (`rectangle`, `ellipse`, `line`, `brush`,
   `arrow`), color, screen and geometry in pixels of that screen's image, origin top-left
   - `corners` (two opposite corners) of a rectangle or of an ellipse's bounding box,
-  `from`/`to` of a line, `tail`/`head` of an arrow, `bbox` of a brush stroke (its full
+  `from`/`to` of a line, `tail`/`head` of an arrow (`ends` of an arrow with a head at
+  both ends, `(double-headed, Shift)`; in the sidecar `heads: "both"`), `bbox` of a
+  brush stroke (its full
   `path` is in the sidecar). `(on the sketch canvas)` marks a shape drawn on the white
   canvas (see `SKETCH`), not on the screen. `pressed`/`released` are the mouse press and
   release; `frames before` is the last frame without the shape, `frames after` the
@@ -221,6 +233,13 @@ One event per line, ordered by time in milliseconds since the recording started:
 - `KEYPOINT n` - a moment the user marked with **Keypoint** as important (the
   green lines in the editor); use them as anchors when the user refers to "the first
   keypoint" or when you look for the important parts of a long recording.
+- `PAUSE <length>` - the user paused the recording there (the gray lines in the
+  editor); the paused time is cut out, so the frames and the speech just before and
+  after it can be minutes apart in reality. `pauses` in the manifest.
+- `MUTE` / `UNMUTE` `mic` or `computer` - the user muted that audio track (**Mute Mic**,
+  **Mute PC**): it holds silence there, so missing speech is intended, not a fault
+  (`muted from the start`: Mute PC because computer audio is off in Settings). `mutes`
+  in the manifest.
 - Mouse lines (when Mouse was switched on in Settings, the default; Windows for now) -
   what the user did with the mouse in other applications: `CLICK`, `DOUBLE-CLICK`,
   `TRIPLE-CLICK`, `MULTI-CLICK n` (button `left`, `right`, `middle`, `x1 (back)`,
@@ -325,7 +344,9 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
 
 - `config get|set <key> <value>|path` - settings (`recording_folder`,
   `capture_interval_ms` 1-1000, `image_format` png|jpeg, `jpeg_quality` 20-100,
-  `audio_input`, `computer_audio` true|false, `mouse_actions` true|false (clicks, the
+  `audio_input`, `computer_audio` true|false (false: every recording starts with
+  Mute PC pressed; the computer's sound is still recorded once the user unmutes it),
+  `mouse_actions` true|false (clicks, the
   elements under the mouse and their content; default true), `auto_stop_minutes`,
   `archive_after_days`). The user can also use
   the **Settings** button, which also opens the recording folder (recordings are

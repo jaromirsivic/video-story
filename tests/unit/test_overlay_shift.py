@@ -195,15 +195,15 @@ def test_square_follows_shift_while_dragging(overlay, keyboard):
     assert _points(rect) == [(100, 100), (200, 150)] and not rect.shift
 
 
-def test_rectangle_without_shift_and_right_button_arrow_ignore_shift(overlay, keyboard):
+def test_rectangle_without_shift_and_right_button_arrow_with_shift_is_double(overlay, keyboard):
     window = overlay.windows[0]
     drag(window, [(100, 100), (200, 150)])
     keyboard.shift = True
-    drag(window, [(300, 100), (400, 150)], shift=True, button=RIGHT)  # an arrow, not chained
+    drag(window, [(300, 100), (400, 150)], shift=True, button=RIGHT)  # not chained: double
     rect, arrow = overlay.shapes()
     assert _points(rect) == [(100, 100), (200, 150)]
     assert arrow.tool is Tool.ARROW and _points(arrow) == [(300, 100), (400, 150)]
-    assert overlay._span is None and not arrow.shift
+    assert overlay._span is None and arrow.shift and arrow.heads == "both"
 
 
 # -- closed brush ----------------------------------------------------------------------------
@@ -480,3 +480,91 @@ def test_connected_lines_go_on_on_another_screen(overlay, keyboard, qtbot):
     assert overlay.shapes() == []
     overlay.undo()
     assert overlay.shapes() == [a, b, c]
+
+
+# -- double-headed arrows ------------------------------------------------------------------
+
+
+def test_arrow_tool_with_shift_draws_a_double_headed_arrow(overlay, keyboard):
+    overlay.set_screens(_screens())
+    window = overlay.windows[0]
+    overlay.set_tool(Tool.ARROW)
+    keyboard.shift = True
+    drag(window, [(100, 300), (400, 300)], shift=True)
+    keyboard.shift = False
+    drag(window, [(100, 500), (400, 500)])
+    double, single = overlay.shapes()
+    assert double.heads == "both" and double.shift
+    assert single.heads == "end" and not single.shift
+    data = overlay.drawings()
+    assert data[0]["heads"] == "both" and data[0]["shift"] is True
+    assert "heads" not in data[1] and "shift" not in data[1]
+    # A head is painted at both ends of the double arrow, only at the end of the other.
+    image = window.grab().toImage()
+    red = QColor("#FF0000")
+    assert image.pixelColor(103, 300) == red and image.pixelColor(397, 300) == red
+    assert image.pixelColor(397, 500) == red
+    assert image.pixelColor(100, 506) != red  # no head at the tail: the shaft only
+
+    # The eraser hits the second head too.
+    overlay.set_tool(Tool.ERASER)
+    drag(window, [(108, 280), (108, 320)])
+    assert overlay.shapes() == [single]
+
+
+def test_shift_pressed_and_released_while_dragging_an_arrow(overlay, keyboard):
+    window = overlay.windows[0]
+    press(window, (100, 100), button=RIGHT)
+    move(window, (200, 100), held=RIGHT)
+    keyboard.shift = True
+    overlay._poll_shift()
+    assert overlay._span.double  # the second head appears at once
+    move(window, (300, 100), shift=True, held=RIGHT)
+    keyboard.shift = False
+    overlay._poll_shift()
+    release(window, (300, 100), button=RIGHT)  # released without Shift: one head
+    (arrow,) = overlay.shapes()
+    assert arrow.heads == "end" and not arrow.shift
+
+
+def test_double_arrow_across_screens_has_a_head_on_both_outer_pieces(overlay, keyboard, qtbot):
+    overlay.set_screens(_screens())
+    first = overlay.windows[0]
+    _second_screen(overlay, qtbot)
+    width = first.width()
+    keyboard.shift = True
+    drag(first, [(width - 50, 200), (width + 150, 200)], shift=True, button=RIGHT)
+    start, end = overlay.shapes()
+    assert start.tool is Tool.ARROW and start.heads == "start" and start.part_of is None
+    assert end.tool is Tool.ARROW and end.heads == "end" and end.screen_index == 1
+    assert start.group == end.group and start.shift and end.shift
+    assert shape_to_json(start, _screens()[0], 1.0)["heads"] == "start"
+    assert "heads" not in shape_to_json(end, _screens()[0], 1.0)
+
+
+# -- frozen drawing (the recording is paused) ------------------------------------------------
+
+
+def test_frozen_drawing_keeps_the_shapes_and_reports_every_attempt(overlay, keyboard):
+    window = overlay.windows[0]
+    drag(window, [(100, 100), (200, 200)])
+    blocked: list[int] = []
+    overlay.blocked.connect(lambda: blocked.append(1))
+    press(window, (300, 300), button=RIGHT)  # an arrow half drawn when Pause comes
+    overlay.set_frozen(True)
+    assert overlay._span is None and len(overlay.shapes()) == 1
+    assert not overlay._toolbar._tool_buttons[Tool.LINE].isEnabled()
+
+    drag(window, [(400, 400), (500, 500)])
+    assert len(overlay.shapes()) == 1 and len(blocked) == 1
+    QApplication.sendEvent(
+        window, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+    )
+    assert overlay.is_visible() and len(blocked) == 2  # Esc does not leave a frozen drawing
+    overlay._user_close()  # the toolbar's cross, Alt+F4
+    assert len(blocked) == 3 and len(overlay.shapes()) == 1
+
+    overlay.set_frozen(False)
+    assert overlay._toolbar._tool_buttons[Tool.LINE].isEnabled()
+    drag(window, [(400, 400), (500, 500)])
+    assert len(overlay.shapes()) == 2 and len(blocked) == 3

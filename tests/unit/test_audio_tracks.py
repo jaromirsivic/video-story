@@ -328,8 +328,11 @@ def test_a_failing_computer_track_never_stops_the_recording(tmp_path: Path, monk
     off = Config(recording_folder=tmp_path, computer_audio=False)
     recorder = Recorder(off, platform, paths)  # type: ignore[arg-type]
     recorder._audio = _Mic()  # type: ignore[assignment]
-    recorder._start_computer_audio()  # switched off in the settings: not even tried
-    assert recorder._computer is None
+    # Switched off in the settings: tried anyway (Mute PC is on from the start and can be
+    # taken back); here it fails, so the recording has no computer track.
+    assert recorder.is_muted("computer")
+    recorder._start_computer_audio()
+    assert recorder._computer is None and not recorder.computer_audio_recorded
 
 
 def test_computer_audio_is_reported_unsupported_off_windows(monkeypatch):

@@ -10,7 +10,9 @@ The track is a mono 16-bit WAV at the microphone's sample rate, so that the edit
 add the two sample by sample. It is kept on the recording timeline by the wall clock:
 WASAPI may deliver nothing while nothing plays, and the two devices run on clocks of
 their own, so missing time is filled with silence and a surplus is dropped whenever
-the track drifts more than :data:`DRIFT_TOLERANCE_S` from the clock.
+the track drifts more than :data:`DRIFT_TOLERANCE_S` from the clock. The time between
+:meth:`ComputerAudioRecorder.pause` and ``resume`` does not count (the recording cuts
+it out) and nothing is written meanwhile; ``muted`` writes silence of the same length.
 
 A failure of this track never stops the recording: it is logged, the track ends there
 (padded with silence up to the stop) and the microphone and the screens go on.
@@ -117,6 +119,26 @@ class ComputerAudioRecorder:
         self._frames_written = 0
         self._origin: float | None = None  # monotonic time of sample 0
         self._lock = threading.Lock()
+        # Pause: nothing is written and the paused time does not count for the clock the
+        # track follows. Mute: silence of the same length is written instead.
+        self._paused_since: float | None = None
+        self._paused_total = 0.0
+        self.muted = False
+
+    @property
+    def paused(self) -> bool:
+        return self._paused_since is not None
+
+    def pause(self) -> None:
+        with self._lock:
+            if self._paused_since is None:
+                self._paused_since = time.monotonic()
+
+    def resume(self) -> None:
+        with self._lock:
+            if self._paused_since is not None:
+                self._paused_total += time.monotonic() - self._paused_since
+                self._paused_since = None
 
     @property
     def error(self) -> str | None:
@@ -190,6 +212,8 @@ class ComputerAudioRecorder:
                         if len(data) == 0:
                             time.sleep(0.01)  # never spin while the device has nothing
                             continue
+                        if self.paused:
+                            continue  # drained, not written: the pause is cut out
                         self._write(wav, data, time.monotonic())
         except Exception as exc:  # noqa: BLE001 - device gone, driver error, disk full
             if not self._opened.is_set():
@@ -210,8 +234,13 @@ class ComputerAudioRecorder:
                 log.warning("computer audio file close failed: %s", exc)
 
     def _expected_frames(self, now: float) -> int:
+        """Samples the track should hold at monotonic time ``now`` (paused time left out)."""
         assert self._origin is not None
-        return int((now - self._origin) * self.sample_rate)
+        with self._lock:
+            paused = self._paused_total
+            if self._paused_since is not None:
+                paused += max(0.0, now - self._paused_since)
+        return max(0, int((now - self._origin - paused) * self.sample_rate))
 
     def _append(self, wav: wave.Wave_write, samples: np.ndarray) -> None:
         if len(samples) == 0:
@@ -231,6 +260,8 @@ class ComputerAudioRecorder:
         if block.ndim == 2:
             block = block.mean(axis=1) if block.shape[1] > 1 else block[:, 0]
         samples = (np.clip(block, -1.0, 1.0) * 32767.0).astype(np.int16)
+        if self.muted:
+            samples = np.zeros_like(samples)
         tolerance = int(DRIFT_TOLERANCE_S * self.sample_rate)
         expected = self._expected_frames(now)
         written = self.frames_written

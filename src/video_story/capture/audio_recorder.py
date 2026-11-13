@@ -154,13 +154,19 @@ class AudioRecorder:
         self._dropped_blocks = 0
         self._write_error: str | None = None
         self._lock = threading.Lock()
+        # Pause: the blocks are dropped (the paused time is cut out of the recording).
+        # Mute: silence of the same length is written instead (the track stays aligned).
+        self.paused = False
+        self.muted = False
 
     # Callbacks run on the PortAudio thread: keep them tiny.
     def _callback(self, indata: np.ndarray, frames: int, _time: Any, status: Any) -> None:
         if status:
             log.debug("audio status: %s", status)
+        if self.paused:
+            return
         try:
-            self._queue.put_nowait(indata.copy())
+            self._queue.put_nowait(np.zeros_like(indata) if self.muted else indata.copy())
         except queue.Full:
             self._dropped_blocks += 1
 

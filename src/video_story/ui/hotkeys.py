@@ -1,4 +1,5 @@
-"""Keyboard shortcuts of the control window while recording (Stop, Keypoint, Draw).
+"""Keyboard shortcuts of the control window while recording (Stop, Pause, Keypoint,
+Mute Mic, Mute PC, Draw).
 
 One action may have several shortcuts (Draw: Ctrl+Space and Ctrl+F1, in case another
 program, such as an input method, already holds one of them).
@@ -15,7 +16,9 @@ application-wide :class:`QShortcut`: it then works while a Video Story window (t
 control window, the drawing overlay) has the focus.
 
 Note: on keyboard layouts with AltGr, Windows reports AltGr as Ctrl+Alt, so AltGr plus
-one of the letters triggers the shortcut too while recording.
+one of the letters triggers the shortcut too while recording (on the Czech QWERTZ layout
+"đ" AltGr+S, "ł" AltGr+K and "Ł" AltGr+L cannot be typed meanwhile; P and M have no
+AltGr character there).
 """
 
 from __future__ import annotations

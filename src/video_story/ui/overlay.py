@@ -31,8 +31,10 @@ Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
 sketch/screen, ``R`` / ``E`` / ``L`` / ``B`` / ``A`` / ``U`` select a tool, ``1``-``9``
 a color. On the overlay windows also ``0`` resets the zoom.
 
-Shift (left button only; the right-button arrow and the eraser ignore it): the
-rectangle becomes a square and the ellipse a circle while Shift is held; a brush
+Shift (the eraser ignores it): an arrow - drawn with the Arrow tool or with the right
+button - gets a head at both ends while Shift is held (what is held at the release
+counts); with the left button the rectangle becomes a square and the ellipse a circle
+while Shift is held; a brush
 stroke is a closed shape (its end joins its first point) when Shift is held at the press
 or pressed during the stroke (``closed_ms`` then says when); it is finished by releasing
 Shift or the button. Lines: releasing the button with Shift
@@ -214,6 +216,11 @@ class Background(StrEnum):
     SKETCH = "sketch"
 
 
+# Where an arrow has its heads (Shape.heads).
+HEADS_END = "end"  # the usual arrow: a head at its end
+HEADS_BOTH = "both"  # drawn with Shift: a head at both ends
+HEADS_START = "start"  # the first piece of a double-headed arrow split at screen edges
+
 DEFAULT_TOOL = Tool.RECTANGLE  # the tool selected when the overlay is created
 # Tool buttons, left to right: (tool, name, key, tooltip text).
 TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
@@ -249,7 +256,8 @@ TOOL_BUTTONS: tuple[tuple[Tool, str, str, str], ...] = (
         Tool.ARROW,
         "Arrow",
         "A",
-        "draw an arrow - drag from tail to head; Ctrl: snap to the grid",
+        "draw an arrow - drag from tail to head; Shift: a head at both ends, Ctrl: snap "
+        "to the grid",
     ),
     (
         Tool.ERASER,
@@ -280,6 +288,9 @@ class Shape:
     one split shape, 0 for a shape that was not split. ``closed_ms``: when Shift closed a
     brush stroke already being drawn (``None`` when it was held from the press).
     ``grid``: the grid spacing (canvas units) its points snapped to while Ctrl was held.
+    ``heads``: where an arrow has its heads - :data:`HEADS_END` (at ``points[-1]``, the
+    usual arrow), :data:`HEADS_BOTH` (drawn with Shift) or :data:`HEADS_START` (at
+    ``points[0]`` only: the first piece of a double-headed arrow split at screen edges).
     """
 
     tool: Tool
@@ -297,6 +308,7 @@ class Shape:
     split: int = 0
     closed_ms: int | None = None
     grid: int | None = None
+    heads: str = "end"
 
     @property
     def closed(self) -> bool:
@@ -382,6 +394,8 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
         data["segment"] = shape.segment
     if shape.part_of is not None:
         data["part_of"] = str(shape.part_of)
+    if shape.tool is Tool.ARROW and shape.heads != HEADS_END:
+        data["heads"] = shape.heads
     return data
 
 
@@ -458,6 +472,17 @@ def _arrow_head(tail: QPointF, head: QPointF) -> QPolygonF | None:
     return QPolygonF([head, head + left, head + right])
 
 
+def _arrow_heads(shape: Shape) -> list[QPolygonF]:
+    """The head polygons of the arrow ``shape`` (one, or two for a double-headed one)."""
+    tail, head = shape.points[0], shape.points[-1]
+    polygons: list[QPolygonF | None] = []
+    if shape.heads in (HEADS_END, HEADS_BOTH):
+        polygons.append(_arrow_head(tail, head))
+    if shape.heads in (HEADS_START, HEADS_BOTH):
+        polygons.append(_arrow_head(head, tail))
+    return [polygon for polygon in polygons if polygon is not None]
+
+
 def paint_shape(painter: QPainter, shape: Shape) -> None:
     """Paint one shape with the overlay's stroke style (4 px, round caps/joins)."""
     if shape.is_degenerate():
@@ -481,16 +506,19 @@ def paint_shape(painter: QPainter, shape: Shape) -> None:
     elif shape.tool is Tool.LINE:
         painter.drawLine(QLineF(shape.points[0], shape.points[-1]))
     elif shape.tool is Tool.ARROW:
-        tail, head = shape.points[0], shape.points[-1]
-        polygon = _arrow_head(tail, head)
-        if polygon is None:
+        shaft = QLineF(shape.points[0], shape.points[-1])
+        polygons = _arrow_heads(shape)
+        if not polygons:
             return
-        shaft = QLineF(tail, head)
-        # Shorten the shaft so its round cap does not poke out of the head's tip.
-        shaft.setLength(max(0.0, shaft.length() - ARROW_HEAD_LENGTH * 0.6))
-        painter.drawLine(shaft)
+        # Shorten the shaft at every head so its round cap does not poke out of the tip.
+        trim = ARROW_HEAD_LENGTH * 0.6 / shaft.length()
+        start = trim if shape.heads in (HEADS_START, HEADS_BOTH) else 0.0
+        end = 1.0 - trim if shape.heads in (HEADS_END, HEADS_BOTH) else 1.0
+        if end > start:
+            painter.drawLine(QLineF(shaft.pointAt(start), shaft.pointAt(end)))
         painter.setBrush(QBrush(shape.color))
-        painter.drawPolygon(polygon)
+        for polygon in polygons:
+            painter.drawPolygon(polygon)
 
 
 def shape_outline(shape: Shape) -> QPainterPath:
@@ -519,8 +547,7 @@ def shape_outline(shape: Shape) -> QPainterPath:
         path.moveTo(points[0])
         path.lineTo(points[-1])
         if shape.tool is Tool.ARROW:
-            head = _arrow_head(points[0], points[-1])
-            if head is not None:
+            for head in _arrow_heads(shape):
                 path.addPolygon(head)
                 path.closeSubpath()
     return path
@@ -970,6 +997,11 @@ class OverlayWindow(QWidget):
         if self._controller.leaving:
             event.accept()  # drawing ended: no zoom while the overlay disappears
             return
+        if self._controller.frozen:
+            if event.angleDelta().y():
+                self._controller._blocked()  # no zoom while the recording is paused
+            event.accept()
+            return
         steps = event.angleDelta().y() / 120.0
         if (
             not steps
@@ -988,6 +1020,18 @@ class OverlayWindow(QWidget):
         controller = self._controller
         if controller.leaving:
             event.accept()  # drawing ended: swallow the click until the overlay is gone
+            return
+        if controller.frozen:
+            # Paused: nothing is drawn. The windows kept above (toolbar, control window)
+            # can still be moved and clicked; anything else is an attempt to draw.
+            global_pos = event.globalPosition().toPoint()
+            floating = controller._floating_at(global_pos)
+            if floating is None:
+                controller._blocked()
+            elif button == Qt.MouseButton.LeftButton:
+                self._floating_drag = True
+                controller._begin_floating_drag(floating, global_pos)
+            event.accept()
             return
         controller._note_ctrl(_ctrl_in(event))
         if button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
@@ -1168,6 +1212,16 @@ class OverlayWindow(QWidget):
         shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         plain = not ctrl and not alt
         letter = chr(key) if ord("A") <= key <= ord("Z") else ""
+        frozen_key = key == Qt.Key.Key_Escape or (
+            (ctrl and not alt and key == Qt.Key.Key_Z)
+            or (ctrl and alt and key == Qt.Key.Key_C)
+            or (plain and (letter == SKETCH_SHORTCUT or letter in TOOL_KEYS))
+            or (plain and Qt.Key.Key_0 <= key < Qt.Key.Key_1 + len(PALETTE))
+        )
+        if self._controller.frozen and frozen_key:
+            self._controller._blocked()  # a drawing shortcut while the recording is paused
+            event.accept()
+            return
         if key == Qt.Key.Key_Shift:
             self._controller._note_shift(True)
         elif key == Qt.Key.Key_Control:
@@ -1319,6 +1373,8 @@ class OverlayToolbar(QWidget):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(signal.emit)
             buttons.addWidget(button, 0, 2 * column, 1, 2)
+        self._action_buttons = [button for button, _signal in actions]
+        self._title = title
         icons = {
             Tool.RECTANGLE: rectangle_icon,
             Tool.ELLIPSE: ellipse_icon,
@@ -1336,7 +1392,8 @@ class OverlayToolbar(QWidget):
             button.setIconSize(QSize(TOOL_ICON_SIZE, TOOL_ICON_SIZE))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.setToolTip(
-                f"{name} ({key}): {tip}; the right mouse button always draws an arrow"
+                f"{name} ({key}): {tip}; the right mouse button always draws an arrow "
+                "(Shift: with a head at both ends)"
             )
             button.setCheckable(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1419,6 +1476,18 @@ class OverlayToolbar(QWidget):
         if not button.isChecked():
             button.setChecked(True)
 
+    def set_frozen(self, frozen: bool) -> None:
+        """Gray out every button while the recording is paused (moving still works)."""
+        buttons: list[QAbstractButton] = [
+            *self._action_buttons,
+            *self._tool_buttons.values(),
+            *self._swatches.values(),
+            self.close_cross,
+        ]
+        for button in buttons:
+            button.setEnabled(not frozen)
+        self._title.setText("Drawing tools (paused)" if frozen else "Drawing tools")
+
     def set_sketch(self, sketch: bool) -> None:
         """The button names what a click switches to: Sketch on the screens, Screen while
         sketching."""
@@ -1474,6 +1543,7 @@ class _Span:
     raw_end: QPointF | None = None  # the cursor (global), before snapping to the grid
     start_snapped: bool = False  # the start lies on the grid (Ctrl at the press)
     end_snapped: bool = False  # the end lies on the grid (Ctrl at the last move)
+    double: bool = False  # an arrow with a head at both ends (Shift held)
 
     @property
     def waiting(self) -> bool:
@@ -1520,9 +1590,15 @@ class DrawingOverlay(QObject):
     keeps the drawings for the next :meth:`show`; :meth:`close` destroys everything.
     ``closed`` is emitted only when the user leaves drawing mode (Esc, the toolbar's
     cross, Alt+F4), never for :meth:`hide` / :meth:`close` called from code.
+
+    :meth:`set_frozen` freezes the drawing while the recording is paused: everything
+    stays on screen, nothing can be changed, the toolbar's buttons are grayed out (the
+    toolbar and the windows kept above can still be moved) and every attempt to draw,
+    zoom, pan, use a drawing shortcut or leave emits ``blocked`` instead.
     """
 
     closed = Signal()
+    blocked = Signal()  # the user tried to change a frozen drawing
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -1568,8 +1644,43 @@ class DrawingOverlay(QObject):
         self._flash_timer.setInterval(FLASH_STEP_MS)
         self._flash_timer.timeout.connect(self._next_flash)
         self._leaving = False  # drawing ended, the overlay disappears after the green flash
+        self._frozen = False  # the recording is paused: nothing can be changed
 
     # -- public API ---------------------------------------------------------------
+
+    @property
+    def frozen(self) -> bool:
+        """True while the drawing is frozen (the recording is paused)."""
+        return self._frozen
+
+    def set_frozen(self, frozen: bool) -> None:
+        """Freeze (``True``) or unfreeze the drawing. Freezing drops a shape still being
+        drawn (as Esc would: only finished shapes stay); what an eraser drag removed so
+        far stays removed."""
+        frozen = bool(frozen)
+        if frozen == self._frozen:
+            return
+        self._frozen = frozen
+        if frozen:
+            self._cancel_span()
+            for window in self._windows:
+                window.cancel_gesture()
+            self._floating = None
+        if self._toolbar is not None:
+            self._toolbar.set_frozen(frozen)
+        self._refresh_drawings()
+        self._update_shift_timer()
+
+    def _blocked(self) -> None:
+        """An attempt to change the frozen drawing."""
+        self.blocked.emit()
+
+    def _unless_frozen(self, slot: Callable[[], object]) -> None:
+        """Run a drawing shortcut, or report the attempt while frozen."""
+        if self._frozen:
+            self._blocked()
+            return
+        slot()
 
     @property
     def tool(self) -> Tool:
@@ -1733,6 +1844,7 @@ class DrawingOverlay(QObject):
 
     def hide(self) -> None:
         """Hide the overlay at once (no flash); the shapes stay for the next :meth:`show`."""
+        self.set_frozen(False)
         self._stop_flash()
         self._leaving = False
         self._visible = False
@@ -2012,6 +2124,10 @@ class DrawingOverlay(QObject):
         for window in list(self._windows):
             window._on_shift_changed(held)
         span = self._span
+        if span is not None and span.tool is Tool.ARROW and span.double != held:
+            span.double = held  # an arrow gets its second head while Shift is held
+            for window in self._windows:
+                window.update()
         if span is not None and span.waiting and not held:
             self._finish_span()  # releasing Shift without a button ends connected lines
 
@@ -2063,6 +2179,7 @@ class DrawingOverlay(QObject):
             raw_end=QPointF(global_pos),
             start_snapped=snapped,
             end_snapped=snapped,
+            double=tool is Tool.ARROW and self._shift,
         )
         self._span_changed()
 
@@ -2095,6 +2212,8 @@ class DrawingOverlay(QObject):
         span = self._span
         if span is None:
             return
+        if span.tool is Tool.ARROW:
+            span.double = shift  # Shift held at the release: a head at both ends
         if shift and span.tool is Tool.LINE and span.button == Qt.MouseButton.LeftButton:
             span.button = Qt.MouseButton.NoButton  # connected lines: the end follows the cursor
             self._note_shift(True)
@@ -2193,8 +2312,19 @@ class DrawingOverlay(QObject):
                 self._next_group += 1
                 group = self._next_group
         parts: list[tuple[OverlayWindow, Shape]] = []
+        arrow = span.tool is Tool.ARROW
         for index, (window, first, last) in enumerate(pieces):
-            head = span.tool is Tool.ARROW and index == len(pieces) - 1
+            # The head is on the last piece; a double-headed arrow has its second head on
+            # the first piece (the same piece when the arrow lies on one screen).
+            at_end = arrow and index == len(pieces) - 1
+            at_start = arrow and span.double and index == 0
+            head = at_end or at_start
+            if at_end and at_start:
+                heads = HEADS_BOTH
+            elif at_start:
+                heads = HEADS_START
+            else:
+                heads = HEADS_END
             shape = Shape(
                 Tool.ARROW if head else Tool.LINE,
                 QColor(span.color),
@@ -2202,12 +2332,13 @@ class DrawingOverlay(QObject):
                 window.screen_index,
                 started_ms=span.started_ms,
                 finished_ms=finished,
-                shift=connected,
+                shift=connected or (arrow and span.double),
                 group=group,
                 segment=span.segment if connected else None,
-                part_of=Tool.ARROW if span.tool is Tool.ARROW and not head else None,
+                part_of=Tool.ARROW if arrow and not head else None,
                 split=split,
                 grid=self._grid_px if span.start_snapped or span.end_snapped else None,
+                heads=heads,
             )
             parts.append((window, shape))
         self._commit_shapes(parts)
@@ -2222,6 +2353,7 @@ class DrawingOverlay(QObject):
             span.color,
             [QPointF(window.mapFromGlobal(span.start)), QPointF(window.mapFromGlobal(span.end))],
             window.screen_index,
+            heads=HEADS_BOTH if span.tool is Tool.ARROW and span.double else HEADS_END,
         )
 
     def _refresh_drawings(self) -> None:
@@ -2355,7 +2487,7 @@ class DrawingOverlay(QObject):
             shortcut = QShortcut(sequence, parent)
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.setEnabled(self._visible)
-            shortcut.activated.connect(slot)
+            shortcut.activated.connect(lambda s=slot: self._unless_frozen(s))
             self._shortcuts.append(shortcut)
 
     def _enable_shortcuts(self, enabled: bool) -> None:
@@ -2364,6 +2496,9 @@ class DrawingOverlay(QObject):
 
     def _user_close(self) -> None:
         if not self._visible:
+            return
+        if self._frozen:
+            self._blocked()  # leaving would remove the frozen shapes
             return
         # Tell the owner first (it clears the shapes while the windows are still shown),
         # then flash green and disappear (see leave()).
@@ -2416,6 +2551,9 @@ __all__ = [
     "STROKE_WIDTH",
     "Background",
     "DrawingOverlay",
+    "HEADS_BOTH",
+    "HEADS_END",
+    "HEADS_START",
     "OverlayToolbar",
     "OverlayWindow",
     "Shape",

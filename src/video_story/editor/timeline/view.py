@@ -17,7 +17,9 @@ transcript is complete.
 Keypoints (the Keypoint button while recording) are thin green lines across the tracks
 with a green arrow at the top of the ruler, drawn like the red playhead: they cannot be
 moved, show "Keypoint N" on hover and act as a magnet for the crop handles and the
-playhead. A white arrow on the ruler marks where Play was last pressed
+playhead. Where the user paused the recording (the paused time is cut out) a gray line
+with a gray arrow is drawn the same way: "Paused 42 s" on hover, a magnet as well.
+A white arrow on the ruler marks where Play was last pressed
 (Stop returns there). The +/- zoom keeps the playhead in the middle of the view.
 
 Pressing the middle mouse button grabs the timeline: while the button is held the view
@@ -124,6 +126,7 @@ COLOR_HANDLE = QColor("#f0c040")
 COLOR_PLAYHEAD = QColor("#ff4a4a")
 COLOR_PLAY_MARKER = QColor("#ffffff")
 COLOR_KEYPOINT = QColor("#2fd36f")
+COLOR_PAUSE = QColor("#9e9e9e")  # the gray line where the recording was paused
 COLOR_TRANSCRIBING = QColor("#3ddc84")
 COLOR_TRANSCRIBING_LIGHT = QColor("#178a45")  # the bright green fades on the light lane
 COLOR_UNTRANSCRIBED = QColor(0, 0, 0, 90)  # audio whisper has not reached yet
@@ -240,6 +243,7 @@ class TimelineView(QWidget):
         self._transcription: tuple[str, int] | None = None  # (state, transcribed_ms)
         self._eta_s: float | None = None  # estimated seconds until the transcription ends
         self._hover_keypoint: int | None = None  # keypoint under the mouse (tooltip shown)
+        self._hover_pause: int | None = None  # pause (at_ms) under the mouse (tooltip shown)
         self._audio_fit = False  # the waveform is stretched to the loudest sound
         self._audio_peak: float | None = None  # loudest sample of the loaded audio (0..1)
         self._search = ""  # folded search phrase: matching narration boxes are yellow
@@ -258,11 +262,13 @@ class TimelineView(QWidget):
         self._transcription = None
         self._eta_s = None
         self._hover_keypoint = None
+        self._hover_pause = None
         self._hover_segment = None
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
         self.model.set_keypoints(recording.keypoints if recording else [])
+        self.model.set_pauses(getattr(recording, "pauses", []) if recording else [])
         self.model.fit(self._body_width())
         self._audio_peak = None
         self.waveform.load(recording.audio if recording else None)
@@ -583,6 +589,31 @@ class TimelineView(QWidget):
     def keypoint_tooltip(index: int, time_ms: int) -> str:
         return f"Keypoint {index}  ({format_timestamp(time_ms)})"
 
+    def pause_at(self, pos: QPoint) -> int | None:
+        """The pause (its ``at_ms``) whose gray line is under ``pos``; keypoints win."""
+        inside = 0 <= pos.y() <= self.tracks_bottom()
+        if pos.x() < HEADER_W or not inside:
+            return None
+        best: int | None = None
+        best_d = float(KEYPOINT_HIT_PX) + 0.5
+        for at_ms, _length in self.model.pauses:
+            d = abs(pos.x() - self._x(at_ms))
+            if d < best_d:
+                best, best_d = at_ms, d
+        return best
+
+    @staticmethod
+    def pause_tooltip(at_ms: int, duration_ms: int | None) -> str:
+        """``Paused 42 s  (00:01:05.000)``: how long the recording was paused there."""
+        if duration_ms is None:
+            length = ""
+        else:
+            seconds = max(0, round(duration_ms / 1000))
+            length = (
+                f" {seconds} s" if seconds < 60 else f" {seconds // 60} min {seconds % 60:02d} s"
+            )
+        return f"Paused{length}  ({format_timestamp(at_ms)})"
+
     # Events -----------------------------------------------------------------
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
@@ -722,18 +753,25 @@ class TimelineView(QWidget):
 
     def _update_keypoint_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
         keypoint = self.keypoint_at(pos)
-        if keypoint == self._hover_keypoint:
-            if keypoint is None:
+        pause = None if keypoint is not None else self.pause_at(pos)
+        if keypoint == self._hover_keypoint and pause == self._hover_pause:
+            if keypoint is None and pause is None:
                 self._update_narration_tooltip(pos, global_pos)
             return
         self._hover_keypoint = keypoint
-        if keypoint is None:
+        self._hover_pause = pause
+        self.update()  # the hovered line is drawn bolder
+        if keypoint is None and pause is None:
             QToolTip.hideText()
             self._update_narration_tooltip(pos, global_pos)
             return
         self._hover_segment = None
-        index = self.model.keypoints.index(keypoint) + 1
-        QToolTip.showText(global_pos, self.keypoint_tooltip(index, keypoint), self)
+        if keypoint is not None:
+            index = self.model.keypoints.index(keypoint) + 1
+            QToolTip.showText(global_pos, self.keypoint_tooltip(index, keypoint), self)
+            return
+        length = dict(self.model.pauses).get(pause)
+        QToolTip.showText(global_pos, self.pause_tooltip(pause, length), self)
 
     def _update_narration_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
         """Hovering a narration box shows its words; the header explains the track."""
@@ -756,10 +794,12 @@ class TimelineView(QWidget):
     def leaveEvent(self, event) -> None:  # noqa: N802
         if (
             self._hover_keypoint is not None
+            or self._hover_pause is not None
             or self._hover_segment is not None
             or self._hover_icon is not None
         ):
             self._hover_keypoint = None
+            self._hover_pause = None
             self._hover_segment = None
             self._hover_icon = None
             QToolTip.hideText()
@@ -808,6 +848,7 @@ class TimelineView(QWidget):
         self._paint_audio_icons(painter)
         self._paint_narration_track(painter, self.narration_rect())
         self._paint_crop(painter, canvas)
+        self._paint_pauses(painter)
         self._paint_keypoints(painter)
         self._paint_transcription(painter)
         self._paint_play_marker(painter)
@@ -1141,6 +1182,34 @@ class TimelineView(QWidget):
         if x < HEADER_W or x > self.width() - 1:
             return None
         return min(x, float(self.width() - 1))
+
+    def _paint_pauses(self, painter: QPainter) -> None:
+        """Gray lines with a gray arrow on the ruler where the recording was paused, drawn
+        like the keypoints (below them when both fall on one spot)."""
+        if not self.model.pauses:
+            return
+        bottom = self.tracks_bottom() + 1
+        painter.setClipRect(QRect(HEADER_W, 0, self._body_width(), bottom))
+        pen = QPen(COLOR_PAUSE, KEYPOINT_W)
+        painter.setBrush(QBrush(COLOR_PAUSE))
+        for at_ms, _length in self.model.pauses:
+            x = self.keypoint_x(at_ms)
+            if x is None:
+                continue
+            pen.setWidth(KEYPOINT_W + 1 if at_ms == self._hover_pause else KEYPOINT_W)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x, 0), QPointF(x, bottom))
+            painter.setPen(QPen(COLOR_PAUSE, 1))
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(x - KEYPOINT_ARROW_HALF_W, 0),
+                        QPointF(x + KEYPOINT_ARROW_HALF_W, 0),
+                        QPointF(x, KEYPOINT_ARROW_H),
+                    ]
+                )
+            )
+        painter.setClipping(False)
 
     def _paint_keypoints(self, painter: QPainter) -> None:
         """Thin green lines from the ruler down through the screen and audio tracks, each

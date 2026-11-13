@@ -87,7 +87,8 @@ read-only; Save rewrites `transcript.json` and `transcript.txt`, so the transcri
 read is the user's corrected version of what was said); drag the In/Out handles on the
 timeline or press `I`/`O` at the playhead to crop (one crop for all screens, remembered
 per recording in `crop.json`; the handles and the playhead snap to the green keypoint
-lines the user inserted while recording, which show "Keypoint N" on hover); zoom the
+lines the user inserted while recording, which show "Keypoint N" on hover, and to the
+gray lines where the recording was paused, which show "Paused 42 s"); zoom the
 timeline with -/+ (the playhead stays in the middle); click a screen track to choose
 what is previewed and exported. The bottom row holds **Auto process**, the green
 **Process** (Ctrl+Enter), **Instructions** (Ctrl+I: the master instructions for you,

@@ -123,6 +123,8 @@ def test_timeline_merges_speech_shapes_clipboard_cursor_and_keypoints(tmp_path: 
         "sketch": 0,
         "grid": 0,
         "keypoints": 1,
+        "pauses": 0,
+        "mutes": 0,
         "speech": 2,
     }
     assert lines(result) == [

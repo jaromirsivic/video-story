@@ -7,7 +7,11 @@ the computer plays meanwhile by :class:`ComputerAudioRecorder` (Windows; when it
 switched on and can be opened - a failure there never stops the recording); the mouse by
 :class:`InputRecorder` into ``input/mouse.jsonl`` (when Mouse is switched on and the
 platform offers it - again never a reason to stop).
-The recording never pauses; it ends on :meth:`stop`, :meth:`discard`, when the
+:meth:`pause` stops everything - frames, both audio tracks, the mouse, the auto-stop
+countdown - and :meth:`resume` goes on: the paused time is cut out of the timeline
+(``pauses`` in the manifest says where and how long). :meth:`set_muted` writes silence
+instead of a track from now on (``mutes``); muting and pausing are independent. The
+recording ends on :meth:`stop`, :meth:`discard`, when the
 auto-stop limit is reached or when less than :data:`MIN_FREE_BYTES` are left on the disk
 of the recording folder (``stop_reason`` says which).
 
@@ -65,6 +69,7 @@ DISK_CHECK_INTERVAL_NS = 2_000_000_000  # how often the free space is looked at
 GRAB_REOPEN_AFTER = 10  # ticks without any frame before the screen grabber is reopened
 GRAB_LOG_EVERY = 100  # failed grabs between two log lines
 MOUSE_START_WAIT_S = 30  # Stop waits at most this long for a mouse source still starting
+PAUSE_POLL_S = 0.05  # how often the paused capture thread looks whether to go on
 
 
 class RecorderEvent(StrEnum):
@@ -73,6 +78,12 @@ class RecorderEvent(StrEnum):
     LOW_DISK = "low_disk"
     STOPPED = "stopped"
     ERROR = "error"
+    PAUSED = "paused"
+    RESUMED = "resumed"
+
+
+# The audio tracks the user can mute: the microphone and what the computer plays.
+MUTE_TRACKS = ("mic", "computer")
 
 
 class StopReason(StrEnum):
@@ -122,6 +133,8 @@ class RecordingSummary:
     stop_reason: str | None = None  # a StopReason value, None when the user stopped
     computer_audio: AudioResult | None = None  # what the computer played (loopback)
     mouse: MouseInfo | None = None  # input/mouse.jsonl; None when not recorded
+    pauses: list[dict[str, Any]] = field(default_factory=list)  # {at_ms, duration_ms}
+    mutes: list[dict[str, Any]] = field(default_factory=list)  # {track, from_ms, to_ms}
 
     def to_manifest(
         self, config: Config, platform_name: str, notes: list[str] | None = None
@@ -167,6 +180,8 @@ class RecordingSummary:
             notes=list(notes or []),
             keypoints=list(self.keypoints),
             mouse=self.mouse,
+            pauses=[dict(p) for p in self.pauses],
+            mutes=[dict(m) for m in self.mutes],
         )
 
 
@@ -258,6 +273,15 @@ class Recorder:
         # click into Video Story's own window.
         self.drawing_windows: frozenset[int] = frozenset()
         self._keypoints: list[int] = []
+        # Pauses so far ({at_ms, duration_ms}; duration_ms null while it lasts) and muted
+        # intervals ({track, from_ms, to_ms}; to_ms null while muted).
+        self._pauses: list[dict[str, Any]] = []
+        self._mutes: list[dict[str, Any]] = []
+        # Muted tracks; may be set before start() (Mute PC on from the start).
+        self._muted: dict[str, bool] = {track: False for track in MUTE_TRACKS}
+        # Computer audio switched off in Settings: it is recorded anyway, muted from the
+        # start, so that Mute PC can still be taken back while recording.
+        self._muted["computer"] = not config.computer_audio
 
     # Properties -------------------------------------------------------------
 
@@ -270,7 +294,7 @@ class Recorder:
     def add_keypoint(self) -> int | None:
         """Mark the current moment; ``None`` when the previous keypoint is less than
         :data:`KEYPOINT_MIN_GAP_MS` ago (or the recording is not running)."""
-        if not self.running:
+        if not self.running or self.clock.paused:
             return None
         now = self.clock.elapsed_ms()
         with self._lock:
@@ -284,6 +308,124 @@ class Recorder:
     @property
     def elapsed_ms(self) -> int:
         return self.clock.elapsed_ms()
+
+    # Pause ------------------------------------------------------------------
+
+    @property
+    def paused(self) -> bool:
+        return self.clock.paused
+
+    @property
+    def pauses(self) -> list[dict[str, Any]]:
+        """``{at_ms, duration_ms}`` of every pause so far (``duration_ms`` null while the
+        last one lasts): ``at_ms`` is where the timeline was cut, ``duration_ms`` how long
+        the recording was paused there."""
+        return self._manifest_pauses()
+
+    def _manifest_pauses(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {"at_ms": p["at_ms"], "duration_ms": p["duration_ms"] if p["resumed"] else None}
+                for p in self._pauses
+            ]
+
+    def pause(self) -> bool:
+        """Stop recording frames, audio and the mouse until :meth:`resume`; ``False`` when
+        not recording or already paused."""
+        if not self.running:
+            return False
+        if self._audio is not None:
+            self._audio.paused = True
+        if self._computer is not None:
+            self._computer.pause()
+        if not self.clock.pause():
+            self._resume_tracks()
+            return False
+        at_ms = self.clock.elapsed_ms()
+        with self._lock:
+            if self._pauses and self._pauses[-1]["at_ms"] == at_ms:
+                self._pauses[-1]["resumed"] = False  # nothing recorded since: one pause
+            else:
+                self._pauses.append({"at_ms": at_ms, "duration_ms": None, "resumed": False})
+        log.info("recording paused at %d ms", at_ms)
+        self._write_provisional_manifest()
+        self._on_event(RecorderEvent.PAUSED, "")
+        return True
+
+    def resume(self) -> bool:
+        """Go on recording after :meth:`pause`; ``False`` when it was not paused."""
+        paused_ns = self.clock.resume()
+        if paused_ns is None:
+            return False
+        self._resume_tracks()
+        self._close_pause(paused_ns)
+        log.info("recording resumed after %d ms of pause", paused_ns // 1_000_000)
+        self._write_provisional_manifest()
+        self._on_event(RecorderEvent.RESUMED, "")
+        return True
+
+    def _resume_tracks(self) -> None:
+        if self._audio is not None:
+            self._audio.paused = False
+        if self._computer is not None:
+            self._computer.resume()
+
+    def _close_pause(self, paused_ns: int) -> None:
+        with self._lock:
+            if self._pauses and not self._pauses[-1].get("resumed", True):
+                last = self._pauses[-1]
+                last["duration_ms"] = int(last.get("duration_ms") or 0) + paused_ns // 1_000_000
+                last["resumed"] = True
+
+    # Mute -------------------------------------------------------------------
+
+    @property
+    def mutes(self) -> list[dict[str, Any]]:
+        """``{track, from_ms, to_ms}`` of every muted interval (``to_ms`` null while muted)."""
+        with self._lock:
+            return [dict(m) for m in self._mutes]
+
+    def is_muted(self, track: str) -> bool:
+        return self._muted.get(track, False)
+
+    @property
+    def computer_audio_recorded(self) -> bool:
+        """True while what the computer plays is being recorded (Mute PC can be used)."""
+        return self._computer is not None
+
+    def set_muted(self, track: str, muted: bool) -> None:
+        """Write silence instead of ``track`` (``"mic"`` or ``"computer"``) from now on, or
+        the real sound again. May be called before :meth:`start` (then from 0 ms), while
+        paused (from the moment of the pause) and is kept until changed."""
+        if track not in MUTE_TRACKS:
+            raise ValueError(f"unknown track {track!r}")
+        with self._lock:
+            if self._muted[track] == muted:
+                return
+            self._muted[track] = muted
+            started = self.started_at is not None
+            now = self.clock.elapsed_ms() if started else 0
+            if muted and started:
+                self._mutes.append({"track": track, "from_ms": now, "to_ms": None})
+            elif not muted:
+                for entry in reversed(self._mutes):
+                    if entry["track"] == track and entry["to_ms"] is None:
+                        if entry["from_ms"] == now:
+                            self._mutes.remove(entry)  # nothing was recorded muted
+                        else:
+                            entry["to_ms"] = now
+                        break
+        self._apply_mute(track)
+        log.info("%s %s", track, "muted" if muted else "unmuted")
+        if self.started_at is not None:
+            self._write_provisional_manifest()
+
+    def _apply_mute(self, track: str) -> None:
+        muted = self._muted[track]
+        if track == "mic" and self._audio is not None:
+            self._audio.muted = muted
+        elif track == "computer" and self._computer is not None:
+            self._computer.muted = muted
 
     @property
     def frame_count(self) -> int:
@@ -365,6 +507,8 @@ class Recorder:
             keypoints=self.keypoints,
             computer_audio=computer,
             mouse=self._provisional_mouse(),
+            pauses=self._manifest_pauses(),
+            mutes=self.mutes,
         )
         manifest = summary.to_manifest(self.config, self.platform.name)
         manifest.finished_at = None
@@ -407,8 +551,16 @@ class Recorder:
                 self._pool = None
                 raise
             self._start_computer_audio()
+        for track in MUTE_TRACKS:
+            self._apply_mute(track)  # muted before Record (Mute PC from the Settings)
         # The timeline starts once the audio stream is live, so audio and frames align.
-        self.started_at = now_iso()
+        with self._lock:
+            self._mutes = [
+                {"track": track, "from_ms": 0, "to_ms": None}
+                for track in MUTE_TRACKS
+                if self._muted[track]
+            ]
+            self.started_at = now_iso()
         self.clock.start()
         self._start_mouse()
         self._write_provisional_manifest()
@@ -426,7 +578,14 @@ class Recorder:
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=60)
         self._stop_mouse()
+        paused_ns = self.clock.resume()  # a pause still going on ends at Stop
+        if paused_ns is not None:
+            self._close_pause(paused_ns)
         duration_ms = self.clock.stop() if self.clock.running or self.clock.elapsed_ns() else 0
+        with self._lock:
+            for entry in self._mutes:
+                if entry["to_ms"] is None:
+                    entry["to_ms"] = duration_ms  # muted until the end
         if self._audio is not None and self._audio_result is None:
             try:
                 self._audio_result = self._audio.stop()
@@ -459,6 +618,8 @@ class Recorder:
             stop_reason=str(self._stop_reason) if self._stop_reason else None,
             computer_audio=self._computer_result,
             mouse=self._mouse_info,
+            pauses=self._manifest_pauses(),
+            mutes=self.mutes,
         )
         self._on_event(RecorderEvent.STOPPED, "")
         log.info(
@@ -471,9 +632,11 @@ class Recorder:
         return self._summary
 
     def _start_computer_audio(self) -> None:
-        """Start recording what the computer plays, when switched on; a failure is only
-        logged (the recording then has no computer track)."""
-        if not self.config.computer_audio or self._audio is None:
+        """Start recording what the computer plays - always, also when Computer Audio is
+        switched off in Settings (the track is then muted from the start, see
+        :meth:`set_muted`); a failure is only logged (the recording then has no computer
+        track and Mute PC cannot be used)."""
+        if self._audio is None:
             return
         recorder = ComputerAudioRecorder(
             self.paths.computer_audio_path(self.paths.work_dir), self._audio.sample_rate
@@ -580,6 +743,11 @@ class Recorder:
         try:
             with ScreenGrabber() as grabber:
                 while not self._stop_event.is_set():
+                    if self.clock.paused:
+                        # Paused: nothing is captured and the clock (with the auto
+                        # stop) stands still until resume() or stop().
+                        self._stop_event.wait(PAUSE_POLL_S)
+                        continue
                     target_ns = tick_index * interval_ns
                     now_ns = self.clock.elapsed_ns()
                     if now_ns >= auto_stop_ns:

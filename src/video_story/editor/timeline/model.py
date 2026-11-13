@@ -31,6 +31,8 @@ class TimelineModel:
         self.duration_ms = 0
         self.zoom = 1.0
         self.keypoints: list[int] = []  # Keypoint moments (ms, ascending)
+        # Where the recording was paused: (at_ms, duration_ms or None), ascending.
+        self.pauses: list[tuple[int, int | None]] = []
         self.play_marker_ms: int | None = None  # where Play was last pressed (Stop returns)
         self.set_duration(duration_ms)
 
@@ -43,6 +45,7 @@ class TimelineModel:
         self.in_ms = 0
         self.out_ms = self.duration_ms
         self.keypoints = []
+        self.pauses = []
         self.play_marker_ms = None
         self.fit()
 
@@ -52,15 +55,27 @@ class TimelineModel:
         """Keypoints inside the recording, sorted and unique."""
         self.keypoints = sorted({int(k) for k in keypoints if 0 <= int(k) <= self.duration_ms})
 
+    def set_pauses(self, pauses: list[tuple[int, int | None]]) -> None:
+        """Pauses inside the recording, sorted by time (one per moment)."""
+        unique = {int(at): length for at, length in pauses if 0 <= int(at) <= self.duration_ms}
+        self.pauses = sorted(unique.items())
+
     def nearest_keypoint(self, time_ms: float) -> int | None:
         if not self.keypoints:
             return None
         return min(self.keypoints, key=lambda k: abs(k - time_ms))
 
+    def nearest_marker(self, time_ms: float) -> int | None:
+        """The nearest keypoint or pause (both are magnets)."""
+        markers = [*self.keypoints, *(at for at, _length in self.pauses)]
+        if not markers:
+            return None
+        return min(markers, key=lambda k: abs(k - time_ms))
+
     def snap_to_keypoint(self, time_ms: int, tolerance_ms: float) -> int:
-        """``time_ms`` pulled onto the nearest keypoint when one is within ``tolerance_ms``
-        (the magnet of the crop handles and the playhead)."""
-        nearest = self.nearest_keypoint(time_ms)
+        """``time_ms`` pulled onto the nearest keypoint or pause when one is within
+        ``tolerance_ms`` (the magnet of the crop handles and the playhead)."""
+        nearest = self.nearest_marker(time_ms)
         if nearest is not None and abs(nearest - time_ms) <= tolerance_ms:
             return nearest
         return time_ms

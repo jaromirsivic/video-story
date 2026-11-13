@@ -133,12 +133,14 @@ class SettingsDialog(QDialog):
         form.addRow("Audio Input", self.audio_combo)
 
         # 4b. Computer Audio: also record what this computer plays
-        self.computer_audio_check = QCheckBox("Record computer audio")
+        self.computer_audio_check = QCheckBox("Record computer audio (off: Mute PC at the start)")
         self.computer_audio_check.setChecked(config.computer_audio)
         self.computer_audio_check.setToolTip(
             "Also record what this computer plays (a video in the background, a call) as a "
             "second audio track. The editor mixes it with the microphone; either track can "
-            "be switched off there. Windows only for now."
+            "be switched off there. Unticked, every recording starts with Mute PC pressed: "
+            "silence is recorded until you press Mute PC (Ctrl+Alt+L) again. Windows only "
+            "for now."
         )
         if sys.platform != "win32":
             self.computer_audio_check.setEnabled(False)

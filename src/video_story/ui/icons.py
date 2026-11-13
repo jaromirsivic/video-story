@@ -648,8 +648,64 @@ def new_folder_icon(size: int = 24, color: QColor | None = None) -> QIcon:
     return QIcon(_pixmap(size, draw))
 
 
+MUTED_RED = QColor("#D32F2F")  # the stroke through a muted microphone or speaker
+
+
+def _strike(p: QPainter, s: int) -> None:
+    """The red diagonal stroke of a muted icon (with a gap of background around it)."""
+    pen = QPen(MUTED_RED, max(1.8, s * 0.11))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.drawLine(QPointF(s * 0.14, s * 0.14), QPointF(s * 0.86, s * 0.86))
+
+
+def mic_icon(size: int = 24, color: QColor | None = None, muted: bool = False) -> QIcon:
+    """A microphone (capsule on a stand); ``muted`` adds a red stroke through it."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        pen = _transport_pen(ink, s)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawRoundedRect(QRectF(s * 0.37, s * 0.08, s * 0.26, s * 0.48), s * 0.13, s * 0.13)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # The holder: a U around the lower half of the capsule, then the stand and foot.
+        p.drawArc(QRectF(s * 0.24, s * 0.22, s * 0.52, s * 0.48), 180 * 16, 180 * 16)
+        p.drawLine(QPointF(s * 0.50, s * 0.70), QPointF(s * 0.50, s * 0.86))
+        p.drawLine(QPointF(s * 0.34, s * 0.88), QPointF(s * 0.66, s * 0.88))
+        if muted:
+            _strike(p, s)
+
+    return QIcon(_pixmap(size, draw))
+
+
+def speaker_icon(size: int = 24, color: QColor | None = None, muted: bool = False) -> QIcon:
+    """A loudspeaker with two sound waves; ``muted`` adds a red stroke through it."""
+    ink = QColor(color) if color is not None else _button_text_color()
+
+    def draw(p: QPainter, s: int) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ink)
+        p.drawPolygon(
+            QPolygonF([QPointF(s * 0.12, s * 0.38), QPointF(s * 0.28, s * 0.38),
+                       QPointF(s * 0.50, s * 0.18), QPointF(s * 0.50, s * 0.82),
+                       QPointF(s * 0.28, s * 0.62), QPointF(s * 0.12, s * 0.62)])
+        )  # fmt: skip
+        p.setPen(_transport_pen(ink, s))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(s * 0.40, s * 0.32, s * 0.24, s * 0.36), -50 * 16, 100 * 16)
+        p.drawArc(QRectF(s * 0.40, s * 0.18, s * 0.46, s * 0.64), -50 * 16, 100 * 16)
+        if muted:
+            _strike(p, s)
+
+    return QIcon(_pixmap(size, draw))
+
+
 __all__ = [
     "KEYPOINT_GREEN",
+    "mic_icon",
+    "speaker_icon",
     "new_folder_icon",
     "app_icon",
     "install_app_icon",

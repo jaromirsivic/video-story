@@ -194,6 +194,13 @@ class Manifest:
     # Transcription while recording (mode, threads, priority, windows, how far it got at
     # Stop, ...; see host.live_transcription); None when it did not run.
     live_transcription: dict[str, Any] | None = None
+    # Where the user paused the recording (Pause, Ctrl+Alt+P): ``{at_ms, duration_ms}``,
+    # the paused time is cut out of the timeline at ``at_ms`` (duration_ms null when the
+    # process died while paused).
+    pauses: list[dict[str, Any]] = field(default_factory=list)
+    # Muted audio (Mute Mic / Mute PC): ``{track: "mic"|"computer", from_ms, to_ms}``;
+    # the track holds silence there (to_ms null when the process died while muted).
+    mutes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def in_progress(self) -> bool:
@@ -239,6 +246,13 @@ class Manifest:
             "keypoints_note": "moments the user marked as important while recording "
             "(Keypoint button, Ctrl+Alt+K); the editor shows them as green lines and snaps "
             "the crop to them",
+            "pauses": [dict(p) for p in self.pauses],
+            "pauses_note": "where the user paused the recording (Pause, Ctrl+Alt+P): the "
+            "paused time (duration_ms) is cut out of the timeline at at_ms; the editor shows "
+            "gray lines there",
+            "mutes": [dict(m) for m in self.mutes],
+            "mutes_note": "muted audio (Mute Mic / Mute PC): the track (mic or computer) "
+            "holds silence from from_ms to to_ms",
             "platform": self.platform,
             "plugin_version": self.plugin_version,
             "notes": self.notes,
@@ -293,6 +307,8 @@ class Manifest:
             live_transcription=data["live_transcription"]
             if isinstance(data.get("live_transcription"), dict)
             else None,
+            pauses=_pauses_from(data.get("pauses")),
+            mutes=_mutes_from(data.get("mutes")),
         )
 
 
@@ -310,6 +326,42 @@ def _keypoints_from(raw: Any) -> list[int]:
         if ms >= 0:
             times.add(ms)
     return sorted(times)
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _pauses_from(raw: Any) -> list[dict[str, Any]]:
+    """``[{"at_ms", "duration_ms"}, ...]`` sorted by ``at_ms``; malformed entries dropped."""
+    if not isinstance(raw, list):
+        return []
+    pauses = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        at_ms = _int_or_none(item.get("at_ms"))
+        if at_ms is None or at_ms < 0:
+            continue
+        pauses.append({"at_ms": at_ms, "duration_ms": _int_or_none(item.get("duration_ms"))})
+    return sorted(pauses, key=lambda p: p["at_ms"])
+
+
+def _mutes_from(raw: Any) -> list[dict[str, Any]]:
+    """``[{"track", "from_ms", "to_ms"}, ...]`` for the tracks mic and computer."""
+    if not isinstance(raw, list):
+        return []
+    mutes = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("track") not in ("mic", "computer"):
+            continue
+        start = _int_or_none(item.get("from_ms"))
+        if start is None or start < 0:
+            continue
+        mutes.append(
+            {"track": item["track"], "from_ms": start, "to_ms": _int_or_none(item.get("to_ms"))}
+        )
+    return sorted(mutes, key=lambda m: (m["from_ms"], m["track"]))
 
 
 def write_manifest(path: Path, manifest: Manifest) -> None:

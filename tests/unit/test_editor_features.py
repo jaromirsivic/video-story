@@ -37,6 +37,7 @@ from video_story.editor.preview import SUBTITLE_MAX_LINES, PreviewPanel, Subtitl
 from video_story.editor.timeline.model import TimelineModel  # noqa: E402
 from video_story.editor.timeline.view import (  # noqa: E402
     COLOR_KEYPOINT,
+    COLOR_PAUSE,
     DARK_COLORS,
     HEADER_W,
     LIGHT_COLORS,
@@ -405,3 +406,36 @@ def test_status_bar_and_tools_row_after_the_cleanup(editor):
     assert not hasattr(editor, "fit_button")
     assert editor.in_edit.text().count(".") == 1 and len(editor.in_edit.text()) == 11
     assert editor.crop_label.text().startswith("length ") and len(editor.crop_label.text()) == 18
+
+
+def test_model_pauses_attract_like_keypoints():
+    model = TimelineModel(duration_ms=10_000, viewport_width=1000)
+    model.set_pauses([(5000, 42_000), (5000, 42_000), (20_000, 1), (3000, None)])
+    assert model.pauses == [(3000, None), (5000, 42_000)]
+    assert model.snap_to_keypoint(5100, tolerance_ms=200) == 5000
+    assert model.snap_to_keypoint(5300, tolerance_ms=200) == 5300
+    model.set_duration(5000)
+    assert model.pauses == []
+
+
+def test_pauses_are_gray_lines_with_their_length_on_hover(editor, qtbot):
+    view = editor.timeline
+    editor.model.set_pauses([(1500, 42_400)])
+    view.update()
+    x = view.keypoint_x(1500)
+    assert x is not None
+    y = view.audio_rect().center().y()
+    image = view.grab().toImage()
+    assert image.pixelColor(int(x), y).name() == COLOR_PAUSE.name()
+    assert view.pause_at(QPoint(int(x) + 2, y)) == 1500
+    assert view.pause_at(QPoint(int(view._x(1000)), y)) is None  # the keypoint there
+    assert view.pause_tooltip(1500, 42_400) == "Paused 42 s  (00:00:01.500)"
+    assert view.pause_tooltip(65_000, 185_000) == "Paused 3 min 05 s  (00:01:05.000)"
+    # The Out handle snaps onto the pause line (magnet).
+    x_out = min(int(view._x(editor.model.out_ms)), view.width() - 2)
+    y_track = view.track_rects()[0][1].center().y()
+    target = QPoint(int(view._x(1500)) + 4, y_track)
+    qtbot.mousePress(view, Qt.MouseButton.LeftButton, pos=QPoint(x_out, y_track))
+    _mouse_move(view, target)
+    qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=target)
+    assert editor.model.out_ms == 1500

@@ -241,6 +241,16 @@ class LoadedRecording:
         """Moments marked with Keypoint while recording (ms, inside the recording)."""
         return [k for k in self.manifest.keypoints if 0 <= k <= self.duration_ms]
 
+    @property
+    def pauses(self) -> list[tuple[int, int | None]]:
+        """Where the user paused the recording: ``(at_ms, duration_ms)`` inside the
+        recording (``duration_ms`` ``None`` when unknown); the paused time is cut out."""
+        return [
+            (int(p["at_ms"]), p.get("duration_ms"))
+            for p in self.manifest.pauses
+            if 0 <= int(p["at_ms"]) <= self.duration_ms
+        ]
+
     # Frames -----------------------------------------------------------------
 
     def frame_times(self, screen_id: str) -> list[int]:

@@ -58,8 +58,77 @@ LEGEND = (
     "points snap to a grid (shown on the sketch canvas only). "
     "CLIPBOARD: text the user copied. CURSOR: the "
     "cursor moved to another screen. ZOOM: a screen shown magnified (coordinates are "
-    "then in pixels of the zoomed image). KEYPOINT: a moment the user marked."
+    "then in pixels of the zoomed image). KEYPOINT: a moment the user marked. "
+    "Arrows: (double-headed, Shift) has a head at both ends, given as ends A B. "
+    "PAUSE: the user paused the recording there; the paused time is cut out (nothing "
+    "was recorded meanwhile, the timeline simply continues). MUTE / UNMUTE mic or "
+    "computer: the user muted that audio track - it holds silence until UNMUTE, so no "
+    "speech there is intended, not a fault."
 )
+
+
+def _duration_text(ms: int) -> str:
+    """``42 s`` or ``3 min 05 s`` for a pause."""
+    seconds = max(0, round(ms / 1000))
+    if seconds < 60:
+        return f"{seconds} s"
+    return f"{seconds // 60} min {seconds % 60:02d} s"
+
+
+def _pause_events(manifest: dict[str, Any], window: Crop, counts: dict[str, int]) -> list[_Event]:
+    """``PAUSE`` lines for the pauses of the manifest inside ``window``."""
+    events: list[_Event] = []
+    for pause in manifest.get("pauses") or []:
+        if not isinstance(pause, dict):
+            continue
+        at_ms, duration = pause.get("at_ms"), pause.get("duration_ms")
+        if not isinstance(at_ms, int) or not window.start_ms <= at_ms <= window.end_ms:
+            continue
+        length = _duration_text(duration) if isinstance(duration, int) else "?"
+        events.append(
+            _Event(
+                at_ms,
+                6,
+                f"{at_ms} PAUSE {length} (the user paused the recording here; the "
+                f"{length} are cut out, nothing was recorded meanwhile)",
+            )
+        )
+        counts["pauses"] = counts.get("pauses", 0) + 1
+    counts.setdefault("pauses", 0)
+    return events
+
+
+MUTE_TRACKS = {"mic": "mic", "computer": "computer"}
+
+
+def _mute_events(manifest: dict[str, Any], window: Crop, counts: dict[str, int]) -> list[_Event]:
+    """``MUTE`` / ``UNMUTE`` lines for the muted intervals of the manifest in ``window``.
+
+    An interval that began before the range shows as muted at the range start."""
+    events: list[_Event] = []
+    for mute in manifest.get("mutes") or []:
+        if not isinstance(mute, dict) or mute.get("track") not in MUTE_TRACKS:
+            continue
+        track = MUTE_TRACKS[str(mute["track"])]
+        start, end = mute.get("from_ms"), mute.get("to_ms")
+        if not isinstance(start, int):
+            continue
+        if not isinstance(end, int):
+            end = window.end_ms
+        if end < window.start_ms or start > window.end_ms:
+            continue
+        if start < window.start_ms:
+            text = f"{window.start_ms} MUTE {track} (muted since {start})"
+            events.append(_Event(window.start_ms, 6, text))
+        elif start == 0:
+            events.append(_Event(0, 6, f"0 MUTE {track} (muted from the start)"))
+        else:
+            events.append(_Event(start, 6, f"{start} MUTE {track}"))
+        if end <= window.end_ms and end < int(manifest.get("recorded_duration_ms") or 0):
+            events.append(_Event(end, 6, f"{end} UNMUTE {track}"))
+        counts["mutes"] = counts.get("mutes", 0) + 1
+    counts.setdefault("mutes", 0)
+    return events
 
 
 @dataclass
@@ -169,6 +238,11 @@ def _geometry(shape: dict[str, Any]) -> str:
             f"({len(xs)} points, path in the sidecar)"
         )
     if tool == "arrow":
+        heads = shape.get("heads")
+        if heads == "both":
+            return f"ends {_point(shape.get('from'))} {_point(shape.get('to'))}"
+        if heads == "start":  # the first piece of a split double-headed arrow
+            return f"head {_point(shape.get('from'))} to {_point(shape.get('to'))}"
         return f"tail {_point(shape.get('from'))} head {_point(shape.get('to'))}"
     if tool == "line":
         return f"from {_point(shape.get('from'))} to {_point(shape.get('to'))}"
@@ -181,7 +255,12 @@ def _shape_note(shape: dict[str, Any]) -> str:
     tool = shape.get("tool")
     notes: list[str] = []
     if shape.get("shift"):
-        kind = {"rectangle": "square", "ellipse": "circle", "brush": "closed shape"}.get(str(tool))
+        kind = {
+            "rectangle": "square",
+            "ellipse": "circle",
+            "brush": "closed shape",
+            "arrow": "double-headed",
+        }.get(str(tool))
         if kind == "closed shape" and isinstance(shape.get("closed_ms"), int):
             notes.append(f"closed shape, Shift from {shape['closed_ms']}")
         elif kind:
@@ -196,7 +275,8 @@ def _shape_note(shape: dict[str, Any]) -> str:
         elif shape.get("part_of") == "arrow":
             notes.append(f"shaft of an arrow split at a screen edge, group {group}")
         elif tool == "arrow":
-            notes.append(f"head part of an arrow split at a screen edge, group {group}")
+            part = "start head part" if shape.get("heads") == "start" else "head part"
+            notes.append(f"{part} of an arrow split at a screen edge, group {group}")
         else:
             notes.append(f"part of a line split at a screen edge, group {group}")
     return "".join(f" ({note})" for note in notes)
@@ -639,6 +719,8 @@ def build_timeline(
             events.append(_Event(time_ms, 6, f"{time_ms} KEYPOINT {kp.get('index')}"))
             counts["keypoints"] = counts.get("keypoints", 0) + 1
     counts.setdefault("keypoints", 0)
+    events.extend(_pause_events(manifest, window, counts))
+    events.extend(_mute_events(manifest, window, counts))
     counts["speech"] = len(segments)
 
     events.sort(key=lambda e: (e.time_ms, e.order))

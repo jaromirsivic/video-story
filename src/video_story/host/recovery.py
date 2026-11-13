@@ -206,6 +206,9 @@ def _completed_manifest(paths: SessionPaths, index: FrameIndex) -> Manifest | No
         )
     manifest.finished_at = _finished_at(index)
     manifest.recorded_duration_ms = duration_ms
+    for mute in manifest.mutes:
+        if mute.get("to_ms") is None:
+            mute["to_ms"] = duration_ms  # still muted when the window died
     manifest.audio = audio
     computer_path = paths.computer_audio_path(work)
     if computer_path.is_file():

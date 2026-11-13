@@ -55,14 +55,36 @@ class FakeRecorder:
         self.stopped = False
         self.keypoints: list[int] = []
         self.clipboard_provider = None
+        self.paused = False
+        self.muted = {"mic": False, "computer": not config.computer_audio}
+        self.computer_audio_recorded = True
         FakeRecorder.instances.append(self)
 
     @property
     def elapsed_ms(self) -> int:
         return self.clock.elapsed_ms()
 
+    def pause(self) -> bool:
+        if not self.running or self.paused:
+            return False
+        self.paused = self.clock.pause()
+        return self.paused
+
+    def resume(self) -> bool:
+        if not self.paused:
+            return False
+        self.clock.resume()
+        self.paused = False
+        return True
+
+    def is_muted(self, track: str) -> bool:
+        return self.muted[track]
+
+    def set_muted(self, track: str, muted: bool) -> None:
+        self.muted[track] = muted
+
     def add_keypoint(self):
-        if not self.running:
+        if not self.running or self.paused:
             return None
         now = self.clock.elapsed_ms()
         if self.keypoints and now - self.keypoints[-1] < 3000:
@@ -619,7 +641,10 @@ def test_shortcuts_are_active_only_while_recording(window, monkeypatch):
     assert window.hotkeys.enabled
     assert window.hotkeys.application_wide == [
         "Ctrl+Alt+S",
+        "Ctrl+Alt+P",
         "Ctrl+Alt+K",
+        "Ctrl+Alt+M",
+        "Ctrl+Alt+L",
         "Ctrl+Space",
         "Ctrl+F1",
     ]
@@ -962,3 +987,148 @@ def test_discard_stops_the_live_transcription(controller, monkeypatch):
     controller.start_recording()
     controller.discard()
     assert stopped == [True] and controller.live is None
+
+
+# -- the rows, Pause and Mute ----------------------------------------------------------------
+
+
+def _shown(window, widget) -> bool:
+    return widget.isVisibleTo(window)
+
+
+def test_idle_window_shows_record_settings_theme_and_tray_only(window):
+    assert _shown(window, window.record_button) and _shown(window, window.settings_button)
+    assert _shown(window, window.theme_button) and _shown(window, window.tray_button)
+    for hidden in (
+        window.pause_button,
+        window.keypoint_button,
+        window.recording_row,
+        window.draw_button,
+        window.mute_mic_button,
+        window.mute_pc_button,
+    ):
+        assert not _shown(window, hidden)
+
+
+def test_recording_window_has_three_rows(window, controller):
+    idle_height = window.height()
+    window.record_button.click()
+    assert not _shown(window, window.settings_button)
+    assert _shown(window, window.pause_button) and _shown(window, window.keypoint_button)
+    assert _shown(window, window.recording_row) and _shown(window, window.draw_button)
+    assert window.pause_button.text() == "Pause (Ctrl+Alt+P)"
+    assert window.mute_mic_button.text() == "Mute Mic (Ctrl+Alt+M)"
+    assert window.mute_pc_button.text() == "Mute PC (Ctrl+Alt+L)"
+    assert window.mute_mic_button.isEnabled() and window.mute_pc_button.isEnabled()
+    # Row 1 left to right: Stop, Pause, Keypoint, theme, tray; row 2: mutes, then Draw.
+    xs = [w.x() for w in (window.record_button, window.pause_button, window.keypoint_button)]
+    assert xs == sorted(xs) and window.keypoint_button.x() < window.theme_button.x()
+    row2 = [window.mute_mic_button.x(), window.mute_pc_button.x(), window.draw_button.x()]
+    assert row2 == sorted(row2)
+    assert window.recording_row.y() > window.record_button.y()
+    assert window.status_label.y() > window.recording_row.y()
+    assert window.height() > idle_height
+
+
+def test_pause_grays_out_keypoint_and_draw_and_survives_stop_continue(
+    window, controller, monkeypatch
+):
+    window.record_button.click()
+    recorder = FakeRecorder.instances[-1]
+    window.pause_button.click()
+    assert recorder.paused and window.paused
+    assert window.pause_button.text() == "Resume (Ctrl+Alt+P)"
+    assert not window.keypoint_button.isEnabled() and not window.draw_button.isEnabled()
+    assert window.insert_keypoint() is None
+    assert window.status_label.text().startswith("Paused ")
+    assert window.mute_mic_button.isEnabled()  # muting works while paused
+    _auto_answer_stop(monkeypatch, StopChoice.CONTINUE)
+    window.record_button.click()
+    assert recorder.paused and window.pause_button.text() == "Resume (Ctrl+Alt+P)"
+    window._pause_by_shortcut()  # Ctrl+Alt+P resumes
+    assert not recorder.paused and window.pause_button.text() == "Pause (Ctrl+Alt+P)"
+    assert window.keypoint_button.isEnabled() and window.draw_button.isEnabled()
+    assert window.status_label.text().startswith("Recording ")
+
+
+def test_mute_is_only_changed_by_the_user(window, controller, monkeypatch):
+    window.record_button.click()
+    recorder = FakeRecorder.instances[-1]
+    window.mute_mic_button.click()
+    assert recorder.muted["mic"] and window.mute_mic_button.text() == "Unmute Mic (Ctrl+Alt+M)"
+    window._mute_pc_by_shortcut()
+    assert recorder.muted["computer"] and window.mute_pc_button.isChecked()
+    window.pause_button.click()
+    window.mute_pc_button.click()  # unmuted while paused
+    window.pause_button.click()
+    _auto_answer_stop(monkeypatch, StopChoice.CONTINUE)
+    window.record_button.click()
+    assert recorder.muted == {"mic": True, "computer": False}
+    assert window.mute_mic_button.isChecked() and not window.mute_pc_button.isChecked()
+
+
+def test_mute_pc_starts_pressed_when_computer_audio_is_off(qtbot, controller):
+    controller.config = controller.config.__class__(
+        recording_folder=controller.config.recording_folder, computer_audio=False
+    )
+    w = cw.ControlWindow(controller, on_finished=lambda status: None)
+    w.show()
+    try:
+        w.record_button.click()
+        assert w.mute_pc_button.isChecked() and w.mute_pc_button.isEnabled()
+        assert w.mute_pc_button.text() == "Unmute PC (Ctrl+Alt+L)"
+        w.mute_pc_button.click()
+        assert FakeRecorder.instances[-1].muted["computer"] is False
+    finally:
+        w._done = True
+        w.close()
+
+
+def test_mute_pc_is_grayed_out_without_a_computer_track(window, controller):
+    window.record_button.click()
+    FakeRecorder.instances[-1].computer_audio_recorded = False
+    window._sync_mute_buttons()
+    assert not window.mute_pc_button.isEnabled() and window.mute_pc_button.isChecked()
+    assert "cannot be recorded" in window.mute_pc_button.toolTip()
+
+
+def test_drawing_freezes_while_paused_and_asks_to_resume(qtbot, controller, monkeypatch):
+    from PySide6.QtCore import QPoint, Qt
+
+    from video_story.ui.overlay import DrawingOverlay
+
+    w = cw.ControlWindow(
+        controller, on_finished=lambda status: None, overlay_factory=DrawingOverlay
+    )
+    w.show()
+    answers: list[bool] = []
+    monkeypatch.setattr(w, "_resume_question", lambda: answers.pop(0))
+    try:
+        w.record_button.click()
+        w.draw_button.click()
+        overlay = w._overlay
+        window = overlay.windows[0]
+        qtbot.mousePress(window, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        qtbot.mouseMove(window, QPoint(60, 60))
+        qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+        w.pause_button.click()
+        assert overlay.frozen and overlay.is_visible() and len(overlay.shapes()) == 1
+        assert w.draw_button.isChecked() and not w.draw_button.isEnabled()
+
+        # No: still paused, nothing drawn.
+        answers.append(False)
+        qtbot.mousePress(window, Qt.MouseButton.LeftButton, pos=QPoint(200, 450))
+        qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=QPoint(200, 450))
+        qtbot.waitUntil(lambda: not answers and not w._resume_question_open, timeout=1000)
+        assert w.paused and overlay.frozen and len(overlay.shapes()) == 1
+
+        # The Draw shortcut asks too (it cannot close the frozen drawing); Yes resumes.
+        answers.append(True)
+        w._draw_by_shortcut()
+        qtbot.waitUntil(lambda: not w.paused, timeout=1000)
+        assert not overlay.frozen and w.draw_button.isChecked() and w.draw_button.isEnabled()
+        assert len(overlay.shapes()) == 1
+    finally:
+        w._close_overlay()
+        w._done = True
+        w.close()
