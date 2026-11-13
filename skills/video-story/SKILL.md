@@ -317,9 +317,9 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
   lies in `<recording_folder>/<folder>/<session_id>/`, a new one in the user's main
   folder (`default` at first), and the user may move it to another folder, also
   between Stop and Process - always use the `recording_dir` the result gives (or the
-  session id), never a path you built yourself. Recordings older than `archive_after_days` (default 30) are archived when
+  session id), never a path you built yourself. Recordings older than `archive_after_days` (default 30, 0 = never) are archived when
   the editor starts (one MP4 per screen, one `.m4a` per audio track; frames and WAV
-  audio are deleted); nothing is
+  audio are deleted); no recording is
   deleted automatically.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.

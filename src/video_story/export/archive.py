@@ -31,11 +31,22 @@ instructions stay. Deleting is best effort: a file another program keeps open st
 where it is (listed in ``leftovers``) and the archive still counts as done;
 :func:`cleanup_leftovers` tries again later.
 
-A run that stops half way (editor closed, FFmpeg failed) resumes with the first audio
-track not in ``audio`` and the first screen not in ``screens_done``; their partial
-outputs are removed first. That also holds for a run an older version left half way,
-whose ``archive.json`` has no ``audio`` yet: its tracks are converted before anything
-else happens.
+A run that stops half way resumes with the first audio track not in ``audio`` and the
+first screen not in ``screens_done``; their partial outputs are removed first. That
+also holds for a run an older version left half way, whose ``archive.json`` has no
+``audio`` yet: its tracks are converted before anything else happens.
+
+Who starts that next run depends on how the run ended (:func:`_fail`). Stopped (the
+editor closed) or failed after a screen was done - its frames are gone -, the status
+stays ``archiving`` and the next editor goes on by itself. Failed with nothing deleted
+yet (FFmpeg failed, the disk is nearly full, a video did not pass the check ...), the
+status becomes ``failed`` and ``failed_attempts`` grows: the recording is an ordinary,
+editable recording again and is archived only when asked again (see
+:mod:`video_story.core.archive_state` for who asks).
+
+The user's **Cancel Archiving** ends a run that has deleted nothing yet: the editor
+stops the worker like a closing editor does and then calls :func:`cancel_archive`,
+which makes the status ``cancelled`` (no failure) and removes the partial outputs.
 """
 
 from __future__ import annotations
@@ -45,7 +56,7 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from video_story.core.archive_state import (
@@ -191,22 +202,49 @@ def remove_tree(folder: Path) -> list[str]:
     return left
 
 
+def _frames_from_middle(times: list[int], middle: int) -> Iterator[int]:
+    """Positions in the sorted ``times``, nearest to ``middle`` first (searching
+    outwards in both directions; of two equally near the earlier one comes first)."""
+    after = bisect.bisect_left(times, middle)
+    before = after - 1
+    while before >= 0 or after < len(times):
+        if after >= len(times) or (before >= 0 and middle - times[before] <= times[after] - middle):
+            yield before
+            before -= 1
+        else:
+            yield after
+            after += 1
+
+
 def _write_still(index: FrameIndex, screen_id: str, duration_ms: int, target: Path) -> None:
-    """The frame closest to the middle of the recording as a JPEG."""
+    """The frame closest to the middle of the recording as a JPEG.
+
+    A frame that is an empty file (the disk was full, the recorder was killed while
+    writing it) or cannot be read as an image is passed over for the next nearest one;
+    only a screen without a single usable frame fails (``NO_FRAMES``).
+    """
     from PIL import Image
 
     names = [n for n in index.by_screen.get(screen_id, []) if not n.is_sidecar]
     if not names:
         raise ArchiveError("NO_FRAMES", f"no frames of {screen_id} left for the still image")
     times = [n.time_ms for n in names]
-    middle = max(0, duration_ms // 2)
-    position = bisect.bisect_left(times, middle)
-    candidates = [p for p in (position - 1, position) if 0 <= p < len(names)]
-    chosen = min(candidates, key=lambda p: abs(times[p] - middle))
-    source = index.frames_dir / names[chosen].filename
+    still = None
+    for position in _frames_from_middle(times, max(0, duration_ms // 2)):
+        source = index.frames_dir / names[position].filename
+        try:
+            if source.stat().st_size == 0:
+                continue
+            with Image.open(source) as image:
+                still = image.convert("RGB")
+        except (OSError, ValueError) as exc:
+            log.warning("still of %s: cannot use %s: %s", screen_id, source.name, exc)
+            continue
+        break
+    if still is None:
+        raise ArchiveError("NO_FRAMES", f"no usable frame of {screen_id} for the still image")
     tmp = target.with_name(target.name + ".tmp")
-    with Image.open(source) as image:
-        image.convert("RGB").save(tmp, "JPEG", quality=STILL_JPEG_QUALITY)
+    still.save(tmp, "JPEG", quality=STILL_JPEG_QUALITY)
     os.replace(tmp, target)
 
 
@@ -231,10 +269,25 @@ def _duration_ms(paths: SessionPaths, index: FrameIndex) -> int:
     return duration
 
 
+CANCELLED = "CANCELLED"  # the run was stopped (the editor is closing): not a failure
+
+
 def _fail(paths: SessionPaths, state: ArchiveState, code: str, message: str) -> ArchiveError:
-    """Record why the archiving stops in ``archive.json``; returns the error to raise."""
-    state.error = message
-    write_archive_state(paths, state, paths.final_dir)
+    """Record why the archiving stops in ``archive.json``; returns the error to raise.
+
+    An error with nothing deleted yet (no screen done) gives the recording back: the
+    status becomes ``failed`` and the attempt is counted (:meth:`ArchiveState.fail`).
+    A stop (``CANCELLED``) and an error after a screen was done leave the status as it
+    is: the next editor resumes the run.
+    """
+    if code == CANCELLED:
+        state.error = message
+    else:
+        state.fail(message)
+    try:
+        write_archive_state(paths, state, paths.final_dir)
+    except OSError as exc:  # the caller (worker, editor) records the failure again
+        log.warning("cannot record the failed archiving of %s: %s", paths.session_id, exc)
     return ArchiveError(code, message)
 
 
@@ -344,6 +397,9 @@ def archive_recording(
     Raises :class:`ArchiveError` (``NOT_TRANSCRIBED``, ``NO_MANIFEST``, ``CANCELLED``,
     an export code ...) without losing what was done: ``archive.json`` keeps the audio
     tracks and the screens already archived and the next call continues with the others.
+    An error while no screen is done leaves the status ``failed`` (the recording is
+    given back, the attempt counted), any other one ``archiving``; the two errors
+    raised before anything started (``NO_MANIFEST``, ``NOT_TRANSCRIBED``) write nothing.
 
     No frame of a screen is deleted before ``verifier`` accepted the screen's MP4
     (:func:`video_story.export.ffmpeg_export.verify_video` unless given): the exporter
@@ -406,9 +462,12 @@ def archive_recording(
         if has_images:
             free = _free_bytes(paths)
             if free is not None and free < MIN_FREE_BYTES:
-                state.error = "less than 1 GB free on the disk of the recording folder"
-                write_archive_state(paths, state, base)
-                raise ArchiveError("LOW_DISK", state.error)
+                raise _fail(
+                    paths,
+                    state,
+                    "LOW_DISK",
+                    "less than 1 GB free on the disk of the recording folder",
+                )
             for stale in (mp4, jpg, srt, mp4.with_name(f"{mp4.stem}.part.mp4")):
                 _remove(stale)
             done_before = number / total
@@ -436,32 +495,29 @@ def archive_recording(
                     cancel,
                 )
             except ExportError as exc:
-                state.error = str(exc)
-                write_archive_state(paths, state, base)
-                raise ArchiveError(exc.code, str(exc)) from exc
+                raise _fail(paths, state, exc.code, str(exc)) from exc
             if not mp4.is_file() or mp4.stat().st_size == 0:
-                state.error = f"{mp4.name} was not written"
-                write_archive_state(paths, state, base)
-                raise ArchiveError("ARCHIVE_FAILED", state.error)
+                raise _fail(paths, state, "ARCHIVE_FAILED", f"{mp4.name} was not written")
             # The exporter knows the length it rendered (it falls back to the frame
             # times when the manifest has no duration); a stand-in may not say.
             expected_ms = result.duration_ms if isinstance(result, ExportResult) else duration_ms
             try:
                 verify(mp4, expected_ms, config, cancel)
             except ExportError as exc:
-                state.error = (
+                message = (
                     str(exc)
-                    if exc.code == "CANCELLED"
+                    if exc.code == CANCELLED
                     else f"{mp4.name} is not a complete video, nothing was deleted: {exc}"
                 )
-                write_archive_state(paths, state, base)
-                raise ArchiveError(exc.code, state.error) from exc
+                raise _fail(paths, state, exc.code, message) from exc
             try:
                 _write_still(index, screen_id, duration_ms, jpg)
+            except ArchiveError as exc:  # not a single usable frame
+                raise _fail(paths, state, exc.code, str(exc)) from exc
             except (OSError, ValueError) as exc:
-                state.error = f"cannot write {jpg.name}: {exc}"
-                write_archive_state(paths, state, base)
-                raise ArchiveError("ARCHIVE_FAILED", state.error) from exc
+                raise _fail(
+                    paths, state, "ARCHIVE_FAILED", f"cannot write {jpg.name}: {exc}"
+                ) from exc
         else:
             log.info("archive %s: %s has no frames, nothing to render", paths.session_id, screen_id)
         state.screens_done.append(screen_id)
@@ -496,6 +552,41 @@ def archive_recording(
         len(state.screens),
         len(state.leftovers),
     )
+    return state
+
+
+def cancel_archive(paths: SessionPaths, failed_attempts: int | None = None) -> ArchiveState | None:
+    """The user cancelled the archiving of a recording; no worker runs for it any more.
+
+    While nothing was deleted (no screen done) the status becomes ``cancelled``
+    (:meth:`ArchiveState.cancel`): ``error`` goes, the verified audio copies in
+    ``audio`` stay for a later Archive Video, and ``failed_attempts`` is set back to
+    ``failed_attempts`` when given - the value when the user cancelled, so that an
+    attempt the stop happened to end in an error is not counted. Then the partial
+    outputs (``<screenId>.mp4/.jpg/.srt`` and their partial files, an ``.m4a`` that
+    was not verified) are removed, best effort.
+
+    A recording that is archived, or whose run did a screen meanwhile, is left as it
+    is: its frames are gone and the work has to finish. Returns the state (``None``
+    when the recording was never asked to be archived).
+    """
+    base = paths.final_dir
+    state = read_archive_state(paths, base)
+    if state is None or not state.cancel():
+        return state
+    if failed_attempts is not None:
+        state.failed_attempts = failed_attempts
+    write_archive_state(paths, state, base)
+    for screen_id in state.screens:
+        mp4, jpg, srt = screen_outputs(paths, screen_id)
+        for path in (mp4, partial_output(mp4), jpg, jpg.with_name(jpg.name + ".tmp"), srt):
+            _remove(path)
+    for track in existing_tracks(paths, base):
+        target = audio_output(paths, track)
+        _remove(partial_output(target))
+        if track not in state.audio:
+            _remove(target)
+    log.info("archiving of %s cancelled", paths.session_id)
     return state
 
 

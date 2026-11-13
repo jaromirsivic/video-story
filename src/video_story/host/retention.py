@@ -4,8 +4,17 @@ recording is deleted on request (the editor's Delete Video and folder actions).
 A recording's age is taken from its session id (``YYYYMMDD-HHMMSS``, local time of the
 recording start), which is deterministic and independent of file timestamps. Recordings
 older than ``archive_after_days`` are archived by the editor when it starts (see
-:func:`recordings_due_for_archive` and :mod:`video_story.export.archive`). A session
-whose control window is still running is never deleted or archived.
+:func:`recordings_due_for_archive` and :mod:`video_story.export.archive`); archiving
+replaces the frames and the WAV audio by videos and AAC copies, the recording itself
+stays. ``archive_after_days`` 0 means never: nothing is archived automatically (the
+editor's Archive Video still works). An automatic archive that failed with nothing
+deleted is tried again at later editor starts, at most
+:data:`~video_story.core.archive_state.MAX_AUTOMATIC_ATTEMPTS` failures in all
+(:func:`archive_retry_due`). A recording whose archiving the user cancelled (status
+``cancelled``) is never archived automatically again: it has an ``archive.json``, so it
+is not due, and it is not ``failed``, so it is not retried - whatever
+``archive_after_days`` says; only the user's Archive Video archives it. A session whose
+control window is still running is never deleted or archived.
 """
 
 from __future__ import annotations
@@ -80,19 +89,33 @@ def delete_recording(paths: SessionPaths) -> str | None:
     return None
 
 
+def older_than(session_id: str, archive_after_days: int, now: datetime | None = None) -> bool:
+    """True when the recording started more than ``archive_after_days`` days ago;
+    always False for 0 days (never archive automatically) and for an id without a
+    start time."""
+    if archive_after_days <= 0:
+        return False
+    started = session_started_at(session_id)
+    if started is None:
+        return False
+    return started < (now or datetime.now()) - timedelta(days=archive_after_days)
+
+
 def recordings_due_for_archive(
     recording_folder: Path, archive_after_days: int, now: datetime | None = None
 ) -> list[SessionPaths]:
     """Saved recordings older than ``archive_after_days`` that were never asked to be
-    archived (nothing is deleted automatically: the editor archives them instead).
-    Sessions whose window still runs are left alone."""
+    archived (no recording is deleted automatically: the editor archives them instead).
+    Any ``archive.json`` counts - one whose archiving the user cancelled is never due
+    again. Sessions whose window still runs are left alone. With ``archive_after_days``
+    0 (never) nothing is due."""
     from video_story.core.archive_state import archive_state_path
 
-    cutoff = (now or datetime.now()) - timedelta(days=archive_after_days)
+    if archive_after_days <= 0:
+        return []
     due: list[SessionPaths] = []
     for paths in list_sessions(recording_folder):
-        started = session_started_at(paths.session_id)
-        if started is None or started >= cutoff:
+        if not older_than(paths.session_id, archive_after_days, now):
             continue
         if not paths.manifest_path(paths.final_dir).is_file():
             continue
@@ -102,9 +125,32 @@ def recordings_due_for_archive(
     return due
 
 
+def archive_retry_due(
+    paths: SessionPaths, archive_after_days: int, now: datetime | None = None
+) -> bool:
+    """True when the failed automatic archiving of a recording is to be tried again:
+    its status is ``failed``, it was asked for by age (never a request of the user), it
+    failed fewer than ``MAX_AUTOMATIC_ATTEMPTS`` times, the recording is still older
+    than ``archive_after_days`` (0: never) and its window does not run."""
+    from video_story.core.archive_state import (
+        MAX_AUTOMATIC_ATTEMPTS,
+        REASON_AGE,
+        read_archive_state,
+    )
+
+    if not older_than(paths.session_id, archive_after_days, now):
+        return False
+    state = read_archive_state(paths, paths.final_dir)
+    if state is None or not state.failed or state.reason != REASON_AGE:
+        return False
+    return state.failed_attempts < MAX_AUTOMATIC_ATTEMPTS and not _is_active(paths)
+
+
 __all__ = [
     "IN_USE_REASON",
+    "archive_retry_due",
     "delete_recording",
+    "older_than",
     "recording_in_use",
     "recordings_due_for_archive",
     "session_started_at",

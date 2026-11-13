@@ -542,6 +542,28 @@ def test_settings_dialog_order_and_values(qtbot, tmp_path: Path, monkeypatch):
     assert reloaded == dialog.result_config
 
 
+def test_settings_archive_after_zero_reads_never(qtbot, tmp_path: Path, monkeypatch):
+    import video_story.core.config as cfg_mod
+
+    monkeypatch.setenv(cfg_mod.CONFIG_PATH_ENV, str(tmp_path / "config.json"))
+    dialog = SettingsDialog(Config(recording_folder=tmp_path))
+    qtbot.addWidget(dialog)
+    spin = dialog.archive_after_spin
+    assert spin.minimum() == 0 and spin.maximum() == 3650
+    assert spin.specialValueText() == "Never"
+    assert spin.text() == "30 days"  # the default is unchanged
+    spin.setValue(0)
+    assert spin.text() == "Never"
+    assert "Never" in spin.toolTip()
+    dialog._save()
+    assert dialog.result_config is not None and dialog.result_config.archive_after_days == 0
+    assert cfg_mod.load_config().archive_after_days == 0
+    # A stored 0 comes back as "Never".
+    again = SettingsDialog(dialog.result_config)
+    qtbot.addWidget(again)
+    assert again.archive_after_spin.value() == 0 and again.archive_after_spin.text() == "Never"
+
+
 def test_settings_live_transcription_is_off_and_disabled_with_whisper_cli(qtbot, tmp_path):
     dialog = SettingsDialog(Config(recording_folder=tmp_path, whisper_backend="whisper-cli"))
     qtbot.addWidget(dialog)

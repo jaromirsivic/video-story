@@ -57,12 +57,51 @@ The list's menu offers **Archive Video** / **Archive Videos (N)** under Open Fol
 Location (N counts only the selected recordings that can still be archived: not
 archived, not being archived, transcript complete). Archiving runs in
 :class:`ArchiveManager`, one recording after another; recordings older than
-``archive_after_days`` join that queue when the window starts, and so do archives an
-earlier editor left unfinished. A recording in the queue cannot be edited: the preview
-says "This video is being archived." with the percentage. An archived recording shows
-the still of every screen (``archive/<screenId>.jpg``), a flat audio line and the
-subtitles; the playhead moves and subtitles can be edited, but Auto process, Process,
-Instructions and Render Video are disabled; `ARCHIVED` blinks in the middle of the preview.
+``archive_after_days`` join that queue when the window starts (0 days: never), and so
+do archives an earlier editor left unfinished. A recording in the queue cannot be
+edited: the preview says "This video is being archived." with the percentage. An
+archived recording shows the still of every screen (``archive/<screenId>.jpg``), a flat
+audio line and the subtitles; the playhead moves and subtitles can be edited, but Auto
+process, Process, Instructions and Render Video are disabled; `ARCHIVED` blinks in the
+middle of the preview.
+
+An archive that fails while nothing was deleted (no screen done) gives the recording
+back: its status is ``failed``, the status bar says why and so does the tooltip of its
+row ("Archiving failed: ..."), and it is an ordinary recording in every respect - it
+can be opened, edited, transcribed, processed, moved, deleted and archived again
+(**Archive Video** starts over with the counter of failed attempts at 0). An automatic
+(age) archive that failed is queued again when a window starts, until it has failed
+three times; a failed one the user asked for never is. An archive that fails after a
+screen was done stays locked and is resumed when the next window starts.
+
+Right under Archive Video the menu offers **Cancel Archiving** / **Cancel Archiving (N)**
+(N counts the selected recordings that wait for archiving or are being archived with
+nothing deleted yet; disabled otherwise, its tooltip says why: "Not being archived" or
+"Frames were already deleted; the archiving has to finish"). No question is asked:
+nothing is lost. A waiting recording leaves the queue; the worker of the one being
+archived is stopped like at the window's close and the queue goes on with the next
+recording (:meth:`ArchiveManager.cancel`). The status becomes ``cancelled`` and the
+status bar says "Archiving of <id> cancelled"; when the worker did a screen (or the
+whole archive) before the stop took effect, it is archived to the end instead and the
+status bar says that it could not be cancelled any more. A cancelled recording is an
+ordinary recording like a failed one, no label and no tooltip, and is never archived
+automatically again (neither by age nor by the retry), whatever ``archive_after_days``
+says; **Archive Video** queues it anew and reuses its verified audio copies.
+
+The automatic part of the queue (:meth:`EditorWindow._start_archive_queue`: new age
+requests, automatic retries, resuming, leftovers) leaves two kinds of recordings alone:
+
+* A recording this window was asked to show - ``session_id`` (``edit --session``),
+  ``recording_session`` and whatever a later attach request names - is not queued by
+  age in this run, and an age request for it whose work has not started is taken back
+  (``archive.json`` deleted), so that it opens normally. Archiving that runs or is
+  partly done, and requests of the user, are never taken back.
+* While an agent waits for ``recording_session`` and that recording's transcript is
+  not complete, the automatic part does not start at all: the fresh transcription,
+  which Process waits for, must not compete with whisper and x264 for old recordings.
+  It starts when that transcription finished or failed (the signals of
+  :class:`TranscriptionManager`), then leaving out the recording on screen. Archive
+  Video by hand is never postponed.
 
 Under the list sit the search box, the magnifier button and the Refresh button (a
 circular arrow). Enter or the magnifier searches the subtitles (see
@@ -124,7 +163,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from video_story.core.archive_state import request_archive
+from video_story.core.archive_state import (
+    REASON_AGE,
+    REASON_USER,
+    read_archive_state,
+    request_archive,
+    retry_archive,
+    withdraw_archive_request,
+)
 from video_story.core.audio_mix import COMPUTER, MICROPHONE, TRACK_LABELS, TRACK_NAMES
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.crop import Crop, read_crop, write_crop
@@ -155,13 +201,20 @@ from video_story.host.editor_session import (
 )
 from video_story.host.retention import (
     IN_USE_REASON,
+    archive_retry_due,
     delete_recording,
     recording_in_use,
     recordings_due_for_archive,
 )
 from video_story.ui.icons import new_folder_icon, refresh_icon, search_icon
 
-from .archiving import PHASE_TRANSCRIBING, ArchiveManager
+from .archiving import (
+    CANCEL_DONE,
+    CANCEL_FINISHED,
+    CANCEL_TOO_LATE,
+    PHASE_TRANSCRIBING,
+    ArchiveManager,
+)
 from .folder_dialogs import CreateFolderDialog, MoveToFolderDialog
 from .instructions_dialog import InstructionsDialog
 from .mouse_details_dialog import LOADING, MouseDetailsDialog
@@ -226,6 +279,9 @@ QPushButton:disabled { background-color: #8fcf9f; color: #f4fff6; border-color: 
 """
 DELETE_ONE_LABEL = "Delete Video"
 ARCHIVE_ONE_LABEL = "Archive Video"
+CANCEL_ARCHIVE_ONE_LABEL = "Cancel Archiving"
+NOT_BEING_ARCHIVED_NOTE = "Not being archived"
+FRAMES_DELETED_NOTE = "Frames were already deleted; the archiving has to finish"
 MOVE_ONE_LABEL = "Move Video to Folder..."
 NEW_FOLDER_TOOLTIP = "Create new folder"
 FOLDERS_MENU_TEXT = "⋯"
@@ -279,6 +335,11 @@ def delete_all_label(count: int) -> str:
 def archive_label(count: int) -> str:
     """``Archive Video`` for one recording, ``Archive Videos (4)`` for more."""
     return ARCHIVE_ONE_LABEL if count == 1 else f"Archive Videos ({count})"
+
+
+def cancel_archive_label(count: int) -> str:
+    """``Cancel Archiving`` for one recording, ``Cancel Archiving (3)`` for more."""
+    return CANCEL_ARCHIVE_ONE_LABEL if count == 1 else f"{CANCEL_ARCHIVE_ONE_LABEL} ({count})"
 
 
 class _LoadSignals(QObject):
@@ -463,6 +524,7 @@ class EditorWindow(QMainWindow):
         self.archiver.progress.connect(self._on_archive_progress)
         self.archiver.finished.connect(self._on_archive_finished)
         self.archiver.failed.connect(self._on_archive_failed)
+        self.archiver.cancelled.connect(self._on_archive_cancelled)
         self.renderer = RenderManager(config, self)
         self.renderer.started.connect(self._on_render_started)
         self.renderer.progress.connect(self._on_render_progress)
@@ -473,6 +535,15 @@ class EditorWindow(QMainWindow):
         # The recording that came from the Stop dialog: painted green in the list (the
         # newest recording when the editor was opened otherwise).
         self._fresh_session: str | None = recording_session
+        # Recordings this window was asked to show (edit --session, the recording
+        # session, attach requests): never queued for archiving by age in this run.
+        self._archive_exempt: set[str] = {s for s in (session_id, recording_session) if s}
+        # The awaited recording whose transcription the automatic archive queue waits
+        # for (None: the queue has started, or nothing holds it back).
+        self._archive_queue_waits_for: str | None = None
+        # A status bar message to show once more when the recording being loaded is
+        # there ("Loading ..." replaces whatever the status bar said before).
+        self._status_after_load: str | None = None
         self._transcription_failed: dict[str, str] = {}  # session id -> message
         self._transcription_fraction: dict[str, float] = {}
         # session id -> (monotonic time, fraction) of the first progress event: the ETA
@@ -956,7 +1027,8 @@ class EditorWindow(QMainWindow):
 
     def _show_list_menu(self, pos: QPoint) -> None:
         """Right click on the list: Open Folder Location, Move Video(s) to Folder...,
-        Archive Video(s), Delete; on a folder header the folder's menu."""
+        Archive Video(s), Cancel Archiving, Delete; on a folder header the folder's
+        menu."""
         index = self.list_view.indexAt(pos)
         header = index.data(FolderRole) if index.isValid() else None
         if isinstance(header, FolderHeader):
@@ -975,7 +1047,8 @@ class EditorWindow(QMainWindow):
 
     def recording_menu(self, clicked: RecordingItem, selected: list[RecordingItem]) -> QMenu:
         """The menu of a right click on recordings: Open Folder Location, Move Video(s)
-        to Folder..., Render Video... (or Cancel Rendering), Archive Video(s), Delete."""
+        to Folder..., Render Video... (or Cancel Rendering), Archive Video(s), Cancel
+        Archiving, Delete."""
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
         open_action = menu.addAction("Open Folder Location")
@@ -997,6 +1070,12 @@ class EditorWindow(QMainWindow):
         if not archivable:
             archive_action.setToolTip(self._not_archivable_reason(selected))
         archive_action.triggered.connect(lambda: self.archive_recordings(archivable))
+        cancellable = self.cancellable(selected)
+        cancel_action = menu.addAction(cancel_archive_label(max(1, len(cancellable))))
+        cancel_action.setEnabled(bool(cancellable))
+        if not cancellable:
+            cancel_action.setToolTip(self._not_cancellable_reason(selected))
+        cancel_action.triggered.connect(lambda: self.cancel_archiving(cancellable))
         menu.addSeparator()
         delete_action = menu.addAction(delete_label(len(selected)))
         delete_action.triggered.connect(lambda: self.delete_recordings(selected))
@@ -1050,7 +1129,7 @@ class EditorWindow(QMainWindow):
                 failures.append(f"{item.title} ({item.session_id}): {IN_USE_REASON}")
                 continue
             try:
-                request_archive(item.paths, reason="user")
+                request_archive(item.paths, reason=REASON_USER)  # a failed one starts over
             except OSError as exc:
                 failures.append(f"{item.title} ({item.session_id}): {exc}")
                 continue
@@ -1076,34 +1155,113 @@ class EditorWindow(QMainWindow):
         collect_garbage()
 
     def _start_archive_queue(self) -> None:
-        """Resume unfinished archives, retry leftover deletions once and queue the
-        recordings older than ``archive_after_days``."""
-        folder = self.config.recording_folder
+        """The automatic part of the archive queue: queue the recordings older than
+        ``archive_after_days`` (0: none), try failed automatic archives again, resume
+        unfinished archives and retry leftover deletions once.
+
+        Postponed while an agent waits for a recording whose transcript is still being
+        made (module docstring): :meth:`_resume_archive_queue` calls it again when that
+        transcription has ended. Archive Video(s) by hand does not come this way.
+        """
+        awaited = self._awaited_transcription()
+        self._archive_queue_waits_for = awaited
+        if awaited is not None:
+            log.info("automatic archiving waits for the transcription of %s", awaited)
+            return
+        skip = self._archive_queue_skips()
+        days = self.config.archive_after_days
         try:
-            due = recordings_due_for_archive(folder, self.config.archive_after_days)
+            due = recordings_due_for_archive(self.config.recording_folder, days)
         except OSError as exc:
             log.warning("cannot look for old recordings: %s", exc)
             due = []
-        requested = False
+        changed = False
         for paths in due:
-            if paths.session_id == self.recording_session:
-                continue  # an agent waits for Process on it
+            if paths.session_id in skip:
+                continue  # asked for (an agent may wait for Process on it) or on screen
             try:
-                request_archive(paths, reason="age")
+                request_archive(paths, reason=REASON_AGE)
             except OSError as exc:
                 log.warning("cannot queue %s for archiving: %s", paths.session_id, exc)
                 continue
-            log.info(
-                "recording %s is older than %d days: archiving it",
-                paths.session_id,
-                self.config.archive_after_days,
-            )
-            requested = True
-        if requested:
-            self.recordings.refresh()
+            log.info("recording %s is older than %d days: archiving it", paths.session_id, days)
+            changed = True
+        for item in self.recordings.items:
+            if not item.archive_failed or item.session_id in skip:
+                continue
+            try:
+                if not archive_retry_due(item.paths, days) or retry_archive(item.paths) is None:
+                    continue  # asked for by the user, failed too often, not old any more
+            except OSError as exc:
+                log.warning("cannot queue %s for archiving again: %s", item.session_id, exc)
+                continue
+            log.info("archiving of %s failed before: trying again", item.session_id)
+            changed = True
+        # A recording this window was asked to show must open: an age request for it
+        # that has not started (left queued by an earlier window) is taken back.
+        for session_id in sorted(self._archive_exempt):
+            changed = self._withdraw_automatic_archive(session_id) or changed
+        if changed:
+            self._rescan_recordings()
         for item in self.recordings.items:
             if item.archiving or item.archive_leftovers:
                 self.archiver.enqueue(item.paths)
+
+    def _awaited_transcription(self) -> str | None:
+        """Id of the recording an agent waits for (``recording_session``) while its
+        transcript is not complete and still can be: the automatic archive queue does
+        not start before that transcription has ended. ``None`` otherwise."""
+        session_id = self.recording_session
+        if session_id is None or session_id in self._transcription_failed:
+            return None
+        item = self.recordings.item(self.recordings.row_of(session_id))
+        if item is None:
+            return None  # not a saved recording: no transcription to wait for
+        status = transcript_status(item.paths.transcript_json_path(item.paths.final_dir))
+        return None if status.complete else session_id
+
+    def _resume_archive_queue(self, session_id: str) -> None:
+        """The transcription of ``session_id`` finished or failed: start the automatic
+        archive queue when it was waiting for that."""
+        if self._archive_queue_waits_for == session_id:
+            self._start_archive_queue()
+
+    def _archive_queue_skips(self) -> set[str]:
+        """The recordings the automatic queue does not queue by itself now: the ones
+        this window was asked to show and, when the queue starts late (the window is
+        in use by then), the recording on screen and the one being rendered."""
+        busy = {
+            self._current_item_id(),
+            self.recording.session_id if self.recording is not None else None,
+            self.renderer.running,
+        }
+        return self._archive_exempt | {session_id for session_id in busy if session_id}
+
+    def _withdraw_automatic_archive(self, session_id: str) -> bool:
+        """Take back the age request of a recording this window was asked to show,
+        unless its work has started (the worker runs for it, a screen is done) or the
+        user asked for the archive; returns whether a request was taken back."""
+        if self.archiver.running == session_id:
+            return False
+        try:
+            withdrawn = withdraw_archive_request(
+                SessionPaths(self.config.recording_folder, session_id)
+            )
+        except OSError as exc:
+            log.warning("cannot take back the archiving of %s: %s", session_id, exc)
+            return False
+        if withdrawn:
+            self.archiver.dequeue(session_id)
+            log.info("recording %s was asked for: its automatic archiving is off", session_id)
+        return withdrawn
+
+    def _rescan_recordings(self) -> None:
+        """Rescan the list after the archive queue changed ``archive.json`` files,
+        keeping the selection once the window has one."""
+        if self.recording is None and self._current_item_id() is None:
+            self.recordings.refresh()  # the window is starting: nothing is selected yet
+        else:
+            self.refresh_recordings()
 
     def _archive_notice(self, session_id: str) -> str:
         phase = self.archiver.phase(session_id)
@@ -1145,9 +1303,61 @@ class EditorWindow(QMainWindow):
         self.refresh_recordings()
 
     def _on_archive_failed(self, session_id: str, message: str) -> None:
+        """The worker failed. With nothing deleted the recording is ``failed`` now, an
+        ordinary recording again (the list rescan loads it when it is the current
+        row); with a screen done it stays locked. The status bar says why, and so
+        does the row's tooltip of a recording that was given back."""
         self.list_view.set_activity(session_id, None)
-        self._show_status_message(f"Archiving {session_id} stopped: {message}")
+        generation = self._load_generation
         self.refresh_recordings()
+        text = f"Archiving {session_id} stopped: {message}"
+        self._show_status_message(text)
+        if self._load_generation != generation:
+            self._status_after_load = text  # "Loading ..." is about to replace it
+
+    def cancellable(self, items: list[RecordingItem]) -> list[RecordingItem]:
+        """The recordings among ``items`` whose archiving can be cancelled: waiting for
+        it or being archived, nothing deleted yet (no screen done)."""
+        return [item for item in items if self.archiver.can_cancel(item.paths)]
+
+    def _not_cancellable_reason(self, items: list[RecordingItem]) -> str:
+        for item in items:
+            state = read_archive_state(item.paths, item.paths.final_dir)
+            if state is not None and state.pending and state.screens_done:
+                return FRAMES_DELETED_NOTE
+        return NOT_BEING_ARCHIVED_NOTE
+
+    def cancel_archiving(self, items: list[RecordingItem]) -> list[str]:
+        """Cancel Archiving (no confirmation: nothing is lost). A waiting recording is
+        an ordinary one again at once; the worker of the one being archived is stopped
+        and the cancel ends when it has ended (:meth:`_on_archive_cancelled`). Never
+        archived automatically again; Archive Video still works. Returns the ids whose
+        cancel was started."""
+        return [
+            item.session_id for item in self.cancellable(items) if self.archiver.cancel(item.paths)
+        ]
+
+    def _on_archive_cancelled(self, session_id: str, outcome: str) -> None:
+        """A cancel has ended: cancelled (an ordinary recording again; the list rescan
+        loads it when it is the current row) or, when the worker did a screen or the
+        whole archive before it stopped, not (it is archived to the end)."""
+        self.list_view.set_activity(session_id, None)
+        generation = self._load_generation
+        self.refresh_recordings()
+        if outcome == CANCEL_DONE:
+            text = f"Archiving of {session_id} cancelled"
+        elif outcome == CANCEL_TOO_LATE:
+            text = (
+                f"Archiving of {session_id} could not be cancelled any more: "
+                "frames were already deleted; the archiving goes on"
+            )
+        elif outcome == CANCEL_FINISHED:
+            text = f"Archiving of {session_id} could not be cancelled any more: it had finished"
+        else:
+            text = f"Archiving of {session_id} could not be cancelled: cannot write archive.json"
+        self._show_status_message(text)
+        if self._load_generation != generation:
+            self._status_after_load = text  # "Loading ..." is about to replace it
 
     def _confirm_delete(self, items: list[RecordingItem]) -> bool:
         """Ask before recordings are deleted for good (tests override this)."""
@@ -1504,6 +1714,7 @@ class EditorWindow(QMainWindow):
         return True
 
     def _load_recording(self, item: RecordingItem) -> None:
+        self._status_after_load = None
         if (
             self.recording is not None
             and self.recording.paths == item.paths
@@ -1538,6 +1749,9 @@ class EditorWindow(QMainWindow):
             self.recording_loaded.emit(None)
             return
         self._set_recording(recording)
+        notice, self._status_after_load = self._status_after_load, None
+        if notice:
+            self._show_status_message(notice)  # why its archiving stopped (see there)
         self.recording_loaded.emit(recording)
 
     def _set_recording(self, recording: LoadedRecording | None) -> None:
@@ -2605,6 +2819,7 @@ class EditorWindow(QMainWindow):
         self._transcription_position.pop(session_id, None)
         recording = self._shown(session_id)
         if recording is None:
+            self._resume_archive_queue(session_id)
             return
         count = len(recording.transcript.segments) if recording.transcript else 0
         self._show_status_message(
@@ -2618,6 +2833,7 @@ class EditorWindow(QMainWindow):
         self._sync_playhead()
         self.refresh_recordings()  # the list shows the first line and drops "transcribing"
         self._update_transcription_ui()
+        self._resume_archive_queue(session_id)  # old recordings waited for this one
         self.transcription_changed.emit(session_id)
 
     def _on_transcription_failed(self, session_id: str, message: str) -> None:
@@ -2630,6 +2846,7 @@ class EditorWindow(QMainWindow):
         if self._shown(session_id) is not None:
             self._show_status_message(f"Transcription failed: {message}")
             self._update_transcription_ui()
+        self._resume_archive_queue(session_id)  # nothing left to wait for
         self.transcription_changed.emit(session_id)
 
     # Auto process -----------------------------------------------------------
@@ -2818,6 +3035,13 @@ class EditorWindow(QMainWindow):
             self._adopt_recording_session(request.recording_session)
             self._fresh_session = request.recording_session  # green from now on
             self._update_fresh()
+        # What the request asks for is not archived by age in this run; an age request
+        # for it that waits in the queue (its work has not started) is taken back, so
+        # that the recording opens instead of the "being archived" notice.
+        for asked in (request.session_id, request.recording_session):
+            if asked is not None:
+                self._archive_exempt.add(asked)
+                self._withdraw_automatic_archive(asked)
         if request.session_id is None:
             self.refresh_recordings()
         else:
@@ -2829,6 +3053,10 @@ class EditorWindow(QMainWindow):
                 self.list_view.setCurrentIndex(self.recordings.index(row))
             else:
                 self._select_row(row)
+        if self._archive_queue_waits_for is not None:
+            # The automatic archive queue has not started: it waits for the recording
+            # session of this request from now on (or starts, when nothing holds it).
+            self._start_archive_queue()
         self._update_status()
         self._maybe_start_countdown()  # an agent waits now
         # Un-minimize only: showNormal() would also drop a maximized window to normal.

@@ -19,7 +19,9 @@ A label in the middle of the thumbnail (black capitals on white) tells what happ
 a recording: ``TRANSCRIBING...``, ``ARCHIVING...`` and ``RENDERING...`` with the
 percentage under it (one decimal; archiving counts all screens together, so one of two
 screens done is 50 %), ``ARCHIVED`` once it was archived. A recording without a label is
-not archived.
+not archived; one whose archiving failed with nothing deleted has no label either (it is
+an ordinary recording again), the tooltip of its row says ``Archiving failed: <reason>``;
+nor has one whose archiving the user cancelled.
 
 The freshly recorded video (:meth:`RecordingsListView.set_fresh`; the window names the
 recording that came from the Stop dialog, otherwise the newest one) has a light green

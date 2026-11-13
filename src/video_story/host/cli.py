@@ -467,6 +467,15 @@ def cmd_transcribe_live(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+# The archive worker runs below normal priority ("faster" of ``lower_own_priority``),
+# not in the background mode of "light": on Windows a child process inherits the
+# below-normal priority class, while of the background mode it inherits only the low
+# I/O and memory priority - FFmpeg (x264, the heavy part) would run at normal CPU
+# priority (measured on Windows 11, 2026-11-13).
+ARCHIVE_PRIORITY_MODE = "faster"
+ARCHIVE_CANCELLED = "CANCELLED"  # the worker was stopped (the editor closed): no failure
+
+
 def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
     """Archive a saved recording, one JSON event per line (the editor's archive worker).
 
@@ -476,15 +485,27 @@ def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
     0..1 of that phase) and the returned ``done`` (``status``, ``leftovers``). With
     ``--stop-on-eof`` the run stops cleanly (FFmpeg cancelled, partial files removed)
     once stdin is closed: the editor closes it when it quits.
+
+    Nobody waits for an archive, so the process lowers its own priority before it does
+    anything (:data:`ARCHIVE_PRIORITY_MODE`); the FFmpeg and whisper processes it
+    starts inherit that.
+
+    A run that ends with an error - in the transcription as much as in the archiving,
+    but not one that was stopped - is recorded in ``archive.json``: with nothing
+    deleted yet the recording is given back (status ``failed``, the attempt counted
+    once; see :func:`video_story.core.archive_state.record_archive_failure`).
     """
     import threading
 
+    from video_story.core.archive_state import record_archive_failure
     from video_story.core.transcript import Segment, transcript_status
     from video_story.editor.recording import LoadedRecording
     from video_story.export.archive import ArchiveError, archive_recording
     from video_story.host.runner import SessionError, resolve_session
+    from video_story.platform.process import lower_own_priority
     from video_story.transcribe.pipeline import stream_transcription
 
+    log.info("archive worker priority: %s", lower_own_priority(ARCHIVE_PRIORITY_MODE))
     cfg = _load(args)
     try:
         paths = resolve_session(cfg, args.directory)
@@ -509,7 +530,7 @@ def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
 
         threading.Thread(target=watch_stdin, name="stdin-eof", daemon=True).start()
 
-    if not transcript_status(paths.transcript_json_path(base)).complete:
+    def transcribe() -> None:
         _require_audio(paths, base)
         emit_event({"event": "phase", "phase": "transcribing"})
         recording = LoadedRecording.load(paths)
@@ -532,17 +553,29 @@ def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
         )
         recording.finish_transcript(done.get("language"), done.get("model"), done.get("backend"))
         if stop.is_set():
-            raise CliError("CANCELLED", "archiving was stopped")
-
-    emit_event({"event": "phase", "phase": "archiving"})
+            raise CliError(ARCHIVE_CANCELLED, "archiving was stopped")
 
     def on_progress(fraction: float, _text: str) -> None:
         emit_event({"event": "progress", "phase": "archiving", "fraction": round(fraction, 4)})
 
     try:
-        state = archive_recording(paths, cfg, progress=on_progress, cancel=stop.is_set)
-    except ArchiveError as exc:
-        raise CliError(exc.code, str(exc)) from exc
+        if not transcript_status(paths.transcript_json_path(base)).complete:
+            transcribe()
+        emit_event({"event": "phase", "phase": "archiving"})
+        try:
+            state = archive_recording(paths, cfg, progress=on_progress, cancel=stop.is_set)
+        except ArchiveError as exc:
+            raise CliError(exc.code, str(exc)) from exc
+    except Exception as exc:
+        # Whatever went wrong (no audio, whisper, FFmpeg, a bug): unless the run was
+        # stopped, the recording must not stay locked in the archive queue.
+        if getattr(exc, "code", None) != ARCHIVE_CANCELLED and not stop.is_set():
+            reason = exc.message if isinstance(exc, CliError) else f"{type(exc).__name__}: {exc}"
+            try:
+                record_archive_failure(paths, reason)
+            except OSError as error:
+                log.warning("cannot record the failed archiving of %s: %s", paths.session_id, error)
+        raise
     return {
         "event": "done",
         "recording_dir": str(base),

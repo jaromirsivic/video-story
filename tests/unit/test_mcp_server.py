@@ -437,6 +437,10 @@ def test_config_get_set_path(config_file: Path):
     assert mcp_server.tool_config("set", "audio_input", "null")["config"]["audio_input"] is None
     invalid = mcp_server.tool_config("set", "capture_interval_ms", "99999")
     assert invalid["ok"] is False and invalid["code"] == "CONFIG_INVALID"
+    never = mcp_server.tool_config("set", "archive_after_days", "0")  # 0 = never archive
+    assert never["ok"] is True and never["config"]["archive_after_days"] == 0
+    invalid = mcp_server.tool_config("set", "archive_after_days", "-1")
+    assert invalid["ok"] is False and invalid["code"] == "CONFIG_INVALID"
     unknown = mcp_server.tool_config("get", "nope")
     assert unknown["ok"] is False and unknown["code"] == "UNKNOWN_KEY"
     unknown = mcp_server.tool_config("set", "nope", "1")

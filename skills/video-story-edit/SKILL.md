@@ -77,7 +77,9 @@ ones; the templates **Draft Intent**, **Create Plan** and **Implement** fill the
 with a ready-made instruction), at the right edge. Right-click a recording for **Render Video...**
 (above Archive Video): pick the screen and the MP4 file (`Select File Name`), and the
 cropped range renders in the background with `RENDERING...` on the row; one video at a
-time, **Cancel Rendering** on that row stops it. Process hands the
+time, **Cancel Rendering** on that row stops it. **Cancel Archiving** (below Archive
+Video) takes back an archive that has deleted nothing yet; that recording is never
+archived automatically again. Process hands the
 cropped range and the instructions to you and closes the editor. A recording that came
 straight from the Stop dialog is transcribed in the background of the editor: a green
 arrow under the audio track marks how far whisper got with `transcribing (ETA: m:ss)`

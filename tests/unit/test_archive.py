@@ -23,7 +23,10 @@ from video_story.core.archive_state import (  # noqa: E402
     ArchiveStatus,
     archive_state_path,
     read_archive_state,
+    record_archive_failure,
     request_archive,
+    retry_archive,
+    withdraw_archive_request,
     write_archive_state,
 )
 from video_story.core.audio_mix import TrackSelection, write_selection  # noqa: E402
@@ -38,6 +41,7 @@ from video_story.export.archive import (  # noqa: E402
     ArchiveError,
     archive_recording,
     audio_output,
+    cancel_archive,
     cleanup_leftovers,
     screen_outputs,
 )
@@ -217,18 +221,23 @@ def test_archive_keeps_the_frames_of_a_video_that_fails_verification(recording: 
     assert "screen1.mp4" in str(error.value) and "nothing was deleted" in str(error.value)
     assert exporter.calls == ["screen1"]  # stopped at the first screen
     state = read_archive_state(recording)
-    assert state is not None and state.status is ArchiveStatus.ARCHIVING
+    # Nothing was deleted: the recording is given back (failed), not left locked.
+    assert state is not None and state.status is ArchiveStatus.FAILED
+    assert state.failed_attempts == 1
     assert state.screens_done == [] and "cut short" in (state.error or "")
     assert len(_images(recording, "screen1")) == 5 and len(_images(recording, "screen2")) == 5
     assert recording.audio_path(recording.final_dir).is_file()
     assert not screen_outputs(recording, "screen1")[1].exists()  # no still either
 
-    # A later screen that fails keeps its own frames; the screen before it is done.
+    # A later screen that fails keeps its own frames; the screen before it is done,
+    # its frames are gone: the archive stays locked (archiving) and is resumed.
     with pytest.raises(ArchiveError):
         archive_recording(
             recording, Config(), exporter=exporter, verifier=FakeVerifier(reject="screen2.mp4")
         )
-    assert read_archive_state(recording).screens_done == ["screen1"]
+    state = read_archive_state(recording)
+    assert state.screens_done == ["screen1"] and state.status is ArchiveStatus.ARCHIVING
+    assert state.failed_attempts == 1 and "cut short" in (state.error or "")
     assert _images(recording, "screen1") == [] and len(_images(recording, "screen2")) == 5
     assert recording.audio_path(recording.final_dir).is_file()
 
@@ -375,7 +384,7 @@ def test_audio_that_fails_the_check_keeps_everything(recording: SessionPaths, au
     assert "nothing was deleted" in str(error.value)
     assert exporter.calls == []
     state = read_archive_state(recording)
-    assert state is not None and state.status is ArchiveStatus.ARCHIVING
+    assert state is not None and state.status is ArchiveStatus.FAILED  # given back
     assert state.audio == {"microphone": "audio.m4a"} and state.screens_done == []
     assert "cut short" in (state.error or "")
     assert recording.audio_path(final).is_file() and computer.is_file()
@@ -654,6 +663,365 @@ def test_request_archive_queues_once(recording: SessionPaths):
     assert first.status is ArchiveStatus.QUEUED and first.reason == "age"
     again = request_archive(recording, reason="user")
     assert again.reason == "age"  # an existing request is kept
+
+
+# A failed archive gives the recording back ------------------------------------
+
+
+def test_archive_state_of_an_older_version_has_no_failed_attempts():
+    old = {"status": "archiving", "reason": "age", "screens": ["screen1"], "error": "x"}
+    state = ArchiveState.from_dict(old)
+    assert state.failed_attempts == 0 and state.status is ArchiveStatus.ARCHIVING
+    assert state.pending and not state.failed and state.error == "x"
+    assert ArchiveState.from_dict({"failed_attempts": None}).failed_attempts == 0
+    assert ArchiveState.from_dict({"failed_attempts": "2"}).failed_attempts == 0
+    failed = ArchiveState(status=ArchiveStatus.FAILED, failed_attempts=2, error="why")
+    again = ArchiveState.from_dict(json.loads(json.dumps(failed.to_dict())))
+    assert again.failed and not again.pending and not again.archived
+    assert again.failed_attempts == 2 and again.error == "why"
+
+
+def test_failed_archive_with_nothing_deleted_gives_the_recording_back(recording: SessionPaths):
+    """Status ``failed``, the attempt counted: the recording loads like any other, and
+    the next attempt reuses the audio copy that was already verified."""
+    request_archive(recording, reason="age")
+    exporter = FakeExporter(fail_on="screen1")
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=exporter)
+    state = read_archive_state(recording)
+    assert state.status is ArchiveStatus.FAILED and state.failed_attempts == 1
+    assert state.reason == "age" and "simulated" in state.error and state.screens_done == []
+    assert state.audio == {"microphone": "audio.m4a"}  # verified: kept for the next attempt
+    assert _archive_names(recording) == ["archive.json", "audio.m4a"]  # no partial video
+    loaded = LoadedRecording.load(recording)
+    assert not loaded.archived and loaded.audio is not None
+    assert len(loaded.frame_times("screen1")) == 5
+    info = describe_recording(recording)["archive"]
+    assert info["status"] == "failed" and "simulated" in info["error"]
+    assert "nothing was deleted" in info["note"]
+
+    # Every further attempt that fails the same way is counted.
+    exporter.fail_on = "screen1"
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=exporter)
+    assert read_archive_state(recording).failed_attempts == 2
+
+    # The attempt that works leaves no trace of the failures but the counter.
+    state = archive_recording(recording, Config(), exporter=exporter)
+    assert state.archived and state.error is None and state.failed_attempts == 2
+
+
+def test_request_archive_starts_a_failed_archive_over(recording: SessionPaths, audio: FakeAudio):
+    request_archive(recording, reason="age")
+    for _ in range(2):
+        with pytest.raises(ArchiveError):
+            archive_recording(recording, Config(), exporter=FakeExporter(fail_on="screen1"))
+    assert read_archive_state(recording).failed_attempts == 2
+    state = request_archive(recording, reason="user")  # Archive Video in the editor
+    assert state.status is ArchiveStatus.QUEUED and state.reason == "user"
+    assert state.failed_attempts == 0 and state.error is None
+    assert state.audio == {"microphone": "audio.m4a"}  # kept
+    assert read_archive_state(recording).to_dict() == state.to_dict()
+    assert request_archive(recording, reason="age").reason == "user"  # queued: kept as it is
+    audio.encoded.clear()
+    assert archive_recording(recording, Config(), exporter=FakeExporter()).archived
+    assert audio.encoded == []  # the verified copy was reused
+
+
+def test_retry_keeps_the_counter_and_a_failure_is_counted_once(recording: SessionPaths):
+    assert retry_archive(recording) is None  # never asked
+    assert record_archive_failure(recording, "x") is None
+    request_archive(recording, reason="age")
+    assert retry_archive(recording) is None  # queued, not failed
+    # The worker died without a word: whoever notices records it - once.
+    state = record_archive_failure(recording, "worker crashed")
+    assert state.failed and state.failed_attempts == 1 and state.error == "worker crashed"
+    again = record_archive_failure(recording, "said again by the editor")
+    assert again.failed_attempts == 1 and again.error == "worker crashed"
+    retried = retry_archive(recording)
+    assert retried.status is ArchiveStatus.QUEUED and retried.failed_attempts == 1
+    assert retried.reason == "age" and retried.error == "worker crashed"
+    # An attempt that recorded its failure itself is not counted again either.
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=FakeExporter(fail_on="screen1"))
+    assert record_archive_failure(recording, "the editor, after the worker").failed_attempts == 2
+    assert "simulated" in read_archive_state(recording).error
+
+
+def test_failure_after_a_screen_is_done_stays_locked(recording: SessionPaths):
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=FakeExporter(fail_on="screen2"))
+    state = read_archive_state(recording)
+    assert state.status is ArchiveStatus.ARCHIVING and state.failed_attempts == 0
+    # Recording it again (the worker, then the editor) changes nothing but the reason.
+    state = record_archive_failure(recording, "exit code 1")
+    assert state.status is ArchiveStatus.ARCHIVING and state.failed_attempts == 0
+    assert state.pending and state.screens_done == ["screen1"]
+    # Not to be asked for again or taken back: it is resumed.
+    assert request_archive(recording).status is ArchiveStatus.ARCHIVING
+    assert retry_archive(recording) is None
+    assert withdraw_archive_request(recording) is False
+
+
+def test_a_stopped_archive_is_not_a_failure(recording: SessionPaths):
+    def verifier(video, duration_ms, config, cancel=None):
+        raise ExportError("CANCELLED", "export cancelled")
+
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=FakeExporter(), verifier=verifier)
+    state = read_archive_state(recording)
+    assert state.status is ArchiveStatus.ARCHIVING and state.failed_attempts == 0
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), cancel=lambda: True, exporter=FakeExporter())
+    assert read_archive_state(recording).pending
+
+
+def test_withdraw_takes_back_only_an_automatic_request_that_has_not_started(
+    recording: SessionPaths,
+):
+    assert withdraw_archive_request(recording) is False  # nothing to take back
+    request_archive(recording, reason="user")
+    assert withdraw_archive_request(recording) is False  # the user asked for it
+    archive_state_path(recording).unlink()
+    request_archive(recording, reason="age")
+    assert withdraw_archive_request(recording) is True
+    assert read_archive_state(recording) is None
+    assert not recording.archive_dir(recording.final_dir).exists()  # made for the request
+    # Work that has started is not taken back.
+    request_archive(recording, reason="age")
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), cancel=lambda: True, exporter=FakeExporter())
+    assert read_archive_state(recording).status is ArchiveStatus.ARCHIVING
+    assert withdraw_archive_request(recording) is False
+    # An automatic retry goes back to failed: its attempts and audio are remembered.
+    record_archive_failure(recording, "why")
+    assert retry_archive(recording).status is ArchiveStatus.QUEUED
+    assert withdraw_archive_request(recording) is True
+    state = read_archive_state(recording)
+    assert state.failed and state.failed_attempts == 1 and state.error == "why"
+
+
+# Cancel Archiving ---------------------------------------------------------------
+
+
+def test_cancel_archive_gives_the_recording_back_for_good(
+    recording: SessionPaths, audio: FakeAudio
+):
+    """A run stopped in its first screen: the status becomes ``cancelled`` (no failure,
+    the counter as it was when the user cancelled), the partial video goes, the verified
+    audio copy stays and is reused by the user's Archive Video."""
+    request_archive(recording, reason="age")
+    record_archive_failure(recording, "first")
+    retry_archive(recording)
+    mp4, jpg, srt = screen_outputs(recording, "screen1")
+
+    def exporter(request, config, progress=None, cancel=None):
+        ffmpeg_export.partial_output(request.output).write_bytes(b"half")
+        request.output.with_suffix(".srt").write_text("1\n", encoding="utf-8")
+        raise ExportError("FFMPEG_FAILED", "killed while cancelling")  # counted by _fail
+
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=exporter)
+    assert read_archive_state(recording).failed_attempts == 2  # what the stop ended in
+    partial_audio = ffmpeg_export.partial_output(audio_output(recording, "microphone"))
+    partial_audio.write_bytes(b"half")
+
+    state = cancel_archive(recording, failed_attempts=1)  # 1 when the user cancelled
+
+    assert state.status is ArchiveStatus.CANCELLED and state.cancelled
+    assert not state.pending and not state.failed and not state.cancellable
+    assert state.failed_attempts == 1 and state.error is None and state.reason == "age"
+    assert state.audio == {"microphone": "audio.m4a"}
+    assert read_archive_state(recording).to_dict() == state.to_dict()
+    assert _archive_names(recording) == ["archive.json", "audio.m4a"]
+    assert not ffmpeg_export.partial_output(mp4).exists() and not srt.exists()
+    assert len(_images(recording, "screen1")) == 5
+    loaded = LoadedRecording.load(recording)
+    assert not loaded.archived and loaded.audio is not None
+    info = describe_recording(recording)["archive"]
+    assert info["status"] == "cancelled" and "cancelled" in info["note"]
+    assert "error" not in info and info["videos"] == {}
+
+    # Nothing but the user brings it back: no failure, no retry, no withdrawal.
+    assert record_archive_failure(recording, "late").cancelled
+    assert read_archive_state(recording).failed_attempts == 1
+    assert retry_archive(recording) is None
+    assert withdraw_archive_request(recording) is False
+    assert read_archive_state(recording).cancelled
+    state = request_archive(recording, reason="user")  # Archive Video in the editor
+    assert state.status is ArchiveStatus.QUEUED and state.reason == "user"
+    assert state.failed_attempts == 0 and state.audio == {"microphone": "audio.m4a"}
+    audio.encoded.clear()
+    assert archive_recording(recording, Config(), exporter=FakeExporter()).archived
+    assert audio.encoded == []  # the verified copy was reused
+
+
+def test_cancel_archive_too_late_leaves_the_work_to_finish(recording: SessionPaths):
+    assert cancel_archive(recording) is None  # never asked
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=FakeExporter(fail_on="screen2"))
+    before = read_archive_state(recording)
+    assert not before.cancellable  # screen1 is done: its frames are gone
+    state = cancel_archive(recording, failed_attempts=0)
+    assert state.status is ArchiveStatus.ARCHIVING and state.screens_done == ["screen1"]
+    assert read_archive_state(recording).to_dict() == before.to_dict()
+    assert screen_outputs(recording, "screen1")[0].is_file()
+    archived = archive_recording(recording, Config(), exporter=FakeExporter())
+    assert cancel_archive(recording).archived and archived.archived
+
+
+def test_cancel_a_request_that_has_not_started(recording: SessionPaths):
+    queued = request_archive(recording, reason="user")
+    assert queued.cancellable
+    state = cancel_archive(recording)
+    assert state.cancelled and state.failed_attempts == 0 and state.screens == []
+    assert _archive_names(recording) == ["archive.json"]
+
+
+def test_cancelled_archive_state_round_trips():
+    state = ArchiveState(status=ArchiveStatus.CANCELLED, reason="age", failed_attempts=2)
+    again = ArchiveState.from_dict(json.loads(json.dumps(state.to_dict())))
+    assert again.cancelled and again.failed_attempts == 2 and again.reason == "age"
+    assert not again.pending and not again.archived and not again.failed
+    old = ArchiveState.from_dict({"status": "queued", "reason": "user"})  # no newer fields
+    assert old.cancellable and old.audio == {} and old.failed_attempts == 0
+
+
+# The still image --------------------------------------------------------------
+
+
+def test_still_skips_an_empty_frame_in_the_middle(recording: SessionPaths):
+    """The frame nearest the middle (1000 ms of 2500) is a zero-byte file: the next
+    nearest one (1500 ms) is used instead of failing the archive."""
+    middle = recording.frames_dir(recording.final_dir) / "1_000_screen1.png"
+    assert middle.is_file()
+    middle.write_bytes(b"")
+    state = archive_recording(recording, Config(), exporter=FakeExporter())
+    assert state.archived
+    with Image.open(screen_outputs(recording, "screen1")[1]) as still:
+        r, g, b = still.convert("RGB").getpixel((5, 5))
+        assert abs(r - 150) < 12 and abs(g - 80) < 12 and abs(b - 40) < 12  # the 1500 ms frame
+    with Image.open(screen_outputs(recording, "screen2")[1]) as still:
+        r, g, b = still.convert("RGB").getpixel((5, 5))
+        assert abs(b - 100) < 12  # untouched screen: still the 1000 ms frame
+
+
+def test_still_searches_outwards_past_unusable_frames(recording: SessionPaths):
+    frames = _images(recording, "screen1")
+    for path in frames[1:4]:  # 500, 1000 and 1500 ms
+        path.write_bytes(b"" if path != frames[1] else b"not an image")
+    assert archive_recording(recording, Config(), exporter=FakeExporter()).archived
+    with Image.open(screen_outputs(recording, "screen1")[1]) as still:
+        r, _g, _b = still.convert("RGB").getpixel((5, 5))
+        assert abs(r - 200) < 12  # 2000 ms is as near as 500 ms, which cannot be read
+
+
+def test_screen_without_a_usable_frame_fails_with_nothing_deleted(recording: SessionPaths):
+    for path in _images(recording, "screen1"):
+        path.write_bytes(b"")
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=FakeExporter())
+    assert error.value.code == "NO_FRAMES"
+    state = read_archive_state(recording)
+    assert state.failed and state.failed_attempts == 1 and "screen1" in state.error
+    assert len(_images(recording, "screen1")) == 5 and len(_images(recording, "screen2")) == 5
+    assert recording.audio_path(recording.final_dir).is_file()
+
+
+def test_frames_from_the_middle_go_outwards():
+    order = list(archive_mod._frames_from_middle([0, 500, 1000, 1500, 2000], 1250))
+    assert order == [2, 3, 1, 4, 0]  # 1000, 1500, 500, 2000, 0
+    assert list(archive_mod._frames_from_middle([0, 500], 5000)) == [1, 0]
+    assert list(archive_mod._frames_from_middle([700], 0)) == [0]
+    assert list(archive_mod._frames_from_middle([], 100)) == []
+
+
+# The worker (archive-stream) --------------------------------------------------
+
+
+def _worker_config(folder: Path) -> Path:
+    config_file = folder / "config.json"
+    config_file.write_text(json.dumps({"recording_folder": str(folder)}), encoding="utf-8")
+    return config_file
+
+
+def test_archive_stream_lowers_its_own_priority(tmp_path: Path, monkeypatch, capsys):
+    """FFmpeg and whisper are children of the worker: they inherit what it sets, and
+    below normal is the class a Windows child inherits."""
+    paths = make_recording(tmp_path, NEWEST)
+    modes: list[str] = []
+
+    def lower(mode: str) -> str:
+        modes.append(mode)
+        return "below_normal"
+
+    monkeypatch.setattr("video_story.platform.process.lower_own_priority", lower)
+    started: list[list[str]] = []
+
+    def fake_archive(p, c, **kw):
+        started.append(list(modes))  # the priority was lowered before any work
+        return ArchiveState(status=ArchiveStatus.ARCHIVED)
+
+    monkeypatch.setattr(archive_mod, "archive_recording", fake_archive)
+    args = ["--config", str(_worker_config(tmp_path)), "archive-stream", str(paths.final_dir)]
+    assert cli.main(args) == 0
+    assert modes == ["faster"] == [cli.ARCHIVE_PRIORITY_MODE] and started == [["faster"]]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["status"] == "archived"
+
+
+def test_archive_stream_gives_the_recording_back_when_transcription_fails(
+    tmp_path: Path, monkeypatch, capsys
+):
+    paths = make_recording(tmp_path, NEWEST)
+    write_transcript(
+        paths.transcript_txt_path(paths.final_dir),
+        paths.transcript_json_path(paths.final_dir),
+        Transcript("en", [Segment(0, 1000, "hello")], complete=False, transcribed_ms=1000),
+    )
+    request_archive(paths, reason="age")
+
+    def broken_stream(paths_, cfg, **kwargs):
+        raise RuntimeError("whisper model not found")
+
+    monkeypatch.setattr("video_story.transcribe.pipeline.stream_transcription", broken_stream)
+    args = ["--config", str(_worker_config(tmp_path)), "archive-stream", str(paths.final_dir)]
+    assert cli.main(args) != 0
+    assert "whisper model not found" in capsys.readouterr().err
+    state = read_archive_state(paths)
+    assert state.failed and state.failed_attempts == 1
+    assert "whisper model not found" in state.error
+    assert not LoadedRecording.load(paths).archived
+
+
+def test_archive_stream_counts_a_failed_archive_once(tmp_path: Path, monkeypatch, capsys):
+    paths = make_recording(tmp_path, NEWEST)
+    request_archive(paths, reason="age")
+    real = archive_mod.archive_recording
+    monkeypatch.setattr(
+        archive_mod,
+        "archive_recording",
+        lambda p, c, **kw: real(p, c, exporter=FakeExporter(fail_on="screen1"), **kw),
+    )
+    args = ["--config", str(_worker_config(tmp_path)), "archive-stream", str(paths.final_dir)]
+    assert cli.main(args) != 0
+    state = read_archive_state(paths)
+    assert state.failed and state.failed_attempts == 1  # by _fail, not again by the command
+    assert "simulated failure" in state.error
+    assert json.loads(capsys.readouterr().err.splitlines()[-1])["code"] == "FFMPEG_FAILED"
+
+
+def test_archive_stream_that_was_stopped_records_no_failure(tmp_path: Path, monkeypatch, capsys):
+    paths = make_recording(tmp_path, NEWEST)
+    request_archive(paths, reason="age")
+
+    def stopped(p, c, **kw):
+        raise ArchiveError("CANCELLED", "archiving was stopped")
+
+    monkeypatch.setattr(archive_mod, "archive_recording", stopped)
+    args = ["--config", str(_worker_config(tmp_path)), "archive-stream", str(paths.final_dir)]
+    assert cli.main(args) != 0
+    state = read_archive_state(paths)
+    assert state.status is ArchiveStatus.QUEUED and state.failed_attempts == 0
 
 
 def test_archive_stream_transcribes_first_then_archives(tmp_path: Path, monkeypatch, capsys):

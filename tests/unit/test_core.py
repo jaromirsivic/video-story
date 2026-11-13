@@ -78,6 +78,29 @@ def test_auto_stop_bounds():
         cfg.config_from_dict({"auto_stop_minutes": 0})
 
 
+@pytest.mark.parametrize("value", [0, "0", 1, 30, 3650])
+def test_archive_after_accepts_zero_for_never(value):
+    assert cfg.config_from_dict({"archive_after_days": value}).archive_after_days == int(value)
+    assert cfg.ARCHIVE_AFTER_NEVER == cfg.ARCHIVE_AFTER_MIN_DAYS == 0
+
+
+@pytest.mark.parametrize("value", [-1, 3651, "never", 1.5])
+def test_archive_after_bounds_rejected(value):
+    with pytest.raises(cfg.ConfigError):
+        cfg.config_from_dict({"archive_after_days": value})
+
+
+def test_cli_config_set_archive_after_zero(tmp_path: Path, capsys):
+    from video_story.host import cli
+
+    path = tmp_path / "config.json"
+    assert cli.main(["--config", str(path), "config", "set", "archive_after_days", "0"]) == 0
+    assert json.loads(capsys.readouterr().out)["config"]["archive_after_days"] == 0
+    assert cfg.load_config(path).archive_after_days == 0
+    assert cli.main(["--config", str(path), "config", "set", "archive_after_days", "-1"]) != 0
+    assert cfg.load_config(path).archive_after_days == 0
+
+
 def test_config_roundtrip(tmp_path: Path):
     path = tmp_path / "config.json"
     c = cfg.Config(

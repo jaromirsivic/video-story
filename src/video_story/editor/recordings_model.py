@@ -41,6 +41,7 @@ ItemRole = Qt.ItemDataRole.UserRole + 1
 FolderRole = Qt.ItemDataRole.UserRole + 2
 
 SegmentText = tuple[int, int, str]  # start ms, end ms, text
+ARCHIVE_FAILED_TOOLTIP = "Archiving failed"  # followed by the reason, in a row's tooltip
 
 
 def format_length(duration_ms: int) -> str:
@@ -99,11 +100,14 @@ class RecordingItem:
     screen_ids: tuple[str, ...] = ()  # manifest order, screen1 (the primary) first
     segments: tuple[SegmentText, ...] = ()  # non-empty transcript segments by start
     screen_sizes: tuple[tuple[int, int], ...] = ()  # image size of each screen, as screen_ids
-    # None (not archived), "queued" or "archiving" (in the archive queue), "archived"
+    # None (not archived), "queued" or "archiving" (in the archive queue), "failed" (the
+    # last attempt failed with nothing deleted: a normal recording), "cancelled" (the
+    # user cancelled it with nothing deleted: a normal recording), "archived"
     archive: str | None = None
     archive_leftovers: bool = False  # archived, but some files could not be deleted
     archive_fraction: float = 0.0  # share of the screens archived (queued / archiving)
     size_bytes: int | None = None  # the recording folder on disk; None = unknown
+    archive_error: str | None = None  # why the last archive attempt stopped
 
     @property
     def archived(self) -> bool:
@@ -113,6 +117,20 @@ class RecordingItem:
     def archiving(self) -> bool:
         """Queued for archiving or being archived: it cannot be edited any more."""
         return self.archive in (ArchiveStatus.QUEUED, ArchiveStatus.ARCHIVING)
+
+    @property
+    def archive_failed(self) -> bool:
+        """The last archive attempt failed with nothing deleted: the recording is an
+        ordinary one (no label in the list); the row's tooltip says why."""
+        return self.archive == ArchiveStatus.FAILED
+
+    @property
+    def tooltip(self) -> str:
+        """The row's tooltip: the id and the folder, and why archiving failed."""
+        text = f"{self.session_id}\n{self.paths.final_dir}"
+        if self.archive_failed:
+            text += f"\n{ARCHIVE_FAILED_TOOLTIP}: {self.archive_error or 'unknown error'}"
+        return text
 
     @property
     def session_id(self) -> str:
@@ -249,6 +267,7 @@ def scan_recordings(recording_folder: Path) -> list[RecordingItem]:
                 archive_leftovers=bool(archive and archive.archived and archive.leftovers),
                 archive_fraction=archive.fraction if archive is not None else 0.0,
                 size_bytes=folder_size(base),
+                archive_error=archive.error if archive is not None else None,
             )
         )
     return items
@@ -450,13 +469,14 @@ class RecordingsModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.display_text
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"{item.session_id}\n{item.paths.final_dir}"
+            return item.tooltip
         if role == ItemRole:
             return item
         return None
 
 
 __all__ = [
+    "ARCHIVE_FAILED_TOOLTIP",
     "FolderHeader",
     "FolderRole",
     "ItemRole",

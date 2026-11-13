@@ -36,8 +36,10 @@ AUTO_STOP_MIN_MINUTES = 1
 AUTO_STOP_MAX_MINUTES = 1440
 AUTO_STOP_DEFAULT_MINUTES = 120
 
-# Recordings older than this are archived (MP4 per screen) when the editor starts.
-ARCHIVE_AFTER_MIN_DAYS = 1
+# Recordings older than this are archived (MP4 per screen) when the editor starts;
+# 0 = never (nothing is archived automatically).
+ARCHIVE_AFTER_NEVER = 0
+ARCHIVE_AFTER_MIN_DAYS = ARCHIVE_AFTER_NEVER
 ARCHIVE_AFTER_MAX_DAYS = 3650
 ARCHIVE_AFTER_DEFAULT_DAYS = 30
 
@@ -120,7 +122,7 @@ class Config:
     # quarter of the CPUs) or "faster" (half of the CPUs, slightly below normal).
     live_transcription: LiveTranscriptionMode = LIVE_TRANSCRIPTION_DEFAULT  # type: ignore[assignment]
     auto_stop_minutes: int = AUTO_STOP_DEFAULT_MINUTES
-    archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS
+    archive_after_days: int = ARCHIVE_AFTER_DEFAULT_DAYS  # 0: never archive automatically
     drawing_grid_px: int = DRAWING_GRID_DEFAULT_PX
     export_preset: str = EXPORT_PRESET_DEFAULT
     export_crf: int = EXPORT_CRF_DEFAULT
@@ -352,6 +354,7 @@ __all__ = [
     "ARCHIVE_AFTER_DEFAULT_DAYS",
     "ARCHIVE_AFTER_MAX_DAYS",
     "ARCHIVE_AFTER_MIN_DAYS",
+    "ARCHIVE_AFTER_NEVER",
     "Config",
     "ConfigError",
     "config_from_dict",

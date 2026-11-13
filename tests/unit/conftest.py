@@ -18,6 +18,16 @@ def _no_automatic_archiving(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_lowered_priority(monkeypatch):
+    """The archive worker (``archive-stream``) lowers the priority of its own process;
+    a test that runs the command in-process must not slow the test run down for good.
+    Tests of the priority patch ``lower_own_priority`` themselves."""
+    import video_story.platform.process as process
+
+    monkeypatch.setattr(process, "lower_own_priority", lambda _mode: "unchanged")
+
+
+@pytest.fixture(autouse=True)
 def _no_live_transcription(monkeypatch):
     """Recordings that tests start must not run a real whisper worker while recording
     (the developer's machine has the model). Tests of the live transcription patch

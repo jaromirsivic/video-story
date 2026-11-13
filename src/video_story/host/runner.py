@@ -274,9 +274,24 @@ ARCHIVED_NOTE = (
 )
 
 
+ARCHIVE_FAILED_NOTE = (
+    "Archiving this recording failed and nothing was deleted: it is an ordinary recording, "
+    "its frames and audio are all there."
+)
+
+
+ARCHIVE_CANCELLED_NOTE = (
+    "The user cancelled the archiving of this recording before anything was deleted: it "
+    "is an ordinary, not archived recording, its frames and audio are all there."
+)
+
+
 def archive_info(paths: SessionPaths, base: Path) -> dict[str, Any] | None:
     """``{status, archive_dir, videos, stills, audio, note}`` of an archived (or queued)
-    recording; ``None`` when it was never asked to be archived.
+    recording; ``None`` when it was never asked to be archived. A recording whose
+    archiving failed with nothing deleted (status ``failed``) carries ``error`` too; one
+    whose archiving the user cancelled (status ``cancelled``) is not archived either,
+    the note says so.
 
     ``audio`` maps the audio tracks kept on their own (``microphone``, ``computer``) to
     their ``.m4a``; it is empty for a recording without audio and for one archived
@@ -298,7 +313,16 @@ def archive_info(paths: SessionPaths, base: Path) -> dict[str, Any] | None:
     tracks_file = archived_tracks_path(paths, base)
     if tracks_file.is_file():
         info["tracks_file"] = str(tracks_file)
-    info["note"] = ARCHIVED_NOTE if state.archived else "Archiving is queued or running."
+    if state.archived:
+        info["note"] = ARCHIVED_NOTE
+    elif state.failed:
+        info["note"] = ARCHIVE_FAILED_NOTE
+        if state.error:
+            info["error"] = state.error
+    elif state.cancelled:
+        info["note"] = ARCHIVE_CANCELLED_NOTE
+    else:
+        info["note"] = "Archiving is queued or running."
     return info
 
 

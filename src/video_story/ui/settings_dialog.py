@@ -45,6 +45,8 @@ from video_story.core.config import (
 
 log = logging.getLogger(__name__)
 
+ARCHIVE_NEVER_TEXT = "Never"  # Archive After at 0: nothing is archived automatically
+
 LIVE_TRANSCRIPTION_CHOICES = (
     ("off", "Off – transcribe in the editor"),
     ("light", "Light – low CPU use (recommended)"),
@@ -180,15 +182,19 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Auto Stop Recording", self.auto_stop_spin)
 
-        # 6. Archive After: older recordings become one MP4 per screen
+        # 6. Archive After: older recordings become one MP4 per screen; the lowest value
+        # (0) reads "Never"
         self.archive_after_spin = QSpinBox()
         self.archive_after_spin.setRange(ARCHIVE_AFTER_MIN_DAYS, ARCHIVE_AFTER_MAX_DAYS)
         self.archive_after_spin.setSuffix(" days")
+        self.archive_after_spin.setSpecialValueText(ARCHIVE_NEVER_TEXT)
         self.archive_after_spin.setValue(config.archive_after_days)
         self.archive_after_spin.setToolTip(
             "Recordings older than this are archived (one MP4 video per screen and one AAC "
             "file per audio track; the frames and the WAV audio are deleted) when the "
-            "Video Story Editor starts. Nothing is deleted automatically."
+            "Video Story Editor starts. No recording is deleted automatically. "
+            f"{ARCHIVE_AFTER_MIN_DAYS} ({ARCHIVE_NEVER_TEXT}): old recordings are not "
+            "archived by themselves; Archive Video in the editor still works."
         )
         form.addRow("Archive After", self.archive_after_spin)
 
@@ -312,4 +318,4 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
-__all__ = ["SettingsDialog"]
+__all__ = ["ARCHIVE_NEVER_TEXT", "SettingsDialog"]
