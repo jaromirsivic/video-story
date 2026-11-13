@@ -9,8 +9,10 @@ roots). Downloads go to the state root and happen only from ``video-story setup`
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import platform as _platform
 import re
 import shutil
@@ -23,9 +25,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 from video_story.core.config import Config, code_root, state_root
 from video_story.host.downloads import (
@@ -201,6 +204,24 @@ def ffmpeg_version(path: Path | str) -> str | None:
     return match.group(1) if match else first[0].strip()
 
 
+def ffmpeg_usable(path: Path) -> bool:
+    """Explicit setup/diagnostic only, never called by the fast startup check."""
+    if ffmpeg_version(path) is None:
+        return False
+    try:
+        result = subprocess.run(
+            [str(path), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    encoders = {line.split()[1] for line in result.stdout.splitlines() if len(line.split()) > 1}
+    return result.returncode == 0 and {"libx264", "aac"} <= encoders
+
+
 # Conversion -------------------------------------------------------------------
 
 
@@ -268,6 +289,8 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path | Sequence[Path], dst: Path) -> 
 def resample_to_16k(ffmpeg: Path, samples: np.ndarray, rate: int) -> np.ndarray:
     """Mono int16 ``samples`` at ``rate`` resampled to 16 kHz by ffmpeg through pipes
     (the same resampler :func:`convert_to_16k_mono` uses, without temporary files)."""
+    import numpy as np
+
     data = np.asarray(samples, dtype=np.int16)
     if rate == 16000 or len(data) == 0:
         return data
@@ -438,8 +461,13 @@ def download_ffmpeg(target_dir: Path, progress: ProgressCallback | None = None) 
             continue
         log.info("Downloading FFmpeg from %s", source.url)
         target_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="ffmpeg-dl-", dir=target_dir) as tmp:
-            archive = Path(tmp) / PurePosixPath(source.url).name
+        key = hashlib.sha256(
+            (source.url + str(source.sha256) + str(source.md5)).encode()
+        ).hexdigest()[:20]
+        download_dir = target_dir / ".downloads" / key
+        download_dir.mkdir(parents=True, exist_ok=True)
+        archive = download_dir / "archive"
+        with tempfile.TemporaryDirectory(prefix="ffmpeg-stage-", dir=target_dir) as tmp:
             try:
                 result = download_file(
                     source.url,
@@ -448,8 +476,27 @@ def download_ffmpeg(target_dir: Path, progress: ProgressCallback | None = None) 
                     expected_md5=source.md5,
                     progress=progress,
                 )
-                written = extract_binaries(archive, source.kind, target_dir, names)
-            except (DownloadError, OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+                staged = Path(tmp)
+                written = extract_binaries(archive, source.kind, staged, names)
+                if not ffmpeg_usable(staged / names[0]):
+                    raise FfmpegNotFound("FFmpeg cannot run or lacks libx264/AAC encoders")
+                # Publish the primary executable last, only after validating the staged copy.
+                for binary in sorted(written, key=lambda p: p.name == names[0]):
+                    os.replace(binary, target_dir / binary.name)
+                written = [target_dir / p.name for p in written]
+                archive.unlink(missing_ok=True)
+                download_dir.rmdir()
+                try:
+                    download_dir.parent.rmdir()
+                except OSError:
+                    pass  # another source still has a resumable partial
+            except (
+                DownloadError,
+                FfmpegNotFound,
+                OSError,
+                zipfile.BadZipFile,
+                tarfile.TarError,
+            ) as exc:
                 errors.append(f"{source.name}: {exc}")
                 log.warning("FFmpeg download from %s failed: %s", source.url, exc)
                 continue

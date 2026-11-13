@@ -23,9 +23,5 @@ if [ -z "$VS_ROOT" ]; then
   exit 21
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
-  printf '%s\n' '{"ok":false,"code":"UV_MISSING","message":"uv is required. Install it from https://docs.astral.sh/uv/ and run again."}' >&2
-  exit 20
-fi
-
-exec uv run --quiet --project "$VS_ROOT" video-story "$@"
+export VS_ROOT
+exec sh "$VS_ROOT/scripts/launch.sh" "$@"

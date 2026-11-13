@@ -28,6 +28,7 @@ from video_story.core.config import (
     model_search_paths,
     resolve_state_root,
 )
+from video_story.core.model_info import MODEL_SHA256, MODEL_SIZE, MODEL_SIZE_TEXT, MODEL_URL
 from video_story.core.screens import assign_screen_ids
 from video_story.host.downloads import DownloadError, download_file, file_digest
 from video_story.platform import get_platform
@@ -43,10 +44,6 @@ from video_story.transcribe.ffmpeg import (
 log = logging.getLogger(__name__)
 
 # Whisper large-v3-turbo, 5-bit quantised (ggml); checksum as published by Hugging Face.
-MODEL_SHA256 = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
-MODEL_SIZE = 574_041_195
-MODEL_SIZE_TEXT = "548 MB"
-MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
 MIN_PYTHON = (3, 12)
 SETUP_HINT = "Run `video-story setup`."
 

@@ -295,6 +295,7 @@ def test_download_ffmpeg_writes_provenance(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(ff, "download_file", fake_download)
     monkeypatch.setattr(ff, "ffmpeg_version", lambda path: "8.1-test")
+    monkeypatch.setattr(ff, "ffmpeg_usable", lambda path: True)
     target = tmp_path / "bundle"
     path = ff.download_ffmpeg(target)
     assert path == target / exe and path.read_bytes() == b"FFMPEG"
@@ -323,6 +324,7 @@ def test_download_ffmpeg_falls_back_to_next_source(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(ff, "download_file", fake_download)
     monkeypatch.setattr(ff, "ffmpeg_version", lambda path: "1")
+    monkeypatch.setattr(ff, "ffmpeg_usable", lambda path: True)
     assert ff.download_ffmpeg(tmp_path / "b") == tmp_path / "b" / exe
 
 

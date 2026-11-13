@@ -49,8 +49,9 @@ def _unlock_fd(fd: int) -> None:
 class EditorLock:
     """Holds the editor lock file open and locked while ``held`` is true."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, remove_on_release: bool = True) -> None:
         self.path = path
+        self._remove_on_release = remove_on_release
         self._fd: int | None = None
 
     @property
@@ -86,6 +87,8 @@ class EditorLock:
         except OSError:
             pass
         os.close(fd)
+        if not self._remove_on_release:
+            return  # shared short-lived mutexes must retain the same inode on POSIX
         try:
             self.path.unlink()
         except OSError:

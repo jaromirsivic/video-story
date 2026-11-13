@@ -239,6 +239,10 @@ class SessionController:
 
     def editor_opened(self, editor_pid: int) -> None:
         """The editor process now owns the ``editing`` session (liveness by its pid)."""
+        current = self._read_existing_state()
+        if current is not None and (current.status.final or current.pid == editor_pid):
+            self.state = current
+            return  # the editor already adopted/finished it, never overwrite its newer state
         self._set_status(
             Status.EDITING,
             "Video Story Editor open; transcribing in the background, waiting for the user "
@@ -246,13 +250,14 @@ class SessionController:
             pid=editor_pid,
         )
 
-    def editor_failed(self, message: str) -> None:
+    def editor_failed(self, message: str, code: str = "START_FAILED") -> None:
         """The editor could not be opened: nobody pressed Process, so the agent must not
         act. The recording is kept and can be opened later with Edit Video Story."""
         self._set_status(
             Status.CANCELLED,
             f"Recording saved, but the editor could not be opened ({message}); nothing "
             "should be done. Open it later with Edit Video Story.",
+            error_code=code,
         )
 
     @contextmanager

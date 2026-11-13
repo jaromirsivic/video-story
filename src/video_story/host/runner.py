@@ -36,7 +36,11 @@ from video_story.core.session import (
     write_state,
 )
 from video_story.core.transcript import format_segment_line, read_transcript, transcript_status
+from video_story.host import startup
 from video_story.host.agent_output import DEFAULT_INLINE_CHARS, fits_inline
+from video_story.host.errors import HostError
+from video_story.host.readiness import require_ready
+from video_story.host.waiting import timeout_seconds
 from video_story.platform.process import gui_python, pid_alive, spawn_detached
 
 log = logging.getLogger(__name__)
@@ -93,7 +97,11 @@ def active_session(
             continue
         if state.status is Status.EDITING and not include_editing:
             continue
-        if not state.status.final and pid_alive(state.pid):
+        pending = paths.work_dir / "startup.json"
+        if not state.status.final and (
+            pid_alive(state.pid)
+            or (state.pid == 0 and pending.is_file() and startup.valid(pending))
+        ):
             return paths, state
     return None
 
@@ -118,6 +126,13 @@ class LaunchInfo:
 
 
 def launch_control_window(config: Config, config_file: Path | None = None) -> LaunchInfo:
+    if active_session(config) is None:
+        require_ready(config)
+    with startup.launch_guard(config, "recorder"):
+        return _launch_control_window_ready(config, config_file)
+
+
+def _launch_control_window_ready(config: Config, config_file: Path | None = None) -> LaunchInfo:
     """Start the control window in a detached process and return immediately."""
     running = active_session(config)
     if running is not None:
@@ -139,6 +154,7 @@ def launch_control_window(config: Config, config_file: Path | None = None) -> La
         message="Starting the control window.",
     )
     write_state(paths.state_path, state)
+    request = startup.create_request(paths.work_dir / "startup.json", config, "run", session_id)
     args = [
         gui_python(),
         "-m",
@@ -149,9 +165,24 @@ def launch_control_window(config: Config, config_file: Path | None = None) -> La
         "--session",
         session_id,
     ]
-    pid = spawn_detached(args, paths.work_dir / UI_LOG_FILE_NAME, cwd=Path.cwd())
-    state.pid = pid
-    write_state(paths.state_path, state)
+    try:
+        pid = spawn_detached(args, paths.work_dir / UI_LOG_FILE_NAME, cwd=Path.cwd())
+    except OSError as exc:
+        state.status = Status.FAILED
+        state.error_code = "START_FAILED"
+        state.message = str(exc)
+        write_state(paths.state_path, state)  # no child exists to own this state yet
+        raise HostError(
+            "START_FAILED",
+            str(exc),
+            24,
+            session_id=session_id,
+            log=str(paths.work_dir / UI_LOG_FILE_NAME),
+        ) from exc
+    ready = startup.wait_ready(
+        request, pid, paths.work_dir / UI_LOG_FILE_NAME, session_id=session_id
+    )
+    pid = ready.get("pid", pid)
     log.info("control window started: session %s pid %s", session_id, pid)
     return LaunchInfo(session_id, paths.state_path, pid, config.recording_folder)
 
@@ -251,17 +282,18 @@ def session_summary(paths: SessionPaths) -> dict[str, Any]:
 
 def wait_for_session(paths: SessionPaths, timeout_s: float) -> dict[str, Any]:
     """Block until the session is final or ``timeout_s`` elapses (then ``timed_out``)."""
-    deadline = time.monotonic() + max(0.0, timeout_s)
+    deadline = time.monotonic() + timeout_seconds(timeout_s)
     while True:
         data = session_status(paths)
         if data["final"]:
+            startup.cleanup_completed(paths.work_dir / "startup.json")
             data["timed_out"] = False
             return data
         if time.monotonic() >= deadline:
             data["timed_out"] = True
             data["hint"] = "call `video-story wait` again until final is true"
             return data
-        time.sleep(POLL_INTERVAL_S)
+        time.sleep(min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
 ARCHIVED_NOTE = (

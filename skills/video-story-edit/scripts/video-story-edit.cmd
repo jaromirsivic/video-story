@@ -20,11 +20,5 @@ if not defined VS_ROOT (
   exit /b 21
 )
 
-where uv >nul 2>nul
-if errorlevel 1 (
-  >&2 echo {"ok":false,"code":"UV_MISSING","message":"uv is required. Install it from https://docs.astral.sh/uv/ and run again."}
-  exit /b 20
-)
-
-uv run --quiet --project "%VS_ROOT%" video-story %*
+call "%VS_ROOT%\scripts\launch.bat" %*
 exit /b %ERRORLEVEL%

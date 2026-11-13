@@ -14,26 +14,36 @@ resolution) with an SRT subtitle file next to it.
 
 ## 1. Locate and run the tool
 
-The skill directory contains `scripts/video-story-edit.cmd` (Windows) and
-`scripts/video-story-edit.sh` (Linux, macOS). Call them with an absolute path; they run
-the plugin through `uv`. Every command prints one JSON object on stdout; errors are a
-JSON object on stderr with `code` and `message` and a non-zero exit code.
+First call the absolute `scripts/video-story-edit.bat` (Windows) or
+`scripts/video-story-edit.sh` (Linux/macOS) with `edit --detach`, or use the
+already connected local MCP tool. The `.cmd` alias remains compatible.
+Do not run diagnostic/setup commands first. Startup checks the prepared Python,
+model and FFmpeg, does not install anything, and acknowledges the ready window.
 
 ```text
-<skill-dir>\scripts\video-story-edit.cmd edit --detach
+<skill-dir>\scripts\video-story-edit.bat edit --detach
 <skill-dir>/scripts/video-story-edit.sh edit --detach
 ```
 
-What the launcher needs from the host: `edit --detach` starts the editor as a separate
-GUI process that must keep running after the command has returned; it writes to the
-recording folder and to the state folder (`~/.video-story`, or the development
-checkout), both outside your workspace; and the first run needs the network (uv creates
-the environment). If your host runs commands in a sandbox, run `edit --detach` - and
-the first command of a session - outside the sandbox: ask the user to approve running
-it outside the sandbox instead of retrying inside it (inside, the window may never
-appear or may close when the command ends).
+Results are JSON (success on stdout, errors on stderr with a non-zero exit code).
+On `UV_MISSING`, `PYTHON_MISSING`, `ENVIRONMENT_INVALID` or `SETUP_REQUIRED`,
+read [startup and recovery](../../docs/agent-startup.md), tell the user what you
+are fixing, perform only that repair and retry the same request. `SETUP_REQUIRED`
+uses the same launcher with `setup`. Never replace a custom model blindly.
+Other errors need their own diagnosis, not a full reinstall. Keep existing config
+and recording arguments. No download-progress dialog is used.
+
+The GUI must survive the command returning. Respect the host's permissions and
+existing approvals. If blocked, use the host's supported local execution or configured
+local MCP route. Do not request approval again when it is already granted.
 
 ## 2. Open the editor ("Edit Video Story") and wait for Process
+
+Allow at least 60 seconds in the host tool for a 45-second application wait, or
+shorten the application wait to leave a margin. If the tool returns a running-task
+handle, retrieve that task's result first. A host timeout is not cancellation.
+For host-specific handling see [startup and recovery](../../docs/agent-startup.md).
+
 
 1. Run `edit --detach`. Add `--session <id>` when the user named a recording (ids look
    like `20261107-122147`; `sessions` lists them). Without it the newest recording is
@@ -44,7 +54,7 @@ appear or may close when the command ends).
 3. Loop until the event is `process` or `closed`:
 
    ```text
-   <launcher> wait --editor <editor_session> --timeout 240
+   <launcher> wait --editor <editor_session> --timeout 45
    ```
 
    `timed_out` true: call it again. Event `process`: the result carries `session_id`,

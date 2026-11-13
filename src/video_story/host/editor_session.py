@@ -39,6 +39,7 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
+from video_story.host.waiting import timeout_seconds
 from video_story.platform.process import pid_alive
 
 log = logging.getLogger(__name__)
@@ -114,11 +115,14 @@ def wait_for_editor(path: Path, timeout_s: float) -> dict[str, Any]:
     Result: ``{"event": "process", "session_id", "crop", "instructions"}``,
     ``{"event": "closed"}`` or ``{"event": "open", "timed_out": true}``.
     """
-    deadline = time.monotonic() + max(0.0, timeout_s)
+    deadline = time.monotonic() + timeout_seconds(timeout_s)
     while True:
         data = read_editor_event(path)
         event = data.get("event", "open")
         if event in ("process", "closed"):
+            from video_story.host.startup import cleanup_completed, editor_request
+
+            cleanup_completed(editor_request(path))
             keys = ("event", "session_id", "crop", "instructions", "message")
             result = {k: data[k] for k in keys if k in data}
             if event == "process":
@@ -133,7 +137,7 @@ def wait_for_editor(path: Path, timeout_s: float) -> dict[str, Any]:
                 "timed_out": True,
                 "hint": "call `wait --editor` again until the event is process or closed",
             }
-        time.sleep(POLL_INTERVAL_S)
+        time.sleep(min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
 # Attach requests to a running editor --------------------------------------------

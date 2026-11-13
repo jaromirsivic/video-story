@@ -49,6 +49,7 @@ from video_story.host.agent_output import (
     page_lines,
     split_lines,
 )
+from video_story.host.errors import HostError
 from video_story.host.events import (
     build_mouse_detail,
     build_timeline,
@@ -68,14 +69,14 @@ from video_story.host.runner import (
     session_status,
     wait_for_session,
 )
+from video_story.host.waiting import DEFAULT_WAIT_S, MCP_MAX_WAIT_S, timeout_seconds
 
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "video-story"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-WAIT_TIMEOUT_MIN_S = 1.0
-WAIT_TIMEOUT_MAX_S = 240.0
+WAIT_TIMEOUT_MAX_S = MCP_MAX_WAIT_S
 WAIT_PROGRESS_EVERY_S = 5.0
 FRAME_MIN_WIDTH = 16
 FRAME_DEFAULT_MAX_WIDTH = 1600
@@ -144,6 +145,8 @@ def _guard(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     """Run ``fn`` and turn expected failures into error dicts."""
     try:
         return _ok(fn())
+    except HostError as exc:
+        return exc.to_dict()
     except SessionError as exc:
         return _error(exc.code, str(exc))
     except ConfigError as exc:
@@ -158,11 +161,7 @@ def _guard(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
 
 def clamp_timeout(timeout_s: float) -> float:
     """Keep the wait timeout within the limits host clients tolerate."""
-    try:
-        value = float(timeout_s)
-    except (TypeError, ValueError):
-        value = 60.0
-    return max(WAIT_TIMEOUT_MIN_S, min(WAIT_TIMEOUT_MAX_S, value))
+    return min(WAIT_TIMEOUT_MAX_S, timeout_seconds(timeout_s, allow_zero=False))
 
 
 def _page_fields(page: Page, total_name: str, tool: str) -> dict[str, Any]:
@@ -203,6 +202,8 @@ def tool_start(config_file: Path | None = None) -> dict[str, Any]:
     try:
         config = _load(config_file)
         info = launch_control_window(config, config_file)
+    except HostError as exc:
+        return exc.to_dict()
     except SessionError as exc:
         result = _error(exc.code, str(exc))
         if exc.code == "ALREADY_RUNNING":
@@ -221,11 +222,14 @@ def tool_start(config_file: Path | None = None) -> dict[str, Any]:
 
 
 def tool_wait(
-    session_id: str, timeout_s: float = 60, config_file: Path | None = None
+    session_id: str, timeout_s: float = DEFAULT_WAIT_S, config_file: Path | None = None
 ) -> dict[str, Any]:
     """Block until the session is final or the (clamped) timeout elapses."""
-    timeout = clamp_timeout(timeout_s)
-    result = _guard(lambda: wait_for_session(_paths(_load(config_file), session_id), timeout))
+    def run():
+        timeout = clamp_timeout(timeout_s)
+        return wait_for_session(_paths(_load(config_file), session_id), timeout)
+
+    result = _guard(run)
     if result.get("timed_out"):
         result["hint"] = WAIT_AGAIN_HINT
     return result
@@ -247,6 +251,9 @@ async def wait_with_progress(
         data = session_status(paths)
         now = time.monotonic()
         if data["final"]:
+            from video_story.host.startup import cleanup_completed
+
+            cleanup_completed(paths.work_dir / "startup.json")
             data["timed_out"] = False
             return data
         if now >= deadline:
@@ -260,7 +267,7 @@ async def wait_with_progress(
                 await progress(now - started, message)
             except Exception:  # a client that rejects notifications must not end the wait
                 log.debug("progress notification failed", exc_info=True)
-        await anyio.sleep(POLL_INTERVAL_S)
+        await anyio.sleep(min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
 def tool_status(session_id: str, config_file: Path | None = None) -> dict[str, Any]:
@@ -626,7 +633,7 @@ def tool_edit(session: str | None = None, config_file: Path | None = None) -> di
     return _guard(lambda: launch_editor(_load(config_file), session, config_file))
 
 
-def tool_wait_editor(editor_session: str, timeout_s: float = 60) -> dict[str, Any]:
+def tool_wait_editor(editor_session: str, timeout_s: float = DEFAULT_WAIT_S) -> dict[str, Any]:
     """Wait for the editor's Process / close event; mirror of ``wait --editor``."""
     from video_story.host.editor_session import wait_for_editor
 
@@ -663,23 +670,27 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     """Build the MCP server with every tool bound to ``config_file`` (not started)."""
     server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS)
 
-    def video_story_start() -> dict[str, Any]:
+    async def video_story_start() -> dict[str, Any]:
         """Open the Video Story control window for the user. Returns the session_id to
         pass to video_story_wait; the user records, stops and presses Process in the editor."""
-        return tool_start(config_file)
+        return await anyio.to_thread.run_sync(lambda: tool_start(config_file))
 
     async def video_story_wait(
-        session_id: str, timeout_s: float = 60, ctx: Context | None = None
+        session_id: str, timeout_s: float = DEFAULT_WAIT_S, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Wait until the session is final (processed, cancelled or failed) or
-        timeout_s (1..240) elapses; when "timed_out" is true call it again. Status
+        timeout_s (positive, at most 240; default 45) elapses. When "timed_out" is true,
+        call it again. Status
         "editing" means the user is cropping the recording in the editor: keep waiting.
         Only "processed" (the user pressed Process) is a request to act.
         A processed session carries the paths of manifest, transcript and frames,
         "crop" {start_ms, end_ms}: act only on that part of the recording, and
         "instructions": the user's master instructions for the whole recording (read
         them first; "" when none)."""
-        timeout = clamp_timeout(timeout_s)
+        try:
+            timeout = clamp_timeout(timeout_s)
+        except HostError as exc:
+            return exc.to_dict()
 
         async def progress(elapsed: float, message: str) -> None:
             if ctx is not None:
@@ -850,7 +861,7 @@ def create_server(config_file: Path | None = None) -> MCPServer:
             )
         )
 
-    def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
+    async def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
         """Open the Video Story Editor window for the user: a list of the stored
         recordings, a preview with subtitles, a timeline per screen with In/Out crop
         handles, a Render button (MP4 + SRT) and a green Process button. session_id
@@ -861,16 +872,16 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         instructions for the whole recording) or closes the window (event "closed":
         do nothing). An already open editor is reused (attached). NO_RECORDINGS:
         nothing to edit yet."""
-        return tool_edit(session_id, config_file)
+        return await anyio.to_thread.run_sync(lambda: tool_edit(session_id, config_file))
 
     async def video_story_wait_editor(
-        editor_session: str, timeout_s: float = 60, ctx: Context | None = None
+        editor_session: str, timeout_s: float = DEFAULT_WAIT_S, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Wait until the editor opened by video_story_edit reports event "process"
         (the user pressed Process: session_id and crop {start_ms, end_ms} tell which
         recording and which part to act on, "instructions" how) or "closed" (nothing to
         do), or until
-        timeout_s (1..240) elapses ("timed_out": call again)."""
+        timeout_s (positive, at most 240; default 45) elapses ("timed_out": call again)."""
         return await anyio.to_thread.run_sync(lambda: tool_wait_editor(editor_session, timeout_s))
 
     def video_story_doctor() -> dict[str, Any]:

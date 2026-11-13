@@ -23,12 +23,13 @@ from video_story.core.config import (
     config_location,
     config_path,
     load_config,
-    resolve_state_root,
     save_config,
     update_config,
 )
 from video_story.core.session import SessionPaths, new_session_id
 from video_story.host.agent_output import DEFAULT_INLINE_CHARS
+from video_story.host.errors import HostError
+from video_story.host.waiting import DEFAULT_WAIT_S
 
 log = logging.getLogger("video_story")
 
@@ -174,30 +175,27 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
 def setup_status(cfg: Config) -> dict[str, Any]:
     """``setup --check``: is anything missing that ``setup`` downloads? Fast: the model
     is only looked for (not verified) and nothing is created."""
-    from video_story.transcribe.ffmpeg import find_ffmpeg
+    from video_story.host.readiness import check_readiness
 
-    model = cfg.resolved_model_path()
-    ffmpeg = find_ffmpeg(cfg)
-    found = {"model": model.is_file(), "ffmpeg": ffmpeg is not None}
-    missing = [name for name, there in found.items() if not there]
-    state = resolve_state_root()
-    return {
-        "ok": not missing,
-        "missing": missing,
-        "model": str(model) if model.is_file() else None,
-        "ffmpeg": str(ffmpeg) if ffmpeg else None,
-        "state_root": str(state.path),
-        "state_reason": state.reason,
-        EXIT_CODE_KEY: EXIT_SETUP_NEEDED if missing else EXIT_OK,
-    }
+    result = check_readiness(cfg)
+    result[EXIT_CODE_KEY] = EXIT_OK if result["ok"] else EXIT_SETUP_NEEDED
+    return result
 
 
 def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
     if args.check:
         return setup_status(_load(args))
-    from video_story.host.doctor import run_doctor
+    from video_story.host.setup import install_components
 
-    return run_doctor(_load(args), fix=True, download_model=True)
+    result = install_components(_load(args), _config_file(args))
+    if not result["ok"]:
+        raise HostError(
+            "SETUP_FAILED",
+            "Some components could not be installed.",
+            4,
+            **{k: v for k, v in result.items() if k not in ("ok", "code")},
+        )
+    return result
 
 
 def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
@@ -215,7 +213,9 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
         raise CliError(exc.code, str(exc)) from exc
     result = info.to_dict()
     if args.detach:
-        result["next"] = f"video-story wait --session {info.session_id} --timeout 240"
+        result["next"] = (
+            f"video-story wait --session {info.session_id} --timeout {DEFAULT_WAIT_S:g}"
+        )
         return result
     paths = SessionPaths(cfg.recording_folder, info.session_id)
     result.update(wait_for_session(paths, timeout_s=args.timeout if args.timeout else 10**9))
@@ -776,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--editor", help="editor session file from `edit --detach`: wait for Process / close"
     )
-    p.add_argument("--timeout", type=float, default=240.0, help="seconds (default 240)")
+    p.add_argument("--timeout", default=DEFAULT_WAIT_S, help="seconds (default 45, 0: status only)")
     p.set_defaults(func=cmd_wait)
 
     p = sub.add_parser("status", help="current state of a session")
@@ -963,6 +963,9 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level)
     try:
         result = args.func(args)
+    except HostError as exc:
+        sys.stderr.write(json.dumps(exc.to_dict(), ensure_ascii=False) + "\n")
+        return exc.exit_code
     except CliError as exc:
         emit_error(exc.code, exc.message)
         return exc.exit_code
@@ -975,11 +978,33 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         emit_error("INTERRUPTED", "interrupted")
         return 130
+    except ModuleNotFoundError as exc:
+        dependency = (exc.name or "").split(".")[0]
+        if dependency in {
+            "mcp",
+            "anyio",
+            "numpy",
+            "PySide6",
+            "PIL",
+            "mss",
+            "sounddevice",
+            "pywhispercpp",
+            "soundcard",
+            "comtypes",
+            "Xlib",
+        }:
+            emit_error("ENVIRONMENT_INVALID", f"Missing library {exc.name}. Run uv sync --locked.")
+            return 23
+        log.exception("internal import failed")
+        emit_error("INTERNAL_ERROR", str(exc))
+        return EXIT_ERROR
     except Exception as exc:  # last resort: still produce machine readable output
         log.exception("command failed")
         emit_error("INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
         return EXIT_ERROR
     exit_code = result.pop(EXIT_CODE_KEY, EXIT_OK)
+    if args.command == "mcp":
+        return exit_code  # stdout belongs exclusively to the MCP protocol
     emit(result)
     return exit_code
 

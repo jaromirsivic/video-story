@@ -16,7 +16,9 @@ Navazuje na `video-story-review.md` z 9. 11. 2026. Co se tam uzavřelo, neopakuj
 | H3 | vyřešeno | Rozhodnutí autora: jedna složka stavu `~/.video-story` (na Windows `C:\Users\<uživatel>\.video-story`) s `config.json`, `models/` a `bin/ffmpeg/`; stejné pravidlo na všech třech systémech. Pořadí: proměnná `VIDEO_STORY_HOME` → kořen kódu, pokud v něm leží `config.json` (vývoj; celý stav zůstává u zdroje) → `~/.video-story`. `VIDEO_STORY_ROOT` znamená už jen kořen kódu. Model a FFmpeg se hledají nejdřív ve složce stavu, pak u kódu (distribuce je může přibalit); stahuje se vždy do složky stavu. Nouzové ukládání configu jinam je pryč: nezapisovatelná složka stavu skončí chybou `STATE_NOT_WRITABLE`. `doctor` a `config path` říkají, která složka se používá a proč; nový `setup --check` (kód 0 = připraveno, 4 = chybí model nebo FFmpeg) používají startovací skripty místo vlastních kontrol cest. Testy mají vždy vlastní dočasnou složku stavu. Ověřeno během: na tomto stroji beze změny (vývojový režim, stejný model i FFmpeg), s `VIDEO_STORY_HOME` se config zapisuje tam a model se najde u kódu, bez `config.json` u kódu míří stav do `~/.video-story`. Nezkoušeno: skutečná instalace z cache pluginů, stahování do nové složky, `.sh` startér na Linuxu a macOS. |
 | H4 | částečně – čeká na ruční zkoušku | Napsáno podle dokumentace hostitelů, v Codexu ani Cursoru nevyzkoušeno. Instalační skripty mají přepínače `-Claude`, `-Codex`, `-Cursor`: Codex dostane odkazy v `~/.agents/skills` (starý odkaz v `~/.codex/skills` se odstraní), Cursor v `~/.cursor/skills` jen tehdy, když skill už nečte z jiné složky. Přibyl kořenový `plugin.json` ve formátu Agent Plugins, který čte Codex i Cursor; Codex si marketplace přečte ze stávajícího `.claude-plugin/marketplace.json`. MCP server se do pluginu nepřibaluje; příručka a skripty dávají hotovou konfiguraci pro Codex (`~/.codex/config.toml`) a Cursor (`~/.cursor/mcp.json`). `SKILL.md` říká, že spouštěč musí běžet mimo sandbox a že o svolení má agent požádat uživatele. Instalační příručka má přepsanou část o třech hostitelích. Postup ruční zkoušky je v `tests/manual/hosts.md`. Zjištění z dokumentace Codexu: výchozí sandbox na Windows ukončí podřízené procesy, když příkaz skončí, takže okno spuštěné uvnitř sandboxu nepřežije; jestli stačí běh mimo sandbox, ukáže až zkouška. Kód odpojování procesu se neměnil. |
 
-Jednotkové testy: 917 prošlo (812 po první dávce D1, H1, H2; 832 po D2; 885 po D3; 901 po H3), lint čistý. Nezkoušeno: jiné verze FFmpeg než 7.1, skutečný hostitel MCP, Codex, Cursor, macOS. Zbylé nálezy jsou beze změny.
+Jednotkové testy: 917 prošlo (812 po první dávce D1, H1, H2; 832 po D2; 885 po D3; 901 po H3), lint čistý. Nezkoušeno: jiné verze FFmpeg než 7.1, skutečný hostitel MCP, Codex, Cursor, macOS. Zbylé nálezy jsou beze změny implementace.
+
+**H5 (13. 11. 2026):** po rozšíření návrhu následovala uživatelem vyžádaná implementace společného startu, opravy závislostí a čekání. Nová Windows sada prošla 954 testy, ověření ve všech hostitelích ještě není úplné. Výše uvedených 917 testů je původní stav před H5. Podrobnosti jsou v [návrhu H5](docs/h5-startup-and-wait.md), [implementačním plánu](implementation-plan-h5-startup-and-wait.md) a [matici ověření](tests/manual/hosts.md).
 
 Při opravě D1 se ukázala drobnost mimo zadání: je-li snímek nejblíž středu nahrávky prázdný, archivace skončí chybou `ARCHIVE_FAILED` při zápisu náhledu (nic se nesmaže, ale nahrávku nejde archivovat). Souvisí s D3.
 
@@ -41,7 +43,7 @@ Nic z toho neběželo v Codexu, v Cursoru, na Linuxu ani na macOS. Vše, co se j
 | D2 | Archivace trvale zahodí zvukovou stopu vypnutou v editoru | vysoká | přečteno |
 | H3 | Stav (config, model, FFmpeg, prostředí) žije v instalačním adresáři – instalace jako plugin ho při aktualizaci ztratí (C6) | vysoká pro distribuci | přečteno |
 | H4 | Codex a Cursor: jiné cesty ke skillům, sandbox, žádná MCP konfigurace; nic není vyzkoušeno | vysoká pro cíl „běží ve třech hostitelích“ | předpoklad |
-| H5 | `wait` čeká 240 s, hostitelé mají kratší výchozí limit; MCP `wait` 60 s | střední až vysoká | přečteno |
+| H5 | Limity `wait`, společný start a příprava závislostí. [Rozšířený návrh](docs/h5-startup-and-wait.md) pro Claude Code, Cursor a Codex | střední až vysoká | implementováno, hostitelské ověření neúplné |
 | D3 | Automatická archivace nejde vypnout ani zrušit, selhaná nahrávka zůstane zamčená | vysoká | přečteno |
 | N2 | Odpojený mikrofon ani změna výstupního zařízení se nepozná | vysoká | přečteno |
 | E1 | Process na jiné než čerstvé nahrávce předá agentovi tu čerstvou | střední | přečteno |
@@ -107,17 +109,21 @@ Repozitář je zároveň plugin a marketplace (`.claude-plugin/`). Instalace tou
 
 **Návrh:** vyzkoušet v obou hostitelích cestu Record → Stop → Process a zapsat výsledek do matice ověření. Do instalace přidat `~/.agents/skills` a konfiguraci MCP pro Codex (`~/.codex/config.toml`) a Cursor (`~/.cursor/mcp.json`). Do `SKILL.md` doplnit, že `run --detach` a `edit --detach` musí běžet mimo sandbox.
 
-### H5 · `wait` čeká déle, než hostitel dovolí
+### H5 · Deterministické spuštění, oprava prostředí a limity čekání
 
-**Závažnost:** střední až vysoká · **Ověření:** přečteno; na Claude Code změřeno z přepisů
+**Závažnost:** střední až vysoká · **Stav:** implementováno jádro, úplné ověření hostitelů otevřené
 
-`SKILL.md` předepisuje `wait … --timeout 240` a o limitu nástroje hostitele mlčí. Claude Code má výchozí limit příkazu 120 s. V dosavadních relacích si Claude limit zvedl sám (415 volání s `timeout: 300000`), takže to funguje díky úsudku modelu, ne díky návodu. U Codexu a Cursoru to zaručené není.
+Společné spouštěče bez automatické instalace, kontrola součástí, potvrzení připravenosti GUI, cílený setup s navazováním a výchozí wait 45 s jsou doplněny. Windows sada 954 testů prošla, Linux/WSL cíleně 32 prošlo a 2 byly přeskočeny. Skutečná instalace modelu/FFmpeg a editorové Process přes CLI v Codex desktopu proběhly. Modelové relace Claude Code s Opus 5.5 a Codex CLI se Sol Medium následně prošly editorovým CLI otevřením a běžným zavřením, nativním MCP edit/Process a kontrolou chybějícího modelu. Cursor CLI s Grokem 4.7 prošel novým otevřením, čekáním a běžným zavřením bez Process. Katalog MCP ukazuje 14 nástrojů, modelová MCP část ale zůstává neověřená kvůli nedostupnosti nástrojů v první obnovené relaci a limitu čerpání při dalším pokusu. Úplné scénáře všech tří hostitelů nejsou potvrzené. Viz [aktuální matice](tests/manual/hosts.md).
 
-V MCP má `video_story_wait` výchozí čekání 60 s (`mcp_server.py:566`). Klient s limitem požadavku 60 s by prohrál každé volání.
+Následující popis zachycuje původní problém a dohodnutý postup před opravou:
 
-`setup` stahuje 548 MB bez navázání (`downloads.py:143-155`); příkaz zabitý limitem začne od nuly.
+`SKILL.md` stále předepisuje `wait … --timeout 240`. Při kratším limitu hostitelského nástroje nemusí agent dostat odpověď aplikace. MCP čeká standardně 60 sekund, takže klient s 60sekundovým limitem nemá rezervu. Nejde o selhání každého volání: relace může skončit dřív. Průběžná hlášení nahrávacího MCP čekání nenahrazují správné nastavení limitů. `setup` navíc neumí navázat přerušené stahování modelu.
 
-**Návrh:** výchozí `wait` kolem 100 s (CLI) a 45 s (MCP) a ve skillu výslovně uvést, jaký limit nástroje nastavit. Stahování modelu udělat navazovatelné.
+Start dnes není sjednocený: skillové spouštěče předávají řízení běžnému `uv run`, kořenové spouštěče samy kontrolují a doinstalovávají model a FFmpeg. To neodpovídá požadavku na rychlé spuštění s opravou až po konkrétní chybě.
+
+**Dohodnutý postup:** skill nejprve zavolá hotový `.bat` / `.sh` nebo dostupný lokální MCP nástroj. Spouštěč ověří uv a připravený Python bez instalace, aplikace rychle zkontroluje model a FFmpeg. Při úspěchu otevře okno, potvrdí připravenost a agent čeká. Při problému vrátí rozpoznatelnou chybu, agent informuje uživatele, cíleně opraví prostředí nebo spustí `setup` a zopakuje původní start. Modální progress bar není potřeba. Běžný start nesmí načítat celý model, kontrolovat aktualizace ani přistupovat k síti.
+
+Úplný kontrakt, opravy, pravidla čekání a podmínky přijetí obsahuje [H5: deterministické spuštění, oprava prostředí a čekání](docs/h5-startup-and-wait.md). Návrh výslovně požaduje ověření nahrávání i editoru v **Claude Code, Cursoru a Codexu**, přes CLI i MCP. Dokumentované limity hostitelů nejsou důkazem skutečné funkčnosti. H5 se uzavře až po implementaci a těchto zkouškách.
 
 ---
 
@@ -337,7 +343,7 @@ Aby se to nemuselo kontrolovat znovu:
 2. **H1** – oprava spouštěčů; bez ní skill mimo repozitář nefunguje v žádném hostiteli.
 3. **H2 + E2** – výstup do souboru a index sidecarů; týká se každé nahrávky nad 10 minut.
 4. **N1, N2** – mikrofon na hodinách nahrávky a hlídání zařízení.
-5. **H4, H5** – zkouška v Codexu a Cursoru, cesty, MCP konfigurace, limity čekání.
+5. **H4, H5**: společný rychlý start, oprava závislostí agentem, limity čekání a zkouška v Claude Code, Cursoru a Codexu přes CLI i MCP podle [rozšířeného návrhu H5](docs/h5-startup-and-wait.md).
 6. **H3** – přesun stavu z instalačního adresáře, než se plugin začne distribuovat.
 7. **D3, E1, N3** a zbytek podle potřeby; **P1** jako podklad pro plán portace.
 

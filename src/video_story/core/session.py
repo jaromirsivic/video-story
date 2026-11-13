@@ -84,7 +84,9 @@ CROP_FILE_NAME = "crop.json"
 INSTRUCTIONS_FILE_NAME = "instructions.txt"
 
 # Files that stay in the work directory when a recording is finalised or discarded.
-WORK_ONLY_FILES = frozenset({STATE_FILE_NAME, LOCK_FILE_NAME, UI_LOG_FILE_NAME})
+WORK_ONLY_FILES = frozenset(
+    {STATE_FILE_NAME, LOCK_FILE_NAME, UI_LOG_FILE_NAME, "startup.json", "startup.result.json"}
+)
 
 _SESSION_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
 

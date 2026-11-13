@@ -160,28 +160,28 @@ foreach ($name in $skillNames) {
 }
 
 if (-not $Remove) {
-    $mcpArgs = @('run', '--project', $root, 'video-story', 'mcp')
+    $mcpArgs = @('/d', '/c', 'call', (Join-Path $root 'skills/video-story/scripts/video-story.bat'), 'mcp')
     Write-Host ''
     Write-Host 'MCP server (optional; only for a host that cannot open the window from a command, see docs/installation.md):'
     if ($Claude) {
         Write-Host ''
         Write-Host 'Claude Desktop - add to claude_desktop_config.json:'
-        $cfg = @{ mcpServers = @{ 'video-story' = @{ command = 'uv'; args = $mcpArgs } } }
+        $cfg = @{ mcpServers = @{ 'video-story' = @{ command = 'cmd.exe'; args = $mcpArgs } } }
         Write-Host ($cfg | ConvertTo-Json -Depth 5)
     }
     if ($Codex) {
         Write-Host ''
-        Write-Host 'Codex - add to ~/.codex/config.toml (or run: codex mcp add video-story -- uv run --project <path> video-story mcp):'
+        Write-Host 'Codex - add to ~/.codex/config.toml (or run: codex mcp add video-story -- cmd.exe /d /c call <launcher.bat> mcp):'
         $tomlArgs = ($mcpArgs | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }) -join ', '
         Write-Host '[mcp_servers.video-story]'
-        Write-Host 'command = "uv"'
+        Write-Host 'command = "cmd.exe"'
         Write-Host "args = [$tomlArgs]"
-        Write-Host 'tool_timeout_sec = 120'
+        Write-Host 'tool_timeout_sec = 60'
     }
     if ($Cursor) {
         Write-Host ''
         Write-Host 'Cursor - add to ~/.cursor/mcp.json (or .cursor/mcp.json in a project):'
-        $cfg = @{ mcpServers = @{ 'video-story' = [ordered]@{ type = 'stdio'; command = 'uv'; args = $mcpArgs } } }
+        $cfg = @{ mcpServers = @{ 'video-story' = [ordered]@{ type = 'stdio'; command = 'cmd.exe'; args = $mcpArgs } } }
         Write-Host ($cfg | ConvertTo-Json -Depth 5)
     }
     Write-Host ''

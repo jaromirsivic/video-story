@@ -148,24 +148,24 @@ if [ "$REMOVE" = 0 ]; then
     cat <<EOF
 
 Claude Desktop - add to claude_desktop_config.json:
-{"mcpServers": {"video-story": {"command": "uv", "args": ["run", "--project", "$ROOT", "video-story", "mcp"]}}}
+{"mcpServers": {"video-story": {"command": "sh", "args": ["$ROOT/skills/video-story/scripts/video-story.sh", "mcp"]}}}
 EOF
   fi
   if [ "$CODEX" = 1 ]; then
     cat <<EOF
 
-Codex - add to ~/.codex/config.toml (or run: codex mcp add video-story -- uv run --project <path> video-story mcp):
+Codex - add to ~/.codex/config.toml (or run: codex mcp add video-story -- sh <launcher.sh> mcp):
 [mcp_servers.video-story]
-command = "uv"
-args = ["run", "--project", "$ROOT", "video-story", "mcp"]
-tool_timeout_sec = 120
+command = "sh"
+args = ["$ROOT/skills/video-story/scripts/video-story.sh", "mcp"]
+tool_timeout_sec = 60
 EOF
   fi
   if [ "$CURSOR" = 1 ]; then
     cat <<EOF
 
 Cursor - add to ~/.cursor/mcp.json (or .cursor/mcp.json in a project):
-{"mcpServers": {"video-story": {"type": "stdio", "command": "uv", "args": ["run", "--project", "$ROOT", "video-story", "mcp"]}}}
+{"mcpServers": {"video-story": {"type": "stdio", "command": "sh", "args": ["$ROOT/skills/video-story/scripts/video-story.sh", "mcp"]}}}
 EOF
   fi
   echo ""

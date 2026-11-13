@@ -1742,6 +1742,16 @@ class EditorWindow(QMainWindow):
     def _on_loaded(self, generation: int, recording: object, error: str) -> None:
         if generation != self._load_generation:
             return
+        pending = getattr(self, "_startup_request", None)
+        if pending is not None:
+            from video_story.host import startup
+
+            if not startup.valid(pending):
+                startup.fail(pending, RuntimeError("Recording load exceeded startup deadline."))
+                self._show_status_message(
+                    "Opening the requested recording timed out. Select it again."
+                )
+                return
         self.statusBar().clearMessage()
         if not isinstance(recording, LoadedRecording):
             self.preview.view.set_message(f"Cannot load recording: {error}")
@@ -3019,6 +3029,13 @@ class EditorWindow(QMainWindow):
         waits on this window at a time, and the earlier one must not hang forever.
         Auto process is unticked: for the newcomer this is a freshly opened editor.
         """
+        from video_story.host import startup
+
+        startup_request = startup.editor_request(request.editor_session)
+        if startup_request.is_file() and not startup.valid(startup_request):
+            startup.fail(startup_request, RuntimeError("Attach request expired."))
+            write_editor_event(request.editor_session, "closed")
+            return
         self.auto_process_checkbox.setChecked(False)
         if self.editor_session != request.editor_session:
             self._close_editor_session()
@@ -3065,6 +3082,8 @@ class EditorWindow(QMainWindow):
         )
         self.raise_()
         self.activateWindow()
+        if startup_request.is_file():
+            startup.watch_window(self, startup_request, editor=True)
         log.info(
             "attached: editor session %s, recording session %s, recording %s",
             request.editor_session.name,

@@ -48,6 +48,18 @@ def _root(base: Path, skill: str, *, marker: bool) -> Path:
     if marker:
         (base / MARKER).write_text("", encoding="utf-8")
     shutil.copyfile(SKILLS_DIR / skill / "scripts" / f"{skill}{EXT}", scripts / f"{skill}{EXT}")
+    # Exercise the H1 root resolver independently of the new environment bootstrap.
+    launch = base / "scripts"
+    launch.mkdir(exist_ok=True)
+    if WINDOWS:
+        (launch / "launch.bat").write_text(
+            '@echo off\nuv run --quiet --project "%VS_ROOT%" video-story %*\n', encoding="ascii"
+        )
+    else:
+        (launch / "launch.sh").write_text(
+            '#!/bin/sh\nexec uv run --quiet --project "$VS_ROOT" video-story "$@"\n',
+            encoding="ascii",
+        )
     return base
 
 

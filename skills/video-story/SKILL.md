@@ -14,27 +14,28 @@ editor (status `processed`); every other ending means: do nothing with it.
 
 ## 1. Locate and run the tool
 
-The skill directory contains `scripts/video-story.cmd` (Windows) and
-`scripts/video-story.sh` (Linux, macOS). Call them with an absolute path; they run the
-plugin through `uv` (the first run creates the environment, which can take a minute).
-Every command prints one JSON object on stdout; errors are a JSON object on stderr with
-`code` and `message` and a non-zero exit code. `ROOT_NOT_FOUND`: the launcher could not
-find the plugin directory - set the environment variable `VIDEO_STORY_ROOT` to the
-repository path, or reinstall the skill link.
+First call the absolute `scripts/video-story.bat` (Windows) or
+`scripts/video-story.sh` (Linux/macOS) with `run --detach`, or use the
+already connected local MCP tool. The `.cmd` alias remains compatible.
+Do not run diagnostic/setup commands first. Startup checks the prepared Python,
+model and FFmpeg, does not install anything, and acknowledges the ready window.
 
 ```text
-<skill-dir>\scripts\video-story.cmd run --detach
+<skill-dir>\scripts\video-story.bat run --detach
 <skill-dir>/scripts/video-story.sh run --detach
 ```
 
-What the launcher needs from the host: `run --detach` starts the Video Story window as
-a separate GUI process that must keep running after the command has returned; it
-writes to the recording folder and to the state folder (`~/.video-story`, or the
-development checkout), both outside your workspace; and the first run needs the network
-(uv creates the environment). If your host runs commands in a sandbox, run
-`run --detach` - and the first command of a session - outside the sandbox: ask the user
-to approve running it outside the sandbox instead of retrying inside it (inside, the
-window may never appear or may close when the command ends).
+Results are JSON (success on stdout, errors on stderr with a non-zero exit code).
+On `UV_MISSING`, `PYTHON_MISSING`, `ENVIRONMENT_INVALID` or `SETUP_REQUIRED`,
+read [startup and recovery](../../docs/agent-startup.md), tell the user what you
+are fixing, perform only that repair and retry the same request. `SETUP_REQUIRED`
+uses the same launcher with `setup`. Never replace a custom model blindly.
+Other errors need their own diagnosis, not a full reinstall. Keep existing config
+and recording arguments. No download-progress dialog is used.
+
+The GUI must survive the command returning. Respect the host's permissions and
+existing approvals. If blocked, use the host's supported local execution or configured
+local MCP route. Do not request approval again when it is already granted.
 
 ## 2. Start a session
 
@@ -46,13 +47,19 @@ window may never appear or may close when the command ends).
 
 ## 3. Wait for the user
 
+Allow at least 60 seconds in the host tool for a 45-second application wait, or
+shorten the application wait to leave a margin. If the tool returns a running-task
+handle, retrieve that task's result first. A host timeout is not cancellation.
+For host-specific handling see [startup and recovery](../../docs/agent-startup.md).
+
+
 Loop until `final` is `true`:
 
 ```text
-<launcher> wait --session <session_id> --timeout 240
+<launcher> wait --session <session_id> --timeout 45
 ```
 
-Each call returns after at most 240 s with the current `status` and `timed_out`. Call it
+Each call returns after at most 45 s with the current `status` and `timed_out`. Call it
 again when `timed_out` is true. Do not start other work while waiting; the user is
 recording. Statuses: `ready` (window open), `recording`, `processing` (saving the
 recording), `editing` (the recording ended and is open in the editor, which transcribes

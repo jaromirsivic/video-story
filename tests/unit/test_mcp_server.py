@@ -133,12 +133,12 @@ def test_wait_times_out_and_clamps(config_file: Path, tmp_path: Path, monkeypatc
         ),
     )
     monkeypatch.setattr(runner, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(mcp_server, "WAIT_TIMEOUT_MIN_S", 0.0)
-    result = mcp_server.tool_wait(paths.session_id, timeout_s=-5, config_file=config_file)
+    result = mcp_server.tool_wait(paths.session_id, timeout_s=0.001, config_file=config_file)
     assert result["ok"] is True and result["timed_out"] is True
     assert result["status"] == "recording" and "video_story_wait" in result["hint"]
     assert mcp_server.clamp_timeout(1000) == 240.0
-    assert mcp_server.clamp_timeout("x") == 60.0
+    assert mcp_server.tool_wait(paths.session_id, -5, config_file)["code"] == "INVALID_TIMEOUT"
+    assert mcp_server.tool_wait(paths.session_id, "x", config_file)["code"] == "INVALID_TIMEOUT"
 
 
 def test_wait_final_and_progress(recording: SessionPaths, config_file: Path, monkeypatch):

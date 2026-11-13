@@ -192,10 +192,14 @@ def test_setup_check(code: Path, tmp_path: Path, monkeypatch, capsys):
     assert not state.exists() or not any(state.iterdir()), "the check creates nothing"
 
     # A model and FFmpeg bundled with the code are enough.
-    _write_model(code / "models" / MODEL)
+    model = _write_model(code / "models" / MODEL)
+    from video_story.host import readiness
+
+    monkeypatch.setattr(readiness, "MODEL_SIZE", model.stat().st_size)
     bundled = ff.bundled_ffmpeg_path(code)
     bundled.parent.mkdir(parents=True)
-    bundled.write_bytes(b"")
+    bundled.write_bytes(b"ffmpeg")
+    bundled.chmod(0o755)
     assert cli.main(["setup", "--check"]) == cli.EXIT_OK
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True and out["missing"] == []

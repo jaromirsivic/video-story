@@ -100,6 +100,27 @@ class ProcessingWorker(QObject):
         self.finished.emit(str(final_dir))
 
 
+class EditorLaunchWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, controller, config_file):
+        super().__init__()
+        self.controller = controller
+        self.config_file = config_file
+
+    def run(self):
+        try:
+            session_id = self.controller.paths.session_id
+            result = launch_editor(
+                self.controller.config, session_id, self.config_file, recording_session=session_id
+            )
+        except Exception as exc:
+            self.failed.emit(exc)
+        else:
+            self.finished.emit(result)
+
+
 class ControlWindow(QWidget):
     """Main window. ``on_finished`` is called with the final status when the session ends.
 
@@ -138,6 +159,7 @@ class ControlWindow(QWidget):
         self._halting = False  # stopping by itself: a notice is on screen, no closing
         self._done = False
         self._thread: QThread | None = None
+        self._opening_editor = False
         self._worker: ProcessingWorker | None = None
         self._stop_dialog: StopDialog | None = None
 
@@ -261,16 +283,13 @@ class ControlWindow(QWidget):
             return True
         if not missing:
             return True
-        answer = QMessageBox.question(
+        QMessageBox.warning(
             self,
             "Transcription is not ready",
             "Missing: " + ", ".join(missing) + ".\n\n"
-            "You can record, but the recording cannot be transcribed until you run "
-            "`video-story setup` (it downloads the missing parts).\n\nRecord anyway?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            "Run `video-story setup` to prepare the missing components, then retry.",
         )
-        return answer == QMessageBox.StandardButton.Yes
+        return False
 
     def _on_record(self) -> None:
         if not self._confirm_missing_requirements():
@@ -499,26 +518,31 @@ class ControlWindow(QWidget):
         self._stop_thread()
         self._done = True
         log.info("recording saved: %s", final_dir)
-        session_id = self.controller.paths.session_id
-        try:
-            info = launch_editor(
-                self.controller.config,
-                session_id,
-                self._config_file,
-                recording_session=session_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - the recording must not be lost
-            log.exception("cannot open the editor")
-            self.controller.editor_failed(str(exc))
-            QMessageBox.warning(
-                self,
-                "Video Editor",
-                f"The editor could not be opened: {exc}\n\n"
-                "The recording was saved and nothing was handed to the agent. Open it "
-                "later with Edit Video Story.",
-            )
-            self._finish("cancelled")
-            return
+        self._opening_editor = True
+        self._thread = QThread(self)
+        self._worker = EditorLaunchWorker(self.controller, self._config_file)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_editor_opened)
+        self._worker.failed.connect(self._on_editor_failed)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.start()
+
+    def _on_editor_failed(self, exc) -> None:
+        self._stop_thread()
+        self._opening_editor = False
+        self.controller.editor_failed(str(exc), code=getattr(exc, "code", "START_FAILED"))
+        QMessageBox.warning(
+            self,
+            "Video Editor",
+            f"The editor could not be opened: {exc}\n\n"
+            "The recording was saved. Open it later with Edit Video Story.",
+        )
+        self._finish("cancelled")
+
+    def _on_editor_opened(self, info) -> None:
+        self._stop_thread()
+        self._opening_editor = False
         self.controller.editor_opened(int(info.get("pid") or 0))
         self._finish("editing")
 
@@ -813,6 +837,9 @@ class ControlWindow(QWidget):
     # Close ------------------------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._opening_editor:
+            event.ignore()
+            return
         if self._done:
             self.hotkeys.disable()
             self._drop_tray()

@@ -389,21 +389,19 @@ def test_no_closing_while_a_stop_notice_is_shown(window, controller, monkeypatch
 
 
 def test_record_reports_missing_transcription_parts(qtbot, controller, monkeypatch):
-    answers = iter([cw.QMessageBox.StandardButton.No, cw.QMessageBox.StandardButton.Yes])
     asked: list[str] = []
 
     def question(_parent, _title, text, *_args):
         asked.append(text)
-        return next(answers)
 
-    monkeypatch.setattr(cw.QMessageBox, "question", question)
+    monkeypatch.setattr(cw.QMessageBox, "warning", question)
     w = cw.ControlWindow(controller, on_finished=lambda _s: None, preflight=lambda: ["FFmpeg"])
     w.show()
     try:
         w.record_button.click()
         assert not controller.recording and "FFmpeg" in asked[0] and "setup" in asked[0]
         w.record_button.click()
-        assert controller.recording and len(asked) == 2
+        assert not controller.recording and len(asked) == 2
     finally:
         w._done = True
         w.close()

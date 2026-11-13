@@ -4,6 +4,15 @@ Video Story is a Python 3.12 application managed by [uv](https://docs.astral.sh/
 Everything runs locally: the recorder, the FFmpeg conversion and the Whisper
 transcription (whisper.cpp through `pywhispercpp`, CPU only).
 
+
+## Fast startup and recovery
+
+Both windows use the same prepared-environment launcher. A normal start never
+downloads Python, packages, model or FFmpeg. Agents first call the launcher and
+repair only the reported problem, then retry. See [the shared recovery procedure](agent-startup.md).
+`setup` installs components without probing screens/audio. `doctor` remains full
+diagnostics. Download progress is written to logs, not an application dialog.
+
 ## Requirements
 
 | Component | Windows | Linux | macOS 13+ |
@@ -45,7 +54,7 @@ uv run video-story setup
 reports every check (screens, audio input, state folder, FFmpeg, model, backend,
 recording folder) and where the model and FFmpeg were found, without downloading
 anything. `uv run video-story setup --check` only says whether something is missing
-(exit code 0: ready, 4: run `setup`); the starters use it.
+(exit code 0: ready, 4: run `setup`); it is optional diagnostics. Starters check internally and never download.
 
 ## 2. Configuration
 
@@ -138,9 +147,9 @@ are written from their documentation (linked below) and not yet exercised; run
 The launcher (`run --detach`, `edit --detach`) starts the window as its own GUI process
 that must keep running after the command has returned. Video Story writes outside the
 agent's workspace (the recording folder, the state folder `~/.video-story`, the
-virtual environment next to the code), and the first run needs the network because uv
-creates the environment. Both skills tell the agent to run the launcher outside the
-host's sandbox and to ask you for that permission instead of retrying inside it:
+virtual environment next to the code). Normal startup is offline. Only explicit repair
+needs network access. Both skills use the host's supported local execution route and
+reuse existing approvals. Permission denial is not a missing dependency:
 
 - **Codex** runs commands in a sandbox by default (`workspace-write`: writes only in the
   workspace, no network) and asks for approval to go beyond it
@@ -268,8 +277,8 @@ Claude Desktop, `claude_desktop_config.json`:
 {
   "mcpServers": {
     "video-story": {
-      "command": "uv",
-      "args": ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
+      "command": "cmd.exe",
+      "args": ["/d", "/c", "call", "C:\\path\\to\\video-story\\skills\\video-story\\scripts\\video-story.bat", "mcp"]
     }
   }
 }
@@ -281,15 +290,16 @@ desktop app, CLI and IDE extension share it -
 
 ```toml
 [mcp_servers.video-story]
-command = "uv"
-args = ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
-tool_timeout_sec = 120
+command = "cmd.exe"
+args = ["/d", "/c", "call", "C:\\path\\to\\video-story\\skills\\video-story\\scripts\\video-story.bat", "mcp"]
+tool_timeout_sec = 60
 ```
 
-or `codex mcp add video-story -- uv run --project C:\path\to\video-story video-story mcp`
-(then add `tool_timeout_sec`). Codex gives a tool 60 s by default, exactly as long as
-`video_story_wait` waits by default; 120 s leaves room. `/mcp` in the CLI lists the
-server.
+MCP waits default to 45 seconds. A 60-second tool budget leaves a margin.
+The separate server-start budget must not be used for downloading. On Linux/macOS
+use `command = "sh"` and arguments `["/absolute/root/skills/video-story/scripts/video-story.sh", "mcp"]`.
+Prepare uv/Python before connecting the server. A missing model/FFmpeg is reported
+by the start tool without disconnecting the server. See [agent recovery](agent-startup.md).
 
 Cursor, `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project -
 [MCP](https://cursor.com/docs/mcp)); `cursor-agent` reads the same files:
@@ -299,8 +309,8 @@ Cursor, `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project -
   "mcpServers": {
     "video-story": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "--project", "C:\\path\\to\\video-story", "video-story", "mcp"]
+      "command": "cmd.exe",
+      "args": ["/d", "/c", "call", "C:\\path\\to\\video-story\\skills\\video-story\\scripts\\video-story.bat", "mcp"]
     }
   }
 }

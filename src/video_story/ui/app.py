@@ -9,6 +9,7 @@ from pathlib import Path
 
 from video_story.core.config import load_config
 from video_story.core.session import SessionPaths, new_session_id
+from video_story.host import startup
 from video_story.platform import get_platform
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,23 @@ def _housekeeping_in_background(config, session_id: str) -> None:
 
 
 def run_ui(session_id: str | None = None, config_file: Path | None = None) -> int:
+    initial = load_config(config_file)
+    request = (
+        SessionPaths(initial.recording_folder, session_id).work_dir / "startup.json"
+        if session_id
+        else None
+    )
+    if request is not None and not request.is_file():
+        request = None
+    config = startup.prepare(config_file, request, "run")
+    try:
+        return _run_ui(config, session_id, config_file, request)
+    except Exception as exc:
+        startup.fail(request, exc)
+        raise
+
+
+def _run_ui(config, session_id, config_file, request) -> int:
     platform = get_platform()
     platform.prepare_process()  # DPI awareness must be set before Qt starts
 
@@ -42,7 +60,6 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
     from video_story.ui.control_window import ControlWindow
     from video_story.ui.icons import install_app_icon
 
-    config = load_config(config_file)
     status = platform.support_status()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Video Story")
@@ -86,9 +103,11 @@ def run_ui(session_id: str | None = None, config_file: Path | None = None) -> in
         preflight=preflight,
         settings=QSettings("VideoStory", "Recorder"),  # the theme of the window
     )
+    startup.ensure_valid(request)
     window.show()
     window.raise_()
     window.activateWindow()
+    startup.watch_window(window, request)
     log.info("control window shown for session %s", session_id)
     code = app.exec()
     log.info("session %s finished with %s", session_id, final_status["value"])
