@@ -283,9 +283,12 @@ and `mouse`).
 The transcript is made from the tracks the user left switched on in the editor
 (both by default), so it may contain speech that came from the computer, not from
 the user. An archived recording (the editor's **Archive Video**, or any
-recording older than `archive_after_days`) has no frame images and no audio any more:
+recording older than `archive_after_days`) has no frame images and no WAV audio any more:
 `archive/<screenId>.mp4` (with `<screenId>.srt` and a still `<screenId>.jpg`) replace
-them; `timeline` still works (sidecars and transcript stay), `frames` returns
+the frames, and every audio track is kept as `archive/audio.m4a` (microphone) and
+`archive/computer.m4a` (computer audio), also a track the user had switched off (the
+MP4 holds only the tracks that were on, see `archive/tracks.json`; no such file: all);
+`timeline` still works (sidecars and transcript stay), `frames` returns
 `image: null`, and `describe`/`timeline`/`frames` carry an `archive` object with the
 paths. `describe --session <session_id>` returns the paths, the
 manifest (screens, capture interval, keypoints), `instructions` and, only when it is
@@ -315,7 +318,8 @@ Mention the detected language if it is unexpected. Keep the recording folder unt
   folder (`default` at first), and the user may move it to another folder, also
   between Stop and Process - always use the `recording_dir` the result gives (or the
   session id), never a path you built yourself. Recordings older than `archive_after_days` (default 30) are archived when
-  the editor starts (one MP4 per screen; frames and audio are deleted); nothing is
+  the editor starts (one MP4 per screen, one `.m4a` per audio track; frames and WAV
+  audio are deleted); nothing is
   deleted automatically.
 - `doctor` - checks screens, audio input, FFmpeg and the whisper model;
   `doctor --fix` downloads FFmpeg when missing; `setup` also downloads the model.

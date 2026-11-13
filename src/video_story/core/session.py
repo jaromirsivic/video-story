@@ -22,9 +22,11 @@ tracks the editor plays, shows, transcribes and renders (see
 
 ``frames/`` holds only the images (``<seconds>_<millis>_<screenId>.<png|jpg>``),
 ``frames_info/`` the sidecar JSON of every frame (same name, ``.json``). Archiving
-(:mod:`video_story.core.archive`) turns every screen into ``archive/<screenId>.mp4``
-with a still ``<screenId>.jpg`` and subtitles ``<screenId>.srt``, then deletes
-``audio/`` and ``frames/``; ``frames_info/`` and the transcript stay.
+(:mod:`video_story.export.archive`) turns every audio track into ``archive/audio.m4a``
+/ ``archive/computer.m4a`` (with a copy of ``tracks.json``) and every screen into
+``archive/<screenId>.mp4`` with a still ``<screenId>.jpg`` and subtitles
+``<screenId>.srt``, then deletes ``audio/`` and ``frames/``; ``frames_info/`` and the
+transcript stay.
 
 ``input/mouse.jsonl`` holds the mouse actions and the elements under the mouse (see
 :mod:`video_story.core.input_events`); it exists only when Mouse was switched on and the

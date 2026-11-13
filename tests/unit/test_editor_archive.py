@@ -51,6 +51,9 @@ def exporter(request, config, progress=None, cancel=None):
     if progress:
         progress(1.0, "")
 
+def audio_encoder(source, output, config, progress=None, cancel=None):
+    output.write_bytes(b"aac")
+
 def emit(event):
     sys.stdout.write(json.dumps(event) + "\n")
     sys.stdout.flush()
@@ -63,6 +66,8 @@ state = archive_recording(
     progress=lambda f, _t: emit({"event": "progress", "phase": "archiving", "fraction": f}),
     exporter=exporter,
     verifier=lambda *args: None,  # the stand-in MP4 is not a video
+    audio_encoder=audio_encoder,
+    audio_verifier=lambda *args: None,  # nor is the stand-in .m4a audio
 )
 emit({"event": "done", "status": str(state.status), "leftovers": state.leftovers, "ok": True})
 """
@@ -116,6 +121,8 @@ def test_archive_shown_video_locks_it_then_shows_the_archived_view(qtbot, tmp_pa
     )
     assert not paths.frames_dir(paths.final_dir).exists()
     assert not paths.audio_dir(paths.final_dir).exists()
+    # The audio track kept in archive/ does not disturb the archived view.
+    assert (paths.archive_dir(paths.final_dir) / "audio.m4a").is_file()
     assert window.list_view.badge_of(_item(window, NEWEST)) == (BADGE_ARCHIVED, None)
     # Read only: subtitles yes, everything in the bottom row no.
     recording = window.recording

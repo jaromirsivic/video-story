@@ -1,10 +1,21 @@
-"""Archiving a recording: one MP4 per screen instead of thousands of frames.
+"""Archiving a recording: one MP4 per screen instead of thousands of frames, and every
+audio track as a small AAC file instead of a WAV.
 
-For every screen, in order (see :mod:`video_story.core.archive_state`):
+First the audio (see :mod:`video_story.core.archive_state`): every track the recording
+has - ``audio/audio.wav`` (microphone), ``audio/computer.wav`` (computer audio) - is
+encoded to ``archive/audio.m4a`` / ``archive/computer.m4a``, whether it is switched on
+in the editor or not, and ``audio/tracks.json`` (which tracks are switched on) is
+copied to ``archive/tracks.json``. Each ``.m4a`` is written under a partial name and
+gets its name only once its audio stream was read back and is as long as the WAV; then
+the track is recorded in ``audio`` of ``archive.json``. A track that fails stops the
+archiving with nothing deleted. Only a WAV without a single sample is left out.
 
-1. ``archive/<screenId>.mp4`` - the whole recording of that screen with the full audio
-   track, rendered exactly like the editor's **Render** (cursor drawn as configured),
-   plus ``archive/<screenId>.srt`` with the subtitles of the whole recording;
+Then for every screen, in order:
+
+1. ``archive/<screenId>.mp4`` - the whole recording of that screen, rendered exactly
+   like the editor's **Render** (cursor drawn as configured, the audio tracks that are
+   switched on in the editor mixed into one; none when both are off), plus
+   ``archive/<screenId>.srt`` with the subtitles of the whole recording;
 2. the MP4 verified: its video stream must cover the whole recording (FFmpeg exits
    with 0 and full-length audio even when it cut the video at a frame it could not
    read); a video that fails stops the archiving with nothing deleted;
@@ -13,14 +24,18 @@ For every screen, in order (see :mod:`video_story.core.archive_state`):
 4. the frames of that screen deleted at once (they are not needed any more, and the
    next screen gets their disk space).
 
-When every screen is done, ``audio/`` and what is left of ``frames/`` are deleted and
-the status becomes ``archived``. ``frames_info/``, the transcript, the manifest, the
-crop and the instructions stay. Deleting is best effort: a file another program keeps
-open stays where it is (listed in ``leftovers``) and the archive still counts as done;
+When every screen is done, ``audio/`` (only if every track in it has its verified
+``.m4a``) and what is left of ``frames/`` are deleted and the status becomes
+``archived``. ``frames_info/``, the transcript, the manifest, the crop and the
+instructions stay. Deleting is best effort: a file another program keeps open stays
+where it is (listed in ``leftovers``) and the archive still counts as done;
 :func:`cleanup_leftovers` tries again later.
 
-A run that stops half way (editor closed, FFmpeg failed) resumes with the first screen
-not in ``screens_done``; its partial outputs are removed first.
+A run that stops half way (editor closed, FFmpeg failed) resumes with the first audio
+track not in ``audio`` and the first screen not in ``screens_done``; their partial
+outputs are removed first. That also holds for a run an older version left half way,
+whose ``archive.json`` has no ``audio`` yet: its tracks are converted before anything
+else happens.
 """
 
 from __future__ import annotations
@@ -36,17 +51,22 @@ from pathlib import Path
 from video_story.core.archive_state import (
     ArchiveState,
     ArchiveStatus,
+    archived_audio_path,
+    archived_tracks_path,
     read_archive_state,
     write_archive_state,
 )
+from video_story.core.audio_mix import existing_tracks, track_path, wav_info
 from video_story.core.config import Config
+from video_story.core.fileio import replace_with_retry
 from video_story.core.manifest import read_manifest
 from video_story.core.session import SessionPaths, now_iso
 from video_story.core.transcript import transcript_status
 from video_story.host.runner import FrameIndex
 
-from . import CancelCheck, ExportError, ExportRequest, ExportResult
-from .ffmpeg_export import export_recording, verify_video
+from . import CancelCheck, ExportError, ExportRequest, ExportResult, ProgressCallback
+from .ffmpeg_audio import encode_audio, verify_audio, wav_duration_ms
+from .ffmpeg_export import export_recording, partial_output, verify_video
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +74,10 @@ STILL_JPEG_QUALITY = 90
 MIN_FREE_BYTES = 1024**3  # like recording: keep at least 1 GB free on the disk
 DELETE_ATTEMPTS = 5
 DELETE_DELAY_S = 0.2
+# The first slice of the progress bar, taken by the audio tracks when there are any to
+# convert (encoding audio is quick next to rendering a screen).
+AUDIO_PROGRESS_SHARE = 0.02
+DELETING_PROGRESS = 0.99  # where the bar stands while audio/ and frames/ are deleted
 
 # progress(fraction 0..1 of the whole archive, text)
 ArchiveProgress = Callable[[float, str], None]
@@ -61,6 +85,12 @@ Exporter = Callable[..., ExportResult]
 # verifier(mp4, duration_ms, config, cancel): raises ExportError unless the video stream
 # of the MP4 covers duration_ms (see video_story.export.ffmpeg_export.verify_video)
 Verifier = Callable[[Path, int, Config, CancelCheck | None], object]
+# audio_encoder(wav, output, config, progress, cancel): writes the AAC copy of one audio
+# track to output (see video_story.export.ffmpeg_audio.encode_audio)
+AudioEncoder = Callable[[Path, Path, Config, ProgressCallback | None, CancelCheck | None], object]
+# audio_verifier(m4a, duration_ms, config, cancel): raises ExportError unless the audio
+# stream of the file is duration_ms long (see video_story.export.ffmpeg_audio.verify_audio)
+AudioVerifier = Callable[[Path, int, Config, CancelCheck | None], object]
 
 
 class ArchiveError(RuntimeError):
@@ -79,6 +109,31 @@ def screen_outputs(paths: SessionPaths, screen_id: str) -> tuple[Path, Path, Pat
         folder / f"{screen_id}.jpg",
         folder / f"{screen_id}.srt",
     )
+
+
+def audio_output(paths: SessionPaths, track: str) -> Path:
+    """The AAC copy of an audio track inside ``archive/``: ``audio.m4a`` for
+    ``microphone``, ``computer.m4a`` for ``computer``."""
+    base = paths.final_dir
+    return archived_audio_path(paths, track_path(paths, base, track), base)
+
+
+def _is_empty_track(wav: Path) -> bool:
+    """A readable WAV without a single sample (the device never delivered one): there
+    is nothing to keep, and FFmpeg would write a file without an audio stream."""
+    info = wav_info(wav)
+    return info is not None and info.frames == 0
+
+
+def unarchived_tracks(paths: SessionPaths, state: ArchiveState) -> dict[str, Path]:
+    """The audio tracks on disk (name -> WAV) that hold sound and have no verified
+    ``.m4a`` in ``archive/``: ``audio/`` must not be deleted while there is one."""
+    return {
+        track: wav
+        for track, wav in existing_tracks(paths, paths.final_dir).items()
+        if (track not in state.audio or not audio_output(paths, track).is_file())
+        and not _is_empty_track(wav)
+    }
 
 
 def _screens_to_archive(paths: SessionPaths, index: FrameIndex) -> list[str]:
@@ -176,6 +231,103 @@ def _duration_ms(paths: SessionPaths, index: FrameIndex) -> int:
     return duration
 
 
+def _fail(paths: SessionPaths, state: ArchiveState, code: str, message: str) -> ArchiveError:
+    """Record why the archiving stops in ``archive.json``; returns the error to raise."""
+    state.error = message
+    write_archive_state(paths, state, paths.final_dir)
+    return ArchiveError(code, message)
+
+
+def _copy_selection(paths: SessionPaths, state: ArchiveState) -> None:
+    """``audio/tracks.json`` -> ``archive/tracks.json``, when the recording has one."""
+    base = paths.final_dir
+    source = paths.audio_tracks_path(base)
+    if not source.is_file():
+        return
+    target = archived_tracks_path(paths, base)
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        shutil.copyfile(source, tmp)
+        replace_with_retry(tmp, target)
+    except OSError as exc:
+        _remove(tmp)
+        raise _fail(
+            paths, state, "ARCHIVE_FAILED", f"cannot copy {source.name} to the archive: {exc}"
+        ) from exc
+
+
+def _archive_audio(
+    paths: SessionPaths,
+    config: Config,
+    state: ArchiveState,
+    pending: dict[str, Path],
+    report: ArchiveProgress,
+    cancel: CancelCheck | None,
+    encode: AudioEncoder,
+    verify: AudioVerifier,
+) -> None:
+    """Encode the audio tracks ``pending`` (name -> WAV) to ``archive/<name>.m4a``.
+
+    A track is recorded in ``state.audio`` once its ``.m4a`` was written under a
+    partial name, read back by ``verify`` and found as long as the WAV; only then does
+    the file get its name. Raises :class:`ArchiveError` at the first track that fails.
+    """
+    base = paths.final_dir
+    if existing_tracks(paths, base):
+        _copy_selection(paths, state)
+    if not pending:
+        return
+    free = _free_bytes(paths)
+    if free is not None and free < MIN_FREE_BYTES:
+        raise _fail(
+            paths, state, "LOW_DISK", "less than 1 GB free on the disk of the recording folder"
+        )
+    for number, (track, wav) in enumerate(pending.items()):
+        if cancel is not None and cancel():
+            raise ArchiveError("CANCELLED", "archiving was stopped")
+        target = audio_output(paths, track)
+        partial = partial_output(target)
+        for stale in (target, partial):
+            _remove(stale)
+        if state.audio.pop(track, None) is not None:  # listed, but its file is gone
+            write_archive_state(paths, state, base)
+        done_before = number / len(pending)
+
+        def on_encode(fraction: float, _text: str, start: float = done_before) -> None:
+            report((start + fraction / len(pending)) * AUDIO_PROGRESS_SHARE, "archiving audio")
+
+        report(done_before * AUDIO_PROGRESS_SHARE, "archiving audio")
+        try:
+            try:
+                expected_ms = wav_duration_ms(wav)
+                encode(wav, partial, config, on_encode, cancel)
+            except ExportError as exc:
+                raise _fail(paths, state, exc.code, str(exc)) from exc
+            if not partial.is_file() or partial.stat().st_size == 0:
+                raise _fail(paths, state, "ARCHIVE_FAILED", f"{target.name} was not written")
+            try:
+                verify(partial, expected_ms, config, cancel)
+            except ExportError as exc:
+                message = (
+                    str(exc)
+                    if exc.code == "CANCELLED"
+                    else f"{target.name} is not a complete copy of {wav.name}, "
+                    f"nothing was deleted: {exc}"
+                )
+                raise _fail(paths, state, exc.code, message) from exc
+            try:
+                replace_with_retry(partial, target)
+            except OSError as exc:
+                raise _fail(
+                    paths, state, "ARCHIVE_FAILED", f"cannot write {target.name}: {exc}"
+                ) from exc
+        finally:
+            _remove(partial)
+        state.audio[track] = target.name
+        write_archive_state(paths, state, base)
+        log.info("archive %s: %s (%d ms) done", paths.session_id, target.name, expected_ms)
+
+
 def archive_recording(
     paths: SessionPaths,
     config: Config,
@@ -184,19 +336,28 @@ def archive_recording(
     cancel: CancelCheck | None = None,
     exporter: Exporter = export_recording,
     verifier: Verifier | None = None,
+    audio_encoder: AudioEncoder | None = None,
+    audio_verifier: AudioVerifier | None = None,
 ) -> ArchiveState:
     """Archive the saved recording of ``paths`` (resuming a run that stopped).
 
     Raises :class:`ArchiveError` (``NOT_TRANSCRIBED``, ``NO_MANIFEST``, ``CANCELLED``,
-    an export code ...) without losing what was done: ``archive.json`` keeps the
-    screens already archived and the next call continues with the others.
+    an export code ...) without losing what was done: ``archive.json`` keeps the audio
+    tracks and the screens already archived and the next call continues with the others.
 
     No frame of a screen is deleted before ``verifier`` accepted the screen's MP4
     (:func:`video_story.export.ffmpeg_export.verify_video` unless given): the exporter
     checks its output too, this second look at the final file is what the deletion
     relies on, whatever exporter was used.
+
+    Every audio track is encoded by ``audio_encoder`` and accepted by ``audio_verifier``
+    (:func:`video_story.export.ffmpeg_audio.encode_audio` and ``verify_audio`` unless
+    given) before the first screen is rendered; ``audio/`` is deleted at the end only
+    when no track in it lacks its ``.m4a``.
     """
     verify = verifier if verifier is not None else verify_video
+    encode_track = audio_encoder if audio_encoder is not None else encode_audio
+    verify_track = audio_verifier if audio_verifier is not None else verify_audio
     base = paths.final_dir
     if not paths.manifest_path(base).is_file():
         raise ArchiveError("NO_MANIFEST", f"no manifest.json in {base}")
@@ -228,6 +389,13 @@ def archive_recording(
     total = max(1, len(state.screens))
     paths.archive_dir(base).mkdir(parents=True, exist_ok=True)
 
+    # The audio first: every track, whatever is switched on in the editor (the MP4s
+    # below hold only the tracks that are on, and audio/ is deleted at the end).
+    pending = unarchived_tracks(paths, state)
+    _archive_audio(paths, config, state, pending, report, cancel, encode_track, verify_track)
+    # The screens share the progress between the audio (if any) and the final deleting.
+    first = AUDIO_PROGRESS_SHARE if pending else 0.0
+
     for number, screen_id in enumerate(state.screens):
         if screen_id in state.screens_done:
             continue
@@ -248,9 +416,10 @@ def archive_recording(
             def on_export(
                 fraction: float, _text: str, start: float = done_before, sid: str = screen_id
             ) -> None:
-                report(start + fraction / total * 0.98, f"archiving {sid}")
+                screens = start + fraction / total * 0.98
+                report(first + (DELETING_PROGRESS - first) * screens, f"archiving {sid}")
 
-            report(done_before, f"archiving {screen_id}")
+            report(first + (DELETING_PROGRESS - first) * done_before, f"archiving {screen_id}")
             try:
                 result = exporter(
                     ExportRequest(
@@ -301,7 +470,18 @@ def archive_recording(
         write_archive_state(paths, state, base)
         log.info("archive %s: %s done", paths.session_id, screen_id)
 
-    report(0.99, "deleting frames and audio")
+    # audio/ goes only when every track in it has its verified .m4a. They were all
+    # converted above; this second look is what the deletion relies on.
+    unarchived = unarchived_tracks(paths, state)
+    if unarchived:
+        names = ", ".join(wav.name for wav in unarchived.values())
+        raise _fail(
+            paths,
+            state,
+            "ARCHIVE_FAILED",
+            f"no archived copy of {names} in {paths.archive_dir(base)}; audio/ was not deleted",
+        )
+    report(DELETING_PROGRESS, "deleting frames and audio")
     state.leftovers.extend(remove_tree(paths.audio_dir(base)))
     state.leftovers.extend(remove_tree(paths.frames_dir(base)))
     state.leftovers = sorted(set(state.leftovers))
@@ -327,7 +507,13 @@ def cleanup_leftovers(paths: SessionPaths) -> list[str]:
     if state is None or not state.archived or not state.leftovers:
         return []
     left: list[str] = []
-    left.extend(remove_tree(paths.audio_dir(base)))
+    # A track without its .m4a (an archive of an older version that could not delete
+    # the WAV then) is the only copy of that track: it stays.
+    unarchived = unarchived_tracks(paths, state)
+    if unarchived:
+        left.extend(str(wav) for wav in unarchived.values())
+    else:
+        left.extend(remove_tree(paths.audio_dir(base)))
     left.extend(remove_tree(paths.frames_dir(base)))
     state.leftovers = sorted({p for p in left if Path(p).exists()})
     try:
@@ -346,10 +532,13 @@ def _free_bytes(paths: SessionPaths) -> int | None:
 
 
 __all__ = [
+    "AUDIO_PROGRESS_SHARE",
     "MIN_FREE_BYTES",
     "ArchiveError",
     "archive_recording",
+    "audio_output",
     "cleanup_leftovers",
     "remove_tree",
     "screen_outputs",
+    "unarchived_tracks",
 ]

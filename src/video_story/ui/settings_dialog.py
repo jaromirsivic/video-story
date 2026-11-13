@@ -186,9 +186,9 @@ class SettingsDialog(QDialog):
         self.archive_after_spin.setSuffix(" days")
         self.archive_after_spin.setValue(config.archive_after_days)
         self.archive_after_spin.setToolTip(
-            "Recordings older than this are archived (one MP4 video per screen; the frames "
-            "and the audio are deleted) when the Video Story Editor starts. Nothing is "
-            "deleted automatically."
+            "Recordings older than this are archived (one MP4 video per screen and one AAC "
+            "file per audio track; the frames and the WAV audio are deleted) when the "
+            "Video Story Editor starts. Nothing is deleted automatically."
         )
         form.addRow("Archive After", self.archive_after_spin)
 

@@ -1,4 +1,5 @@
-"""Archiving a recording: one MP4 per screen, stills, deleting frames and audio, resume."""
+"""Archiving a recording: every audio track as AAC, one MP4 per screen, stills, deleting
+frames and audio, resume."""
 
 from __future__ import annotations
 
@@ -8,7 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json  # noqa: E402
 import pathlib  # noqa: E402
+import shutil  # noqa: E402
 import sys  # noqa: E402
+import wave  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
@@ -16,10 +19,14 @@ from PIL import Image  # noqa: E402
 from test_editor import NEWEST, make_recording  # noqa: E402
 
 from video_story.core.archive_state import (  # noqa: E402
+    ArchiveState,
     ArchiveStatus,
+    archive_state_path,
     read_archive_state,
     request_archive,
+    write_archive_state,
 )
+from video_story.core.audio_mix import TrackSelection, write_selection  # noqa: E402
 from video_story.core.config import Config  # noqa: E402
 from video_story.core.session import SessionPaths  # noqa: E402
 from video_story.core.transcript import Segment, Transcript, write_transcript  # noqa: E402
@@ -27,8 +34,10 @@ from video_story.editor.recording import LoadedRecording  # noqa: E402
 from video_story.export import ExportError, ExportResult, ffmpeg_export  # noqa: E402
 from video_story.export import archive as archive_mod  # noqa: E402
 from video_story.export.archive import (  # noqa: E402
+    AUDIO_PROGRESS_SHARE,
     ArchiveError,
     archive_recording,
+    audio_output,
     cleanup_leftovers,
     screen_outputs,
 )
@@ -72,6 +81,32 @@ class FakeVerifier:
             raise ExportError("OUTPUT_TRUNCATED", "the video is cut short: simulated")
 
 
+class FakeAudio:
+    """Stands in for the FFmpeg encode of an audio track (``encode``) and for the check
+    of the written file (``verify``); ``fail_on`` makes the encode of that WAV fail
+    once, ``reject`` the check of the track whose file name starts with it."""
+
+    def __init__(self, fail_on: str | None = None, reject: str | None = None) -> None:
+        self.encoded: list[str] = []
+        self.checked: list[tuple[str, int]] = []
+        self.fail_on = fail_on
+        self.reject = reject
+
+    def encode(self, source, output, config, progress=None, cancel=None):
+        self.encoded.append(source.name)
+        if source.name == self.fail_on:
+            self.fail_on = None
+            raise ExportError("FFMPEG_FAILED", "simulated audio failure")
+        output.write_bytes(b"aac of " + source.name.encode())
+        if progress is not None:
+            progress(1.0, "done")
+
+    def verify(self, audio, duration_ms, config, cancel=None):
+        self.checked.append((audio.name, duration_ms))
+        if self.reject is not None and audio.name.startswith(self.reject):
+            raise ExportError("OUTPUT_TRUNCATED", "the audio is cut short: simulated")
+
+
 @pytest.fixture(autouse=True)
 def verified(monkeypatch) -> FakeVerifier:
     """The stand-in MP4s of :class:`FakeExporter` are no videos: the check that
@@ -81,9 +116,34 @@ def verified(monkeypatch) -> FakeVerifier:
     return verifier
 
 
+@pytest.fixture(autouse=True)
+def audio(monkeypatch) -> FakeAudio:
+    """No FFmpeg for the audio tracks either: the encoder and the check that
+    ``archive_recording`` uses by default are replaced (and record their calls)."""
+    fake = FakeAudio()
+    monkeypatch.setattr(archive_mod, "encode_audio", fake.encode)
+    monkeypatch.setattr(archive_mod, "verify_audio", fake.verify)
+    return fake
+
+
 @pytest.fixture
 def recording(tmp_path: Path) -> SessionPaths:
     return make_recording(tmp_path, NEWEST)
+
+
+def _add_computer_track(paths: SessionPaths, ms: int = 1000, rate: int = 48000) -> Path:
+    """A second audio track (``audio/computer.wav``) of ``ms`` milliseconds."""
+    path = paths.computer_audio_path(paths.final_dir)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(bytes(2 * rate * ms // 1000))
+    return path
+
+
+def _archive_names(paths: SessionPaths) -> list[str]:
+    return sorted(p.name for p in paths.archive_dir(paths.final_dir).iterdir())
 
 
 def _images(paths: SessionPaths, screen_id: str) -> list[Path]:
@@ -234,6 +294,269 @@ def test_archive_checks_with_ffmpeg_by_default(recording: SessionPaths, monkeypa
     assert read_archive_state(recording).screens_done == []
     assert len(_images(recording, "screen1")) == 5
     assert recording.audio_path(recording.final_dir).is_file()
+
+
+# Audio tracks -----------------------------------------------------------------------
+
+
+def test_every_audio_track_is_archived_whatever_is_switched_on(
+    recording: SessionPaths, audio: FakeAudio
+):
+    """The MP4 holds only the tracks switched on in the editor; ``audio/`` is deleted.
+    So each track goes to ``archive/`` on its own first, the muted one included."""
+    final = recording.final_dir
+    _add_computer_track(recording, ms=1000)
+    write_selection(recording, final, TrackSelection(microphone=True, computer=False))
+    seen_by_exporter: list[list[str]] = []
+    exporter = FakeExporter()
+
+    def export(request, config, progress=None, cancel=None):
+        seen_by_exporter.append(_archive_names(recording))
+        return exporter(request, config, progress, cancel)
+
+    reported: list[tuple[float, str]] = []
+    state = archive_recording(
+        recording, Config(), progress=lambda f, t: reported.append((f, t)), exporter=export
+    )
+
+    assert audio.encoded == ["audio.wav", "computer.wav"]
+    # Each file was checked under its partial name against the length of its WAV.
+    assert audio.checked == [("audio.part.m4a", 2500), ("computer.part.m4a", 1000)]
+    assert state.archived and state.audio == {"microphone": "audio.m4a", "computer": "computer.m4a"}
+    assert audio_output(recording, "microphone").read_bytes() == b"aac of audio.wav"
+    assert audio_output(recording, "computer").read_bytes() == b"aac of computer.wav"
+    selection = json.loads((recording.archive_dir(final) / "tracks.json").read_text("utf-8"))
+    assert selection == {"microphone": True, "computer": False}
+    # The audio was there (verified, no partial file) before the first screen was rendered.
+    assert seen_by_exporter[0] == ["archive.json", "audio.m4a", "computer.m4a", "tracks.json"]
+    assert not recording.audio_dir(final).exists()
+    assert not [name for name in _archive_names(recording) if ".part" in name or ".tmp" in name]
+    # The first slice of the progress belongs to the audio.
+    fractions = [fraction for fraction, _text in reported]
+    assert fractions == sorted(fractions) and fractions[-1] == 1.0
+    audio_part = [fraction for fraction, text in reported if text == "archiving audio"]
+    assert audio_part and max(audio_part) <= AUDIO_PROGRESS_SHARE
+    assert reported[len(audio_part)] == (AUDIO_PROGRESS_SHARE, "archiving screen1")
+    # An agent finds the tracks.
+    info = describe_recording(recording)["archive"]
+    assert info["audio"] == {
+        "microphone": str(audio_output(recording, "microphone")),
+        "computer": str(audio_output(recording, "computer")),
+    }
+    assert info["tracks_file"] == str(recording.archive_dir(final) / "tracks.json")
+
+
+def test_both_tracks_switched_off_are_archived_too(recording: SessionPaths, audio: FakeAudio):
+    _add_computer_track(recording)
+    write_selection(recording, recording.final_dir, TrackSelection(False, False))
+    state = archive_recording(recording, Config(), exporter=FakeExporter())
+    assert state.archived and sorted(state.audio) == ["computer", "microphone"]
+    assert audio_output(recording, "microphone").is_file()
+    assert audio_output(recording, "computer").is_file()
+
+
+def test_audio_that_fails_the_check_keeps_everything(recording: SessionPaths, audio: FakeAudio):
+    """An ``.m4a`` shorter than its WAV: no screen is rendered, nothing is deleted, the
+    file does not get its name; the track that was fine is not converted again."""
+    final = recording.final_dir
+    computer = _add_computer_track(recording)
+    exporter = FakeExporter()
+    rejecting = FakeAudio(reject="computer")
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(
+            recording,
+            Config(),
+            exporter=exporter,
+            audio_encoder=rejecting.encode,
+            audio_verifier=rejecting.verify,
+        )
+    assert error.value.code == "OUTPUT_TRUNCATED"
+    assert "computer.m4a is not a complete copy of computer.wav" in str(error.value)
+    assert "nothing was deleted" in str(error.value)
+    assert exporter.calls == []
+    state = read_archive_state(recording)
+    assert state is not None and state.status is ArchiveStatus.ARCHIVING
+    assert state.audio == {"microphone": "audio.m4a"} and state.screens_done == []
+    assert "cut short" in (state.error or "")
+    assert recording.audio_path(final).is_file() and computer.is_file()
+    assert len(_images(recording, "screen1")) == 5 and len(_images(recording, "screen2")) == 5
+    assert _archive_names(recording) == ["archive.json", "audio.m4a"]  # no partial file
+
+    state = archive_recording(recording, Config(), exporter=exporter)
+    assert audio.encoded == ["computer.wav"]  # the microphone is not converted twice
+    assert state.archived and state.error is None
+    assert state.audio == {"microphone": "audio.m4a", "computer": "computer.m4a"}
+    assert not recording.audio_dir(final).exists()
+
+
+def test_audio_that_cannot_be_encoded_or_read_keeps_everything(
+    recording: SessionPaths, audio: FakeAudio
+):
+    final = recording.final_dir
+    audio.fail_on = "audio.wav"
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=FakeExporter())
+    assert error.value.code == "FFMPEG_FAILED"
+    state = read_archive_state(recording)
+    assert state.audio == {} and "simulated audio failure" in (state.error or "")
+    assert recording.audio_path(final).is_file() and len(_images(recording, "screen1")) == 5
+    assert _archive_names(recording) == ["archive.json"]
+
+    # A track whose WAV header cannot be read has no length to compare with.
+    recording.computer_audio_path(final).write_bytes(b"not a wav file")
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=FakeExporter())
+    assert error.value.code == "AUDIO_UNREADABLE" and "computer.wav" in str(error.value)
+    state = read_archive_state(recording)
+    assert state.audio == {"microphone": "audio.m4a"} and state.screens_done == []
+    assert recording.computer_audio_path(final).is_file()
+    assert len(_images(recording, "screen1")) == 5
+
+
+def test_resumed_archive_does_not_convert_the_audio_again(
+    recording: SessionPaths, audio: FakeAudio
+):
+    with pytest.raises(ArchiveError):
+        archive_recording(recording, Config(), exporter=FakeExporter(fail_on="screen2"))
+    assert audio.encoded == ["audio.wav"]
+    assert read_archive_state(recording).audio == {"microphone": "audio.m4a"}
+    assert recording.audio_path(recording.final_dir).is_file()  # screen2 still needs it
+    state = archive_recording(recording, Config(), exporter=FakeExporter())
+    assert state.archived and audio.encoded == ["audio.wav"]
+    assert audio_output(recording, "microphone").is_file()
+    assert not recording.audio_dir(recording.final_dir).exists()
+
+
+def test_archive_left_half_way_by_an_older_version_converts_the_audio(
+    recording: SessionPaths, audio: FakeAudio
+):
+    """``archive.json`` written before the tracks were archived has no ``audio``: such a
+    file loads, and the audio is converted before ``audio/`` goes."""
+    final = recording.final_dir
+    for image in _images(recording, "screen1"):
+        image.unlink()  # screen1 was done: its frames are gone
+    old = {
+        "status": "archiving",
+        "requested_at": "2026-11-01T10:00:00.000+01:00",
+        "reason": "age",
+        "screens": ["screen1", "screen2"],
+        "screens_done": ["screen1"],
+        "started_at": "2026-11-01T10:00:01.000+01:00",
+        "finished_at": None,
+        "leftovers": [],
+        "error": "simulated failure",
+    }
+    path = archive_state_path(recording, final)
+    path.parent.mkdir()
+    path.write_text(json.dumps(old), encoding="utf-8")
+    loaded = read_archive_state(recording)
+    assert loaded is not None and loaded.audio == {} and loaded.screens_done == ["screen1"]
+
+    exporter = FakeExporter()
+    state = archive_recording(recording, Config(), exporter=exporter)
+    assert audio.encoded == ["audio.wav"] and exporter.calls == ["screen2"]
+    assert state.archived and state.audio == {"microphone": "audio.m4a"}
+    assert audio_output(recording, "microphone").is_file()
+    assert not recording.audio_dir(final).exists()
+
+
+def test_recording_archived_by_an_older_version_stays_as_it_is(
+    recording: SessionPaths, audio: FakeAudio
+):
+    final = recording.final_dir
+    archive_recording(recording, Config(), exporter=FakeExporter())
+    audio_output(recording, "microphone").unlink()
+    path = archive_state_path(recording, final)
+    data = json.loads(path.read_text("utf-8"))
+    del data["audio"]  # as the older version wrote it
+    path.write_text(json.dumps(data), encoding="utf-8")
+    audio.encoded.clear()
+
+    exporter = FakeExporter()
+    state = archive_recording(recording, Config(), exporter=exporter)
+    assert state.archived and state.audio == {}
+    assert audio.encoded == [] and exporter.calls == []
+    info = describe_recording(recording)["archive"]
+    assert info["audio"] == {} and "tracks_file" not in info
+
+
+def test_recording_without_audio_archives_as_before(tmp_path: Path, audio: FakeAudio):
+    paths = make_recording(tmp_path, NEWEST)
+    final = paths.final_dir
+    paths.audio_path(final).unlink()
+    reported: list[float] = []
+    state = archive_recording(
+        paths, Config(), progress=lambda f, _t: reported.append(f), exporter=FakeExporter()
+    )
+    assert state.archived and state.audio == {}
+    assert audio.encoded == [] and audio.checked == []
+    assert reported[0] == 0.0  # no slice of the progress for audio that is not there
+    assert not [name for name in _archive_names(paths) if name.endswith((".m4a", "tracks.json"))]
+    info = describe_recording(paths)["archive"]
+    assert info["audio"] == {} and "tracks_file" not in info
+    assert not paths.audio_dir(final).exists()
+
+
+def test_track_without_a_single_sample_is_left_out(recording: SessionPaths, audio: FakeAudio):
+    """FFmpeg writes no audio stream for an empty WAV; there is nothing to keep, and
+    the recording must still archive (its MP4 gets silence, as before)."""
+    final = recording.final_dir
+    _add_computer_track(recording, ms=0)
+    state = archive_recording(recording, Config(), exporter=FakeExporter())
+    assert state.archived and state.audio == {"microphone": "audio.m4a"}
+    assert audio.encoded == ["audio.wav"]
+    assert not audio_output(recording, "computer").exists()
+    assert not recording.audio_dir(final).exists()
+
+
+def test_audio_folder_stays_while_a_track_has_no_archived_copy(
+    recording: SessionPaths, audio: FakeAudio
+):
+    """The deletion of ``audio/`` relies on the ``.m4a`` files being there at the end,
+    not on what happened earlier in the run."""
+    final = recording.final_dir
+    exporter = FakeExporter()
+
+    def export(request, config, progress=None, cancel=None):
+        audio_output(recording, "microphone").unlink(missing_ok=True)  # lost meanwhile
+        return exporter(request, config, progress, cancel)
+
+    with pytest.raises(ArchiveError) as error:
+        archive_recording(recording, Config(), exporter=export)
+    assert error.value.code == "ARCHIVE_FAILED" and "audio.wav" in str(error.value)
+    assert recording.audio_path(final).is_file()
+    state = read_archive_state(recording)
+    assert not state.archived and state.screens_done == ["screen1", "screen2"]
+
+    state = archive_recording(recording, Config(), exporter=exporter)  # converts it again
+    assert state.archived and audio.encoded == ["audio.wav", "audio.wav"]
+    assert exporter.calls == ["screen1", "screen2"]  # no screen is rendered again
+    assert audio_output(recording, "microphone").is_file()
+    assert not recording.audio_dir(final).exists()
+
+
+def test_cleanup_keeps_a_track_that_has_no_archived_copy(recording: SessionPaths):
+    """An archive of an older version that could not delete a WAV then: that WAV is the
+    only copy of the track, a later cleanup must not delete it."""
+    final = recording.final_dir
+    wav = recording.audio_path(final)
+    shutil.rmtree(recording.frames_dir(final))
+    old = ArchiveState(
+        status=ArchiveStatus.ARCHIVED,
+        screens=["screen1", "screen2"],
+        screens_done=["screen1", "screen2"],
+        leftovers=[str(wav)],
+    )
+    write_archive_state(recording, old, final)
+    assert cleanup_leftovers(recording) == [str(wav)]
+    assert wav.is_file() and read_archive_state(recording).leftovers == [str(wav)]
+
+
+def test_archive_state_round_trips_the_audio_tracks():
+    state = ArchiveState(audio={"microphone": "audio.m4a"})
+    assert ArchiveState.from_dict(state.to_dict()).audio == {"microphone": "audio.m4a"}
+    assert ArchiveState.from_dict({"status": "queued", "audio": None}).audio == {}
+    assert ArchiveState.from_dict({"status": "queued", "audio": ["audio.m4a"]}).audio == {}
 
 
 def test_archive_needs_a_complete_transcript(tmp_path: Path):

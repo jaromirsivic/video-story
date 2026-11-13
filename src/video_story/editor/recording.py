@@ -2,7 +2,8 @@
 
 An archived recording (see :mod:`video_story.export.archive`) has no frames and no
 audio any more: every screen shows its still ``archive/<screenId>.jpg`` for the whole
-length, there is no sound and no cursor; the transcript is still there.
+length, there is no sound and no cursor; the transcript is still there. (The archive
+keeps the audio tracks as ``archive/*.m4a``; the editor does not open them.)
 
 The audio of a recording is the mix of its tracks that are switched on (the microphone
 and the computer's sound, :mod:`video_story.core.audio_mix`); :class:`AudioFile`

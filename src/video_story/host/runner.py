@@ -267,27 +267,39 @@ def wait_for_session(paths: SessionPaths, timeout_s: float) -> dict[str, Any]:
 ARCHIVED_NOTE = (
     "This recording is archived: its frames and audio were replaced by one MP4 per screen "
     "in archive/ (<screenId>.mp4 with subtitles <screenId>.srt and a still <screenId>.jpg "
-    "from the middle). The transcript and the frame sidecars (frames_info/) are still "
+    "from the middle). The MP4 holds only the audio tracks that were switched on in the "
+    "editor; `audio` lists every track on its own (AAC), `tracks_file` says which were on "
+    "(missing: all). The transcript and the frame sidecars (frames_info/) are still "
     "there, so the timeline works; frame images are gone (image null)."
 )
 
 
 def archive_info(paths: SessionPaths, base: Path) -> dict[str, Any] | None:
-    """``{status, archive_dir, videos, stills, note}`` of an archived (or queued)
-    recording; ``None`` when it was never asked to be archived."""
-    from video_story.core.archive_state import read_archive_state
+    """``{status, archive_dir, videos, stills, audio, note}`` of an archived (or queued)
+    recording; ``None`` when it was never asked to be archived.
+
+    ``audio`` maps the audio tracks kept on their own (``microphone``, ``computer``) to
+    their ``.m4a``; it is empty for a recording without audio and for one archived
+    before the tracks were kept. ``tracks_file`` (``archive/tracks.json``, which tracks
+    were switched on) is there only when the file is."""
+    from video_story.core.archive_state import archived_tracks_path, read_archive_state
 
     state = read_archive_state(paths, base)
     if state is None:
         return None
     folder = paths.archive_dir(base)
-    return {
+    info: dict[str, Any] = {
         "status": str(state.status),
         "archive_dir": str(folder),
         "videos": {s: str(folder / f"{s}.mp4") for s in state.screens_done},
         "stills": {s: str(folder / f"{s}.jpg") for s in state.screens_done},
-        "note": ARCHIVED_NOTE if state.archived else "Archiving is queued or running.",
+        "audio": {track: str(folder / name) for track, name in state.audio.items()},
     }
+    tracks_file = archived_tracks_path(paths, base)
+    if tracks_file.is_file():
+        info["tracks_file"] = str(tracks_file)
+    info["note"] = ARCHIVED_NOTE if state.archived else "Archiving is queued or running."
+    return info
 
 
 # Frames -----------------------------------------------------------------------
