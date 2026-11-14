@@ -730,7 +730,9 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         max_chars: int = PAGE_DEFAULT_CHARS,
     ) -> dict[str, Any]:
         """The transcript of the whole recording: format "text" returns timestamped
-        lines, "json" returns segments with start_ms, end_ms and text. Paged: at most
+        lines ("[lower track]" marks a subtitle the user moved to the second track),
+        "json" returns segments with start_ms, end_ms, text and track (1 for the lower
+        track, absent for the upper one). Paged: at most
         max_chars characters from line (segment) first_line; transcript_lines is the
         total, next_line the first_line of the next call (null: complete)."""
         return tool_get_transcript(session_id, format, config_file, first_line, max_chars)

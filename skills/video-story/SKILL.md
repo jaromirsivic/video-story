@@ -176,6 +176,14 @@ One event per line, ordered by time in milliseconds since the recording started:
   end. The text keeps the spoken language; do not translate or clean it up silently,
   quote it when you need to confirm what was said. "Here", "this" and "that" usually
   mean the cursor position or a shape drawn around that time.
+- `SAY [lower track]` - the editor has two subtitle tracks; the user may move a
+  subtitle to the lower one, mostly to make room while rearranging subtitles (it is
+  usually empty, and then nothing in the timeline mentions tracks). Each subtitle stays
+  one line with its whole text. Where subtitles of the two tracks overlap in time, both
+  apply at that moment and each line names the other (`(at the same time as lower
+  track 1000-3000)` on the upper one, `(at the same time as 0-2000)` on the lower one):
+  read the upper one first. Subtitles that only touch are unrelated. `counts` then has
+  `speech_lower`.
 - `DRAW #id` is a finished shape: `tool` (`rectangle`, `ellipse`, `line`, `brush`,
   `arrow`), color, screen and geometry in pixels of that screen's image, origin top-left
   - `corners` (two opposite corners) of a rectangle or of an ellipse's bounding box,

@@ -35,8 +35,11 @@ from video_story.core.naming import FrameName
 from video_story.core.screens import Screen
 from video_story.core.session import SessionPaths, now_iso
 from video_story.core.transcript import (
+    LOWER_TRACK,
+    UPPER_TRACK,
     Segment,
     Transcript,
+    display_cues,
     drop_credit_hallucinations,
     merge_segments,
     normalize_segments,
@@ -47,6 +50,7 @@ from video_story.host.runner import FrameIndex, FrameRef
 
 from .mouse_activity import MouseActivity
 from .mouse_details import MouseDetails, load_mouse_details
+from .timeline import narration_edit
 
 log = logging.getLogger(__name__)
 
@@ -154,8 +158,7 @@ class LoadedRecording:
         last_frame_ms = max((t[-1] for t in self._times.values() if t), default=0)
         self.duration_ms = manifest.recorded_duration_ms or last_frame_ms
         self._cursor_cache: tuple[Path, CursorPosition | None] | None = None
-        self._segments = sorted(transcript.segments, key=lambda s: s.start_ms) if transcript else []
-        self._segment_starts = [s.start_ms for s in self._segments]
+        self._index_segments(transcript.segments if transcript else [])
 
     @classmethod
     def load(cls, paths: SessionPaths) -> LoadedRecording:
@@ -344,8 +347,20 @@ class LoadedRecording:
             self.paths.transcript_txt_path(base), self.paths.transcript_json_path(base), updated
         )
         self.transcript = updated
-        self._segments = sorted(updated.segments, key=lambda s: s.start_ms)
-        self._segment_starts = [s.start_ms for s in self._segments]
+        self._index_segments(updated.segments)
+
+    def _index_segments(self, segments: list[Segment]) -> None:
+        """Both narration tracks sorted by start, and the cues a viewer reads."""
+        self._segments = sorted(segments, key=lambda s: (s.start_ms, s.track, s.end_ms))
+        self._by_track = {
+            track: [s for s in self._segments if s.track == track]
+            for track in (UPPER_TRACK, LOWER_TRACK)
+        }
+        self._track_starts = {
+            track: [s.start_ms for s in lane] for track, lane in self._by_track.items()
+        }
+        self._cues = display_cues(self._segments)
+        self._cue_starts = [c.start_ms for c in self._cues]
 
     def add_segments(self, segments: list[Segment], transcribed_ms: int) -> list[Segment]:
         """Segments the background transcription produced: stored as an incomplete
@@ -401,40 +416,101 @@ class LoadedRecording:
 
     @property
     def segments(self) -> list[Segment]:
-        """The transcript segments sorted by start (the narration track's boxes)."""
+        """The transcript segments of both tracks sorted by start."""
         return list(self._segments)
 
-    def segments_between(self, start_ms: float, end_ms: float) -> list[Segment]:
-        """Segments that overlap ``[start_ms, end_ms]`` (the visible part of the timeline)."""
-        index = max(0, bisect.bisect_right(self._segment_starts, start_ms) - 1)
+    def track_segments(self, track: int) -> list[Segment]:
+        """The segments of one narration track sorted by start."""
+        return list(self._by_track.get(track, []))
+
+    @property
+    def has_lower_track(self) -> bool:
+        """True when the user moved a subtitle to the lower narration track."""
+        return bool(self._by_track.get(LOWER_TRACK))
+
+    @staticmethod
+    def _between(
+        segments: list[Segment], starts: list[int], start_ms: float, end_ms: float
+    ) -> list[Segment]:
+        # Segments of one track (or the cues) do not overlap, so the one before the
+        # first start inside the range is the only earlier one that can reach into it.
+        index = max(0, bisect.bisect_right(starts, start_ms) - 1)
         found: list[Segment] = []
-        for segment in self._segments[index:]:
+        for segment in segments[index:]:
             if segment.start_ms > end_ms:
                 break
             if segment.end_ms >= start_ms:
                 found.append(segment)
         return found
 
-    def segment_at(self, time_ms: int) -> Segment | None:
-        """The single segment containing ``time_ms`` (the one shown as the subtitle).
+    def segments_between(
+        self, start_ms: float, end_ms: float, track: int | None = None
+    ) -> list[Segment]:
+        """Segments that overlap ``[start_ms, end_ms]`` (the visible part of the
+        timeline), of one ``track`` or of both (``None``)."""
+        if track is not None:
+            lane = self._by_track.get(track, [])
+            return self._between(lane, self._track_starts.get(track, []), start_ms, end_ms)
+        return [s for s in self._segments if s.end_ms >= start_ms and s.start_ms <= end_ms]
+
+    @staticmethod
+    def _at(segments: list[Segment], starts: list[int], time_ms: int) -> Segment | None:
+        index = bisect.bisect_right(starts, time_ms) - 1
+        if index < 0:
+            return None
+        segment = segments[index]
+        last = index == len(segments) - 1
+        if time_ms < segment.end_ms or (last and time_ms == segment.end_ms):
+            return segment
+        return None
+
+    def segment_at(self, time_ms: int, track: int = UPPER_TRACK) -> Segment | None:
+        """The single segment of ``track`` containing ``time_ms``.
 
         Segments are half-open (``start <= t < end``) so a playhead sitting exactly on
         a touching boundary shows only the segment that starts there; the end is
         inclusive only for the last segment.
         """
-        index = bisect.bisect_right(self._segment_starts, time_ms) - 1
-        if index < 0:
-            return None
-        segment = self._segments[index]
-        last = index == len(self._segments) - 1
-        if time_ms < segment.end_ms or (last and time_ms == segment.end_ms):
-            return segment
-        return None
+        return self._at(self._by_track.get(track, []), self._track_starts.get(track, []), time_ms)
+
+    def segments_at(self, time_ms: int) -> dict[int, Segment]:
+        """The segment of each track containing ``time_ms`` (upper first; a track
+        without one is left out) - what Edit opens."""
+        found: dict[int, Segment] = {}
+        for track in (UPPER_TRACK, LOWER_TRACK):
+            segment = self.segment_at(time_ms, track)
+            if segment is not None:
+                found[track] = segment
+        return found
 
     def subtitle_at(self, time_ms: int) -> str:
-        """Text of the segment containing ``time_ms`` (see :meth:`segment_at`)."""
-        segment = self.segment_at(time_ms)
-        return segment.text.strip() if segment is not None else ""
+        """The subtitle shown at ``time_ms``: the upper segment, a space and the lower
+        one (:func:`display_cues`), or the one that is there; half-open as
+        :meth:`segment_at`."""
+        cue = self._at(self._cues, self._cue_starts, time_ms)
+        return cue.text.strip() if cue is not None else ""
+
+    def apply_segment_edit(
+        self, old: tuple[Segment, ...] | list[Segment], new: tuple[Segment, ...] | list[Segment]
+    ) -> None:
+        """Replace the segments ``old`` by ``new`` (a subtitle moved or resized on the
+        timeline, two at a shared edge, or the texts of Edit) and rewrite
+        ``transcript.json`` and ``transcript.txt``.
+
+        The rules of the tracks are checked again first (``ValueError``: subtitles of
+        one track would overlap, or ``old`` is not in the transcript). The files are
+        written first; the recording in memory changes only when that succeeded
+        (``OSError`` otherwise).
+        """
+        transcript = self.transcript
+        if transcript is None:
+            raise ValueError("the recording has no transcript")
+        segments = narration_edit.apply(transcript.segments, tuple(old), tuple(new))
+        problem = narration_edit.validate(segments)
+        if problem is not None:
+            raise ValueError(problem)
+        segments.sort(key=lambda s: (s.start_ms, s.track, s.end_ms))
+        self._store_transcript(replace(transcript, segments=segments))
 
     def replace_segment(self, old: Segment, new: Segment) -> None:
         """Replace ``old`` by ``new`` and rewrite ``transcript.json`` and ``transcript.txt``.
@@ -447,7 +523,7 @@ class LoadedRecording:
         if transcript is None or old not in transcript.segments:
             raise ValueError("the segment is not part of this recording's transcript")
         segments = [new if s == old else s for s in transcript.segments]
-        segments.sort(key=lambda s: (s.start_ms, s.end_ms))
+        segments.sort(key=lambda s: (s.start_ms, s.track, s.end_ms))
         self._store_transcript(replace(transcript, segments=segments))
 
 

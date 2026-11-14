@@ -35,7 +35,12 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
-from video_story.core.transcript import format_segment_line, read_transcript, transcript_status
+from video_story.core.transcript import (
+    format_segment_line,
+    ordered_segments,
+    read_transcript,
+    transcript_status,
+)
 from video_story.host import startup
 from video_story.host.agent_output import DEFAULT_INLINE_CHARS, fits_inline
 from video_story.host.errors import HostError
@@ -693,7 +698,7 @@ def describe_recording(
             transcript = None
         if transcript is not None:
             segments = transcript.segments_in_range(crop.start_ms, crop.end_ms)
-            lines = [format_segment_line(s) for s in segments]
+            lines = [format_segment_line(s) for s in ordered_segments(segments)]
             chars = sum(len(line) + 1 for line in lines)
             inline = fits_inline(lines, inline_chars) or not lines
             data["transcript_in_range_lines"] = len(lines)

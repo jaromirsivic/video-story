@@ -1,12 +1,26 @@
 """Custom-painted timeline: ruler, one video track per screen, audio track, narration
-track, crop handles.
+tracks, crop handles.
 
-The narration track under the audio track (half its height, a padlock in its header:
-it cannot be edited or moved) shows a box wherever a subtitle has words and nothing in
-the pauses. Zoomed in to :data:`NARRATION_TEXT_MIN_ZOOM` px/s or more, each box shows
-its words, cut with an ellipsis; hovering a box shows the whole text. Boxes that
-contain the phrase of the recordings search (:mod:`video_story.editor.search`) are
-yellow.
+The narration under the audio track has two subtitle tracks (each half as tall as the
+audio track): the upper one holds what the transcription produced, the lower one the
+subtitles the user moved there (mostly to make room while rearranging them). Each
+shows a box wherever a subtitle has words and nothing in the pauses. Zoomed in to
+:data:`NARRATION_TEXT_MIN_ZOOM` px/s or more, each box shows its words, cut with an
+ellipsis; hovering a box shows the whole text. Boxes that contain the phrase of the
+recordings search (:mod:`video_story.editor.search`) are yellow. Boxes have slightly
+rounded corners and a 2 px edge.
+
+A padlock under the "narration" title locks the tracks (the default for every
+recording). It can be opened only once the transcript is complete
+(:meth:`TimelineView.set_narration_editable`). Unlocked, the subtitles are edited with
+the mouse (:mod:`.narration_edit`: the zones, shown only by the cursor, move an edge,
+move the whole subtitle - also to the other track - or the shared edge of two
+touching subtitles). While dragging, a green rectangle (80 % opaque, rounded corners)
+shows the result over the boxes; it turns red where it would overlap another subtitle
+of the track and releasing then changes nothing.
+:meth:`TimelineView.cancel_segment_drag` (Escape in the window) drops the drag;
+releasing a valid one emits :attr:`TimelineView.segment_edit_requested` and the window
+stores it.
 
 Below the narration track there is a narrow lane for the background transcription: while
 the recording is still being transcribed, a green arrow under the tracks marks how
@@ -62,17 +76,39 @@ from video_story.core.timeline import format_timestamp
 from video_story.editor.recording import LoadedRecording
 
 from ..search import normalize_query, text_matches
+from . import narration_edit
 from .model import TimelineModel
+from .narration_edit import Zone
 from .thumbnails import ThumbnailCache
 from .waveform import BLOCK_MS, WaveformLoader, column_peaks
 
 RULER_H = 26
-HEADER_W = 92  # "narration" and its padlock; the fit toggle and three audio icons
+HEADER_W = 92  # "narration"; the fit toggle and three audio icons
 TRACK_H = 60
 AUDIO_H = TRACK_H  # the audio track is as tall as each screen track
-NARRATION_H = AUDIO_H // 2  # the narration track is half as tall as the audio track
+NARRATION_LANE_H = AUDIO_H // 2  # each narration track is half as tall as the audio track
+NARRATION_TRACKS = 2  # upper (the transcription) and lower (subtitles moved there)
+NARRATION_H = NARRATION_TRACKS * NARRATION_LANE_H + 1  # both tracks and the line between
 NARRATION_TITLE = "narration"
-NARRATION_TOOLTIP = "Spoken text (locked): one box per subtitle"
+NARRATION_TOOLTIP = (
+    "Spoken text: one box per subtitle. Upper track: the transcription; lower track: "
+    "subtitles moved out of the way"
+)
+LOCK_TOOLTIP_LOCKED = "Locked: click to edit the subtitles"
+LOCK_TOOLTIP_UNLOCKED = "Unlocked: drag the subtitles; click to lock"
+LOCK_TOOLTIP_UNAVAILABLE = "Unlocks once the transcription is complete"
+BOX_RADIUS = 3.0  # rounded corners of the narration boxes and of the drag preview
+BOX_EDGE = 2  # px: the edge of a narration box, the same on every side
+COLOR_PREVIEW = QColor(0, 192, 0, 204)  # the drag preview: green, 80 % opaque
+COLOR_PREVIEW_EDGE = QColor(0, 128, 0, 230)
+COLOR_PREVIEW_BAD = QColor(224, 40, 40, 204)  # the preview where the change is not allowed
+COLOR_PREVIEW_BAD_EDGE = QColor(150, 20, 20, 230)
+ZONE_CURSORS = {
+    Zone.MOVE: Qt.CursorShape.SizeAllCursor,
+    Zone.RESIZE_START: Qt.CursorShape.SizeHorCursor,
+    Zone.RESIZE_END: Qt.CursorShape.SizeHorCursor,
+    Zone.ROLL: Qt.CursorShape.SplitHCursor,
+}
 NARRATION_TEXT_MIN_ZOOM = 40.0  # px per second from which the boxes show their words
 NARRATION_TEXT_MIN_W = 24  # px: narrower boxes stay plain even zoomed in
 LOCK_W = 10  # the padlock in the narration header
@@ -225,6 +261,9 @@ class TimelineView(QWidget):
     view_changed = Signal()
     audio_track_toggled = Signal(str)  # "microphone" or "computer" was clicked
     transcribe_requested = Signal()  # the pen icon was clicked
+    narration_lock_toggled = Signal(bool)  # the padlock was clicked: True = unlocked
+    # A subtitle drag ended with a valid change: (old segments, new segments), tuples.
+    segment_edit_requested = Signal(object, object)
 
     def __init__(self, model: TimelineModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -249,6 +288,11 @@ class TimelineView(QWidget):
         self._search = ""  # folded search phrase: matching narration boxes are yellow
         self._hover_segment: tuple[int, int] | None = None  # narration box under the mouse
         self._hover_icon: str | None = None  # audio header icon under the mouse
+        self._narration_editable = False  # the padlock can be opened (transcript complete)
+        self._narration_unlocked = False  # the subtitles can be dragged
+        self._segment_drag: narration_edit.Drag | None = None
+        self._segment_press_x = 0.0
+        self._segment_proposal: narration_edit.Proposal | None = None
         self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -264,6 +308,9 @@ class TimelineView(QWidget):
         self._hover_keypoint = None
         self._hover_pause = None
         self._hover_segment = None
+        self._narration_unlocked = False  # every recording opens locked
+        self._narration_editable = False
+        self._end_segment_drag()
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
@@ -300,6 +347,69 @@ class TimelineView(QWidget):
     @property
     def transcription(self) -> tuple[str, int] | None:
         return self._transcription
+
+    # Narration lock -----------------------------------------------------------
+
+    @property
+    def narration_editable(self) -> bool:
+        """The padlock can be opened (the transcript is complete, not archived)."""
+        return self._narration_editable
+
+    @property
+    def narration_unlocked(self) -> bool:
+        return self._narration_unlocked
+
+    def set_narration_editable(self, editable: bool) -> None:
+        """Whether the padlock can be opened; ``False`` also locks the tracks."""
+        editable = bool(editable)
+        if editable == self._narration_editable:
+            return
+        self._narration_editable = editable
+        if not editable:
+            self.set_narration_unlocked(False)
+        self.update()
+
+    def set_narration_unlocked(self, unlocked: bool) -> bool:
+        """Open or close the padlock; returns True when the state changed. It opens
+        only while :attr:`narration_editable`."""
+        unlocked = bool(unlocked) and self._narration_editable
+        if unlocked == self._narration_unlocked:
+            return False
+        self._narration_unlocked = unlocked
+        if not unlocked:
+            self._end_segment_drag()
+        self.unsetCursor()
+        self.update()
+        self.narration_lock_toggled.emit(unlocked)
+        return True
+
+    def toggle_narration_lock(self) -> bool:
+        return self.set_narration_unlocked(not self._narration_unlocked)
+
+    # Subtitle drag ------------------------------------------------------------
+
+    @property
+    def segment_dragging(self) -> bool:
+        return self._segment_drag is not None
+
+    @property
+    def segment_proposal(self) -> narration_edit.Proposal | None:
+        """What the running subtitle drag would change (``None`` before the mouse moved)."""
+        return self._segment_proposal
+
+    def cancel_segment_drag(self) -> bool:
+        """Escape: drop the running subtitle drag (nothing changes); True when one ran."""
+        if self._segment_drag is None:
+            return False
+        self._end_segment_drag()
+        self.update()
+        return True
+
+    def _end_segment_drag(self) -> None:
+        self._segment_drag = None
+        self._segment_proposal = None
+        if self._drag == "segment":
+            self._drag = None
 
     def set_search(self, query: str | None) -> None:
         """The search phrase: narration boxes whose text contains it are drawn yellow
@@ -472,9 +582,21 @@ class TimelineView(QWidget):
         return QRect(0, y, self.width(), AUDIO_H)
 
     def narration_rect(self) -> QRect:
-        """The locked narration track under the audio track (half its height)."""
+        """Both narration tracks under the audio track."""
         audio = self.audio_rect()
         return QRect(0, audio.bottom() + 1 + GAP, self.width(), NARRATION_H)
+
+    def narration_lane_rect(self, track: int) -> QRect:
+        """One narration track: 0 the upper, 1 the lower (a 1 px line between them)."""
+        rect = self.narration_rect()
+        top = rect.y() + track * (NARRATION_LANE_H + 1)
+        return QRect(0, top, self.width(), NARRATION_LANE_H)
+
+    def narration_lane_at(self, pos: QPoint) -> int | None:
+        """The narration track under ``pos`` (``None`` outside the narration)."""
+        if not self.narration_rect().contains(pos):
+            return None
+        return 1 if pos.y() >= self.narration_lane_rect(1).y() - 1 else 0
 
     def tracks_bottom(self) -> int:
         """Last pixel row of the tracks (the narration track): playhead, keypoints and
@@ -487,38 +609,69 @@ class TimelineView(QWidget):
         return QRect(0, narration.bottom() + 1 + GAP, self.width(), PROGRESS_H)
 
     def lock_rect(self) -> QRect:
-        """The padlock in the narration header (right edge, vertically centred)."""
-        lane = self.narration_rect()
-        return QRect(HEADER_W - 6 - LOCK_W, lane.y() + (lane.height() - LOCK_H) // 2, LOCK_W,
-                     LOCK_H)  # fmt: skip
+        """The padlock in the narration header: left, in the row of the lower track
+        (under the "narration" title)."""
+        lane = self.narration_lane_rect(1)
+        return QRect(6, lane.y() + (lane.height() - LOCK_H) // 2, LOCK_W, LOCK_H)
 
-    def narration_boxes(self) -> list[tuple[QRectF, object]]:
-        """The visible narration boxes: ``(rect, segment)`` for every subtitle with text."""
+    def _on_lock(self, pos: QPoint) -> bool:
+        return self.lock_rect().adjusted(-4, -4, 4, 4).contains(pos)
+
+    def segment_box(self, segment) -> QRectF:
+        """Where ``segment`` is drawn on its track: whole pixels, a 1 px gap after it so
+        that touching boxes stay apart."""
+        lane = self.narration_lane_rect(segment.track)
+        left = round(self._x(segment.start_ms))
+        right = round(self._x(segment.end_ms))
+        width = max(2, right - left - 1)
+        return QRectF(left, lane.y() + 3, width, lane.height() - 6)
+
+    def narration_boxes(self, track: int | None = None) -> list[tuple[QRectF, object]]:
+        """The visible narration boxes: ``(rect, segment)`` for every subtitle with text,
+        of one ``track`` or of both (upper first)."""
         if self.recording is None:
             return []
-        lane = self.narration_rect()
-        top = lane.y() + 3
-        height = lane.height() - 6
         start = self.model.scroll_ms
         end = self.model.x_to_time(self._body_width())
+        tracks = range(NARRATION_TRACKS) if track is None else (track,)
         boxes: list[tuple[QRectF, object]] = []
-        for segment in self.recording.segments_between(start, end):
-            if not segment.text.strip():
-                continue  # no words, no box
-            left = self._x(segment.start_ms)
-            right = self._x(segment.end_ms)
-            width = max(2.0, right - left - 1)  # a 1 px gap separates touching boxes
-            boxes.append((QRectF(left, top, width, height), segment))
+        for lane in tracks:
+            for segment in self.recording.segments_between(start, end, lane):
+                if not segment.text.strip():
+                    continue  # no words, no box
+                boxes.append((self.segment_box(segment), segment))
         return boxes
 
     def narration_segment_at(self, pos: QPoint):
         """The narration segment whose box is under ``pos`` (``None`` elsewhere)."""
-        if pos.x() < HEADER_W or not self.narration_rect().contains(pos):
+        lane = self.narration_lane_at(pos)
+        if pos.x() < HEADER_W or lane is None:
             return None
-        for rect, segment in self.narration_boxes():
+        for rect, segment in self.narration_boxes(lane):
             if rect.left() - 1 <= pos.x() <= rect.right() + 1:
                 return segment
         return None
+
+    def _px_per_ms(self) -> float:
+        return self.model.zoom / 1000.0
+
+    def _exact_time(self, x: float) -> float:
+        """The time under ``x`` without rounding (zones are measured in pixels)."""
+        return self.model.scroll_ms + (x - HEADER_W) / self._px_per_ms()
+
+    def segment_hit(self, pos: QPoint) -> narration_edit.Hit:
+        """The subtitle zone under ``pos``; nothing while the tracks are locked."""
+        lane = self.narration_lane_at(pos)
+        if (
+            not self._narration_unlocked
+            or self.recording is None
+            or lane is None
+            or pos.x() < HEADER_W
+        ):
+            return narration_edit.Hit(Zone.NONE)
+        return narration_edit.hit_test(
+            self.recording.segments, lane, self._exact_time(pos.x()), self._px_per_ms()
+        )
 
     def narration_shows_text(self) -> bool:
         """Zoomed in far enough for the boxes to show their words."""
@@ -688,6 +841,11 @@ class TimelineView(QWidget):
             self.click_audio_icon(icon)
             return
         self.setFocus()
+        if self._on_lock(pos):
+            if self._narration_editable:
+                self.toggle_narration_lock()
+                self._show_lock_tooltip(event.globalPosition().toPoint())
+            return
         handle = self._handle_at(pos)
         on_playhead = (
             pos.x() >= HEADER_W
@@ -699,6 +857,10 @@ class TimelineView(QWidget):
             self._drag = handle
             handle_ms = self.model.in_ms if handle == "in" else self.model.out_ms
             self._drag_offset = pos.x() - self._x(handle_ms)
+            return
+        hit = self.segment_hit(pos)
+        if hit.editable and self.recording is not None:
+            self._start_segment_drag(hit, pos.x())
             return
         screen_id = self.track_at(pos)
         if screen_id is not None and self.model.select_screen(screen_id):
@@ -713,7 +875,9 @@ class TimelineView(QWidget):
         if self._pan is not None:
             self._pan_to(event.position().x())
             return
-        if self._drag in ("in", "out"):
+        if self._drag == "segment":
+            self._drag_segment_to(pos)
+        elif self._drag in ("in", "out"):
             self._drag_handle_to(pos.x())
         elif self._drag == "playhead":
             self._move_playhead_to(pos.x())
@@ -742,9 +906,13 @@ class TimelineView(QWidget):
                 self._hover_icon = None
                 QToolTip.hideText()
             near_handle = self._handle_at(pos) is not None
-            self.setCursor(
-                Qt.CursorShape.SizeHorCursor if near_handle else Qt.CursorShape.ArrowCursor
-            )
+            cursor = Qt.CursorShape.SizeHorCursor if near_handle else Qt.CursorShape.ArrowCursor
+            if not near_handle:
+                if self._on_lock(pos) and self._narration_editable:
+                    cursor = Qt.CursorShape.PointingHandCursor
+                else:
+                    cursor = ZONE_CURSORS.get(self.segment_hit(pos).zone, cursor)
+            self.setCursor(cursor)
             self._update_keypoint_tooltip(pos, event.globalPosition().toPoint())
 
     def _show_fit_tooltip(self, global_pos: QPoint, rect: QRect) -> None:
@@ -773,17 +941,34 @@ class TimelineView(QWidget):
         length = dict(self.model.pauses).get(pause)
         QToolTip.showText(global_pos, self.pause_tooltip(pause, length), self)
 
+    def lock_tooltip(self) -> str:
+        if not self._narration_editable:
+            return LOCK_TOOLTIP_UNAVAILABLE
+        return LOCK_TOOLTIP_UNLOCKED if self._narration_unlocked else LOCK_TOOLTIP_LOCKED
+
+    def _show_lock_tooltip(self, global_pos: QPoint) -> None:
+        self._hover_segment = (-2, int(self._narration_unlocked))
+        QToolTip.showText(global_pos, self.lock_tooltip(), self, self.lock_rect())
+
     def _update_narration_tooltip(self, pos: QPoint, global_pos: QPoint) -> None:
-        """Hovering a narration box shows its words; the header explains the track."""
-        segment = self.narration_segment_at(pos)
+        """Hovering a narration box shows its words; the header explains the tracks and
+        the padlock its state."""
+        if self._segment_drag is not None:
+            return
+        on_lock = self._on_lock(pos)
+        segment = None if on_lock else self.narration_segment_at(pos)
         on_header = pos.x() < HEADER_W and self.narration_rect().contains(pos)
-        key = (segment.start_ms, segment.end_ms) if segment is not None else None
+        key = (segment.start_ms, segment.end_ms, segment.track) if segment is not None else None
         if on_header:
             key = (-1, -1)
+        if on_lock:
+            key = (-2, int(self._narration_unlocked))
         if key == self._hover_segment:
             return
         self._hover_segment = key
-        if on_header:
+        if on_lock:
+            self._show_lock_tooltip(global_pos)
+        elif on_header:
             QToolTip.showText(global_pos, NARRATION_TOOLTIP, self)
         elif segment is not None:
             text = f"{format_timestamp(segment.start_ms)}  {segment.text.strip()}"
@@ -814,6 +999,47 @@ class TimelineView(QWidget):
             drag, self._drag = self._drag, None
             if drag == "playhead":
                 self.playhead_drag_finished.emit()
+            elif drag == "segment":
+                self._finish_segment_drag()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        self.cancel_segment_drag()  # a drag never survives losing the keyboard
+        super().focusOutEvent(event)
+
+    def _start_segment_drag(self, hit: narration_edit.Hit, x: float) -> None:
+        recording = self.recording
+        assert recording is not None
+        magnets = narration_edit.Magnets.of(
+            self.model.keypoints,
+            [at for at, _length in self.model.pauses],
+            self.model.playhead_ms,
+        )
+        self._segment_drag = narration_edit.Drag(
+            hit, recording.segments, recording.duration_ms, magnets
+        )
+        self._segment_press_x = x
+        self._segment_proposal = None
+        self._drag = "segment"
+        QToolTip.hideText()
+        self.update()
+
+    def _drag_segment_to(self, pos: QPoint) -> None:
+        drag = self._segment_drag
+        if drag is None:
+            return
+        delta_ms = (pos.x() - self._segment_press_x) / self._px_per_ms()
+        lane = 1 if pos.y() >= self.narration_lane_rect(1).y() - 1 else 0
+        snap_ms = SNAP_PX / self._px_per_ms()
+        self._segment_proposal = drag.propose(delta_ms, lane, snap_ms)
+        self.update()
+
+    def _finish_segment_drag(self) -> None:
+        proposal = self._segment_proposal
+        self._segment_drag = None
+        self._segment_proposal = None
+        self.update()
+        if proposal is not None and proposal.valid and proposal.changed:
+            self.segment_edit_requested.emit(proposal.old, proposal.new)
 
     def _move_playhead_to(self, x: float) -> None:
         time_ms = self.model.snap_to_keypoint(self._time(x), self._snap_tolerance_ms())
@@ -1049,15 +1275,21 @@ class TimelineView(QWidget):
         painter.drawPath(body)
 
     def _paint_narration_track(self, painter: QPainter, rect: QRect) -> None:
-        """The locked narration track: a box wherever a subtitle has words (none in the
+        """Both narration tracks: a box wherever a subtitle has words (none in the
         pauses), yellow when it contains the search phrase; zoomed in far enough, each
-        box shows its words, cut with an ellipsis where they do not fit."""
-        body = QRect(HEADER_W, rect.y(), self._body_width(), rect.height())
-        painter.fillRect(body, self.colors["track"])
+        box shows its words, cut with an ellipsis where they do not fit. Over them the
+        preview of a running drag."""
+        for track in range(NARRATION_TRACKS):
+            lane = self.narration_lane_rect(track)
+            painter.fillRect(
+                QRect(HEADER_W, lane.y(), self._body_width(), lane.height()),
+                self.colors["track"],
+            )
         header = QRect(rect.x(), rect.y(), HEADER_W, rect.height())
         painter.fillRect(header, self.colors["header"])
         painter.setPen(QPen(self.colors["text"]))
-        title_rect = header.adjusted(6, 0, -(LOCK_W + 10), 0)
+        upper = self.narration_lane_rect(0)
+        title_rect = QRect(6, upper.y(), HEADER_W - 12, upper.height())
         title = painter.fontMetrics().elidedText(
             NARRATION_TITLE, Qt.TextElideMode.ElideRight, title_rect.width()
         )
@@ -1065,51 +1297,83 @@ class TimelineView(QWidget):
             title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title
         )
         self._paint_lock(painter, self.lock_rect())
+        body = QRect(HEADER_W, rect.y(), self._body_width(), rect.height())
         boxes = self.narration_boxes()
-        if not boxes:
+        proposal = self._segment_proposal
+        if not boxes and proposal is None:
             return
         painter.save()
         painter.setClipRect(body)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         font = QFont(painter.font())
         font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
         painter.setFont(font)
-        metrics = painter.fontMetrics()
         show_text = self.narration_shows_text()
         for box, segment in boxes:
             hit = self.segment_matches(segment.text)
             fill = COLOR_MATCH if hit else self.colors["narration"]
             edge = COLOR_MATCH_EDGE if hit else self.colors["narration_edge"]
-            painter.setPen(QPen(edge, 1))
-            painter.setBrush(QBrush(fill))
-            painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
-            if show_text and box.width() >= NARRATION_TEXT_MIN_W:
-                inner = box.adjusted(4, 0, -4, 0)
-                text = metrics.elidedText(
-                    " ".join(segment.text.split()), Qt.TextElideMode.ElideRight, int(inner.width())
-                )
-                painter.setPen(QPen(COLOR_MATCH_TEXT if hit else self.colors["text"]))
-                painter.drawText(
-                    inner, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text
-                )
+            text_color = COLOR_MATCH_TEXT if hit else self.colors["text"]
+            self._paint_box(painter, box, fill, edge)
+            if show_text:
+                self._paint_box_text(painter, box, segment.text, text_color)
+        if proposal is not None:
+            fill = COLOR_PREVIEW if proposal.valid else COLOR_PREVIEW_BAD
+            edge = COLOR_PREVIEW_EDGE if proposal.valid else COLOR_PREVIEW_BAD_EDGE
+            for segment in proposal.new:
+                box = self.segment_box(segment)
+                self._paint_box(painter, box, fill, edge)
+                if show_text:
+                    self._paint_box_text(painter, box, segment.text, QColor("#ffffff"))
         painter.restore()
 
+    @staticmethod
+    def _paint_box(painter: QPainter, box: QRectF, fill: QColor, edge: QColor) -> None:
+        """A narration box: slightly rounded corners, a 2 px edge on every side (the
+        pen runs 1 px inside the whole-pixel box, so no side gets thicker)."""
+        if box.width() < 2 * BOX_EDGE + 1 or box.height() < 2 * BOX_EDGE + 1:
+            painter.fillRect(box, edge)
+            return
+        painter.setPen(QPen(edge, BOX_EDGE))
+        painter.setBrush(QBrush(fill))
+        half = BOX_EDGE / 2
+        radius = min(BOX_RADIUS, box.width() / 2 - half, box.height() / 2 - half)
+        painter.drawRoundedRect(box.adjusted(half, half, -half, -half), radius, radius)
+
+    @staticmethod
+    def _paint_box_text(painter: QPainter, box: QRectF, text: str, color: QColor) -> None:
+        if box.width() < NARRATION_TEXT_MIN_W:
+            return
+        inner = box.adjusted(4, 0, -4, 0)
+        shown = painter.fontMetrics().elidedText(
+            " ".join(text.split()), Qt.TextElideMode.ElideRight, int(inner.width())
+        )
+        painter.setPen(QPen(color))
+        align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(inner, align, shown)
+
     def _paint_lock(self, painter: QPainter, rect: QRect) -> None:
-        """A closed padlock: the track cannot be edited or moved."""
+        """A padlock: closed while the tracks are locked, the shackle lifted and open
+        while they are unlocked, dim while it cannot be opened."""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        color = self.colors["text_dim"]
+        unlocked = self._narration_unlocked
+        color = QColor(COLOR_KEYPOINT if unlocked else self.colors["text_dim"])
+        if not self._narration_editable:
+            color.setAlpha(110)
         body = QRectF(rect.x(), rect.y() + rect.height() * 0.45, rect.width(),
                       rect.height() * 0.55)  # fmt: skip
-        shackle = QRectF(rect.x() + rect.width() * 0.2, rect.y() + 0.75, rect.width() * 0.6,
-                         rect.height() * 0.8)  # fmt: skip
-        pen = QPen(color, 1.5)
-        painter.setPen(pen)
+        lift = rect.height() * 0.3 if unlocked else 0.0
+        shackle = QRectF(rect.x() + rect.width() * 0.2, rect.y() + 0.75 - lift,
+                         rect.width() * 0.6, rect.height() * 0.8)  # fmt: skip
+        painter.setPen(QPen(color, 1.5))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawArc(shackle, 0, 180 * 16)
-        painter.drawLine(QPointF(shackle.left(), shackle.center().y()),
-                         QPointF(shackle.left(), body.top()))  # fmt: skip
-        painter.drawLine(QPointF(shackle.right(), shackle.center().y()),
-                         QPointF(shackle.right(), body.top()))  # fmt: skip
+        middle = shackle.center().y()
+        painter.drawLine(QPointF(shackle.left(), middle), QPointF(shackle.left(), body.top()))
+        # Unlocked, the right leg hangs free above the body.
+        right_end = middle + lift * 0.4 if unlocked else body.top()
+        painter.drawLine(QPointF(shackle.right(), middle), QPointF(shackle.right(), right_end))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(color))
         painter.drawRoundedRect(body, 1.5, 1.5)
@@ -1351,8 +1615,13 @@ __all__ = [
     "KEYPOINT_HIT_PX",
     "KEYPOINT_W",
     "LIGHT_COLORS",
+    "LOCK_TOOLTIP_LOCKED",
+    "LOCK_TOOLTIP_UNAVAILABLE",
+    "LOCK_TOOLTIP_UNLOCKED",
     "NARRATION_H",
+    "NARRATION_LANE_H",
     "NARRATION_TEXT_MIN_ZOOM",
+    "NARRATION_TRACKS",
     "PLAYHEAD_HIT_PX",
     "PROGRESS_H",
     "RULER_H",

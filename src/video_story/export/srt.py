@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from video_story.core.transcript import Transcript
+from video_story.core.transcript import Transcript, display_cues
 
 
 def srt_timestamp(ms: int) -> str:
@@ -19,11 +19,13 @@ def srt_timestamp(ms: int) -> str:
 def srt_text(transcript: Transcript, start_ms: int, end_ms: int) -> str:
     """Segments overlapping ``[start_ms, end_ms]``, clipped to it and shifted by ``start_ms``.
 
-    Segments that end up empty (no text, or no duration after clipping) are dropped;
+    Both narration tracks are shown as the viewer reads them (:func:`display_cues`:
+    the upper subtitle, a space and the lower one where they overlap). Segments that
+    end up empty (no text, or no duration after clipping) are dropped;
     entries are numbered from 1 and separated by a blank line, LF line endings.
     """
     entries: list[str] = []
-    for segment in transcript.segments:
+    for segment in display_cues(transcript.segments):
         text = segment.text.strip()
         if not text or segment.end_ms <= start_ms or segment.start_ms >= end_ms:
             continue

@@ -20,9 +20,15 @@ The crop ``[In, Out]`` is stored next to the recording in ``crop.json`` on every
 (handle drag - debounced to the end of the drag -, I/O keys, In/Out editors, Reset
 Crop) and restored when the recording is loaded again.
 
-The Edit button next to the subtitle opens :class:`SubtitleDialog` for the segment under
-the playhead; Save rewrites ``transcript.json`` and ``transcript.txt``, so the agent
-reads the corrected words.
+The Edit button next to the subtitle opens :class:`SubtitleDialog` for the segments under
+the playhead (one text box per narration track that has one there); Save rewrites
+``transcript.json`` and ``transcript.txt``, so the agent reads the corrected words.
+
+The narration has two tracks; their padlock can be opened once the transcript is
+complete (not while it is transcribed, nor for an archived recording, and Transcribe
+again locks it). Unlocked, a subtitle dragged on the timeline is stored when the mouse
+button is released (:meth:`EditorWindow.apply_segment_edit`). Escape during such a
+drag cancels only the drag (it does not stop the playback).
 
 A recording that arrives from the Stop dialog is not transcribed yet: the window
 starts :class:`TranscriptionManager` for the shown recording, the timeline shows a
@@ -748,6 +754,8 @@ class EditorWindow(QMainWindow):
         self.timeline.view_changed.connect(self._sync_zoom_slider)
         self.timeline.audio_track_toggled.connect(self.toggle_audio_track)
         self.timeline.transcribe_requested.connect(self.request_transcribe_again)
+        self.timeline.segment_edit_requested.connect(self.apply_segment_edit)
+        self.timeline.narration_lock_toggled.connect(self._on_narration_lock_toggled)
         bottom_layout.addWidget(self.timeline, 1)
 
         # Bottom row, at the right edge: Auto process | Process | Instructions.
@@ -1966,7 +1974,12 @@ class EditorWindow(QMainWindow):
             self.timeline.update()
 
     def stop_playback(self) -> None:
-        """Stop and return to where Play was last pressed (In when there is no marker)."""
+        """Stop and return to where Play was last pressed (In when there is no marker).
+
+        Escape while a subtitle is dragged on the timeline only cancels that drag."""
+        if self.timeline.cancel_segment_drag():
+            self._show_status_message("Subtitle change cancelled.")
+            return
         self._resume_after_scrub = False
         self._paused_at = None
         self.player.stop()
@@ -2413,39 +2426,84 @@ class EditorWindow(QMainWindow):
         return SubtitleDialog(segment, duration_ms, self)
 
     def edit_subtitle(self) -> bool:
-        """Edit the segment shown as the subtitle at the playhead; True when saved."""
+        """Edit the segments shown as the subtitle at the playhead (the upper and the
+        lower track's, or the one that is there); True when saved."""
         recording = self.recording
         if recording is None:
             return False
         if self.player.playing:
             self.toggle_play()
-        segment = recording.segment_at(self.model.playhead_ms)
-        if segment is None:
+        segments = list(recording.segments_at(self.model.playhead_ms).values())
+        if not segments:
             self._show_status_message("No subtitle at the playhead.")
             return False
-        dialog = self._subtitle_dialog(segment, recording.duration_ms)
+        dialog = self._subtitle_dialog(
+            segments[0] if len(segments) == 1 else segments, recording.duration_ms
+        )
         try:
             if dialog.exec() != SubtitleDialog.DialogCode.Accepted:
                 return False
-            edited = dialog.segment()
+            edited = dialog.segments()
         finally:
             dialog.deleteLater()
-        if edited is None or edited == segment:
+        if not edited or len(edited) != len(segments):
+            return False
+        changed = [(old, new) for old, new in zip(segments, edited, strict=True) if old != new]
+        if not changed:
             return False
         if self.recording is not recording:
             return False  # another recording was loaded meanwhile
         try:
-            recording.replace_segment(segment, edited)
+            recording.apply_segment_edit([o for o, _ in changed], [n for _, n in changed])
         except (OSError, ValueError) as exc:
             log.warning("cannot save subtitle of %s: %s", recording.session_id, exc)
             self._show_status_message(f"Cannot save the subtitle: {exc}")
             return False
-        self._sync_playhead()
-        self._update_current_search_match()
+        self._after_subtitles_changed()
+        first = changed[0][1]
         self._show_status_message(
-            f"Subtitle saved: {format_timestamp(edited.start_ms)}-{format_timestamp(edited.end_ms)}"
+            f"Subtitle saved: {format_timestamp(first.start_ms)}-{format_timestamp(first.end_ms)}"
+            if len(changed) == 1
+            else "Subtitles saved (upper and lower track)."
         )
         return True
+
+    def apply_segment_edit(self, old, new) -> bool:
+        """A subtitle dragged on the unlocked narration (moved, resized, moved to the
+        other track, or the shared edge of two): store it. True when saved."""
+        recording = self.recording
+        if recording is None or not self.timeline.narration_unlocked:
+            return False
+        try:
+            recording.apply_segment_edit(tuple(old), tuple(new))
+        except (OSError, ValueError) as exc:
+            log.warning("cannot change subtitle of %s: %s", recording.session_id, exc)
+            self._show_status_message(f"Cannot change the subtitle: {exc}")
+            self.timeline.update()
+            return False
+        self._after_subtitles_changed()
+        if len(new) == 2:
+            edge = new[0].end_ms
+            self._show_status_message(f"Subtitles meet at {format_timestamp(edge)}.")
+        else:
+            segment = new[0]
+            track = "lower" if segment.track else "upper"
+            self._show_status_message(
+                f"Subtitle moved: {format_timestamp(segment.start_ms)}-"
+                f"{format_timestamp(segment.end_ms)} ({track} track)"
+            )
+        return True
+
+    def _after_subtitles_changed(self) -> None:
+        self._sync_playhead()
+        self._update_current_search_match()
+
+    def _on_narration_lock_toggled(self, unlocked: bool) -> None:
+        self._show_status_message(
+            "Narration unlocked: drag the subtitles (Escape cancels a drag)."
+            if unlocked
+            else "Narration locked."
+        )
 
     # Process ----------------------------------------------------------------
 
@@ -2632,7 +2690,8 @@ class EditorWindow(QMainWindow):
 
         text = (
             "The narration will be deleted and created again by transcribing the current "
-            "audio track. Subtitles corrected with Edit are lost.\n\n"
+            "audio track. Subtitles corrected with Edit, changed times of subtitles and the "
+            "lower track are lost; all subtitles go to the upper track again.\n\n"
             f"{line(MICROPHONE)}\n{line(COMPUTER)}"
         )
         if not recording.audio or not recording.audio.sources:
@@ -2713,6 +2772,10 @@ class EditorWindow(QMainWindow):
             self.process_button.setEnabled(allowed)
             self.process_action.setEnabled(allowed)
         editable = self.recording is not None and not archived
+        # The narration can be unlocked only once the transcript is complete.
+        self.timeline.set_narration_editable(
+            editable and self.recording is not None and self.recording.transcript_complete
+        )
         self.instructions_button.setEnabled(editable)
         self.instructions_action.setEnabled(editable)
         if archived:

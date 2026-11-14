@@ -41,6 +41,7 @@ from video_story.editor.timeline.view import (  # noqa: E402
     HEADER_W,
     LIGHT_COLORS,
     NARRATION_H,
+    NARRATION_LANE_H,
     NARRATION_TEXT_MIN_ZOOM,
 )
 from video_story.editor.window import EditorWindow  # noqa: E402
@@ -216,13 +217,18 @@ def test_searched_phrase_is_bold_and_red_in_the_subtitle(editor, qtbot):
 # Narration track -----------------------------------------------------------------------
 
 
-def test_narration_track_is_half_the_audio_track_under_it(editor):
+def test_narration_tracks_are_half_the_audio_track_under_it(editor):
     view = editor.timeline
     audio, narration, lane = view.audio_rect(), view.narration_rect(), view.progress_rect()
-    assert NARRATION_H == AUDIO_H // 2 and narration.height() == NARRATION_H
+    upper, lower = view.narration_lane_rect(0), view.narration_lane_rect(1)
+    assert NARRATION_LANE_H == AUDIO_H // 2 and narration.height() == NARRATION_H
+    assert upper.height() == lower.height() == NARRATION_LANE_H
+    assert narration.top() == upper.top() and upper.bottom() < lower.top()
+    assert lower.bottom() == narration.bottom()
     assert audio.bottom() < narration.top() and narration.bottom() < lane.top()
     lock = view.lock_rect()
-    assert lock.right() < HEADER_W and narration.contains(lock)
+    # The padlock sits in the header under the "narration" title (the lower track's row).
+    assert lock.right() < HEADER_W and lower.contains(lock)
     assert view.tracks_bottom() == narration.bottom()
     assert view.minimumHeight() >= lane.bottom()
 
@@ -233,7 +239,7 @@ def test_narration_boxes_only_where_text_is_and_words_when_zoomed(editor):
     assert [seg.text for _, seg in boxes] == ["Tohle je příliš světlé", "Second line"]
     first, second = boxes[0][0], boxes[1][0]
     assert first.right() < second.left()  # the pause between them stays empty
-    pause = view.narration_rect().center().y()
+    pause = view.narration_lane_rect(0).center().y()
     assert view.narration_segment_at(QPoint(int(view._x(1200)), pause)) is None
     assert view.narration_segment_at(QPoint(int(first.center().x()), pause)) is boxes[0][1]
     editor.model.zoom = NARRATION_TEXT_MIN_ZOOM - 1  # a long recording at fit
@@ -242,10 +248,11 @@ def test_narration_boxes_only_where_text_is_and_words_when_zoomed(editor):
     assert view.narration_shows_text()
 
 
-def test_narration_cannot_be_dragged_a_click_only_moves_the_playhead(editor, qtbot):
+def test_locked_narration_cannot_be_dragged_a_click_only_moves_the_playhead(editor, qtbot):
     view = editor.timeline
+    assert not view.narration_unlocked  # every recording opens locked
     crop_before = (editor.model.in_ms, editor.model.out_ms)
-    y = view.narration_rect().center().y()
+    y = view.narration_lane_rect(0).center().y()
     x = int(view._x(1800))
     qtbot.mousePress(view, Qt.MouseButton.LeftButton, pos=QPoint(x, y))
     _mouse_move(view, QPoint(x + 40, y))

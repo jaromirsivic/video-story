@@ -17,19 +17,45 @@ from typing import Any
 
 from .timeline import format_timestamp
 
+UPPER_TRACK = 0  # the narration track every transcription fills
+LOWER_TRACK = 1  # the second subtitle track the user moves subtitles to in the editor
+LOWER_TRACK_MARK = "[lower track]"
+
 
 @dataclass(frozen=True)
 class Segment:
+    """One subtitle: its time and words, and the editor track it lies in.
+
+    ``track`` is :data:`UPPER_TRACK` for everything a transcription produces; the user
+    may move a subtitle to :data:`LOWER_TRACK` in the editor (mostly to make room
+    while rearranging subtitles). Subtitles of one track never overlap; subtitles of
+    the two tracks may, and then both apply at that moment.
+    """
+
     start_ms: int
     end_ms: int
     text: str
+    track: int = UPPER_TRACK
+
+    @property
+    def lower(self) -> bool:
+        return self.track == LOWER_TRACK
 
     def to_dict(self) -> dict[str, Any]:
-        return {"start_ms": self.start_ms, "end_ms": self.end_ms, "text": self.text}
+        data: dict[str, Any] = {
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "text": self.text,
+        }
+        if self.track != UPPER_TRACK:
+            data["track"] = self.track  # absent: the upper track (files before tracks)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Segment:
-        return cls(int(data["start_ms"]), int(data["end_ms"]), str(data["text"]))
+        lower = int(data.get("track") or UPPER_TRACK) == LOWER_TRACK
+        track = LOWER_TRACK if lower else UPPER_TRACK
+        return cls(int(data["start_ms"]), int(data["end_ms"]), str(data["text"]), track)
 
 
 @dataclass
@@ -77,14 +103,56 @@ class Transcript:
 
 
 def format_segment_line(segment: Segment) -> str:
+    mark = f"{LOWER_TRACK_MARK} " if segment.lower else ""
     return (
         f"[{format_timestamp(segment.start_ms)} --> {format_timestamp(segment.end_ms)}] "
-        f"{segment.text.strip()}"
+        f"{mark}{segment.text.strip()}"
     )
 
 
+def ordered_segments(segments: list[Segment]) -> list[Segment]:
+    """Both tracks in time order (the upper one first at the same start)."""
+    return sorted(segments, key=lambda s: (s.start_ms, s.track, s.end_ms))
+
+
+def overlaps(a: Segment, b: Segment) -> bool:
+    """True when ``a`` and ``b`` share time; subtitles that only touch do not."""
+    return a.start_ms < b.end_ms and b.start_ms < a.end_ms
+
+
+def display_cues(segments: list[Segment]) -> list[Segment]:
+    """What a viewer reads: the subtitles of both tracks as one sequence of cues.
+
+    The time is cut at every start and end; each piece shows the upper subtitle, a
+    space and the lower one (or the one that is there). Neighbouring pieces with the
+    same text are joined, so a transcript without the lower track comes back
+    unchanged. Used by the editor preview, the SRT and the rendered video - not by
+    the agent, which reads the tracks apart (:mod:`video_story.host.events`).
+    """
+    texts = [s for s in segments if s.text.strip()]
+    if not any(s.lower for s in texts):
+        return sorted(
+            (Segment(s.start_ms, s.end_ms, s.text) for s in texts),
+            key=lambda s: (s.start_ms, s.end_ms),
+        )
+    cuts = sorted({t for s in texts for t in (s.start_ms, s.end_ms)})
+    cues: list[Segment] = []
+    for begin, finish in zip(cuts, cuts[1:], strict=False):
+        active = [s for s in texts if s.start_ms <= begin and finish <= s.end_ms]
+        if not active:
+            continue
+        upper = " ".join(s.text.strip() for s in active if not s.lower)
+        lower = " ".join(s.text.strip() for s in active if s.lower)
+        text = " ".join(t for t in (upper, lower) if t)
+        if cues and cues[-1].end_ms == begin and cues[-1].text == text:
+            cues[-1] = Segment(cues[-1].start_ms, finish, text)
+        else:
+            cues.append(Segment(begin, finish, text))
+    return cues
+
+
 def transcript_to_text(transcript: Transcript) -> str:
-    lines = [format_segment_line(s) for s in transcript.segments]
+    lines = [format_segment_line(s) for s in ordered_segments(transcript.segments)]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -138,7 +206,7 @@ def normalize_segments(segments: list[Segment]) -> list[Segment]:
             continue
         start = max(0, seg.start_ms)
         end = max(start, seg.end_ms)
-        cleaned.append(Segment(start, end, text))
+        cleaned.append(Segment(start, end, text, seg.track))
     cleaned.sort(key=lambda s: (s.start_ms, s.end_ms))
     return cleaned
 
@@ -219,14 +287,20 @@ def drop_credit_hallucinations(segments: list[Segment]) -> list[Segment]:
 
 __all__ = [
     "CREDIT_PATTERNS",
+    "LOWER_TRACK",
+    "LOWER_TRACK_MARK",
+    "UPPER_TRACK",
     "Segment",
     "Transcript",
     "TranscriptStatus",
+    "display_cues",
     "drop_credit_hallucinations",
     "format_segment_line",
     "is_credit_hallucination",
     "merge_segments",
     "normalize_segments",
+    "ordered_segments",
+    "overlaps",
     "read_transcript",
     "transcript_status",
     "transcript_to_text",

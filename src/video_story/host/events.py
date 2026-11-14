@@ -26,7 +26,14 @@ from video_story.core.crop import Crop, read_crop
 from video_story.core.instructions import read_instructions
 from video_story.core.naming import frame_base
 from video_story.core.session import SessionPaths
-from video_story.core.transcript import Segment, read_transcript, transcript_status
+from video_story.core.transcript import (
+    LOWER_TRACK_MARK,
+    Segment,
+    ordered_segments,
+    overlaps,
+    read_transcript,
+    transcript_status,
+)
 from video_story.host.mouse_timeline import LEGEND as MOUSE_LEGEND
 from video_story.host.mouse_timeline import MOUSE_MODES, mouse_detail, mouse_events
 from video_story.host.runner import FrameIndex, SessionError, archive_info
@@ -64,6 +71,14 @@ LEGEND = (
     "was recorded meanwhile, the timeline simply continues). MUTE / UNMUTE mic or "
     "computer: the user muted that audio track - it holds silence until UNMUTE, so no "
     "speech there is intended, not a fault."
+)
+# Added to the legend only when the lower narration track has subtitles in the range.
+LOWER_TRACK_LEGEND = (
+    "SAY [lower track]: a subtitle the user moved to the second (lower) subtitle track "
+    "in the editor, mostly to make room while rearranging subtitles; the other SAY "
+    "lines are the upper track. Lines of the two tracks that overlap in time both apply "
+    "at that moment (each names the other: at the same time as <ms>-<ms>): read the "
+    "upper one first. Lines that only touch are unrelated."
 )
 
 
@@ -300,11 +315,32 @@ def _excerpt(text: str) -> str:
 # Events -----------------------------------------------------------------------
 
 
+def _say_text(seg: Segment, others: list[Segment]) -> str:
+    """The words of a SAY line: ``[lower track]`` before a subtitle of the lower track,
+    and the times of the subtitles of the other track that overlap it."""
+    text = seg.text.strip()
+    if seg.lower:
+        text = f"{LOWER_TRACK_MARK} {text}"
+    partners = [o for o in others if o.track != seg.track and overlaps(o, seg)]
+    if partners:
+        track = "" if seg.lower else "lower track "
+        spans = ", ".join(f"{o.start_ms}-{o.end_ms}" for o in partners)
+        text += f" (at the same time as {track}{spans})"
+    return text
+
+
 def _speech_events(
-    segments: list[Segment], crop: Crop, ticks: _Ticks, over=lambda _s, _e: None
+    segments: list[Segment],
+    crop: Crop,
+    ticks: _Ticks,
+    over=lambda _s, _e: None,
+    others: list[Segment] | None = None,
 ) -> list[_Event]:
+    """One SAY line per subtitle, upper before lower at the same start; ``others`` (all
+    subtitles of the transcript) name the overlapping subtitles of the other track."""
     events = []
-    for seg in segments:
+    others = segments if others is None else others
+    for seg in ordered_segments(segments):
         start = max(seg.start_ms, crop.start_ms)
         end = min(seg.end_ms, crop.end_ms)
         first, last = _cursor(ticks.at(start)), _cursor(ticks.at(end))
@@ -316,7 +352,7 @@ def _speech_events(
             _Event(
                 seg.start_ms,
                 0,
-                f"{seg.start_ms}-{seg.end_ms} SAY {seg.text.strip()} [cursor {cursor}]",
+                f"{seg.start_ms}-{seg.end_ms} SAY {_say_text(seg, others)} [cursor {cursor}]",
             )
         )
     return events
@@ -701,6 +737,7 @@ def build_timeline(
 
     status = transcript_status(paths.transcript_json_path(base))
     segments: list[Segment] = []
+    all_segments: list[Segment] = []
     language = None
     if status.exists:
         try:
@@ -710,7 +747,8 @@ def build_timeline(
         if transcript is not None:
             language = transcript.language
             segments = transcript.segments_in_range(window.start_ms, window.end_ms)
-    events.extend(_speech_events(segments, window, ticks, pointer.over))
+            all_segments = transcript.segments
+    events.extend(_speech_events(segments, window, ticks, pointer.over, all_segments))
 
     keypoints = [k for k in manifest.get("keypoints") or [] if isinstance(k, dict)]
     for kp in keypoints:
@@ -722,6 +760,9 @@ def build_timeline(
     events.extend(_pause_events(manifest, window, counts))
     events.extend(_mute_events(manifest, window, counts))
     counts["speech"] = len(segments)
+    lower = sum(1 for s in segments if s.lower)
+    if lower:
+        counts["speech_lower"] = lower  # only when the lower track is in use
 
     events.sort(key=lambda e: (e.time_ms, e.order))
     screens = [
@@ -744,7 +785,9 @@ def build_timeline(
         "screens": screens,
         "capture_interval_ms": manifest.get("capture_interval_ms"),
         "counts": counts,
-        "legend": LEGEND + (" " + MOUSE_LEGEND if pointer.recorded else ""),
+        "legend": LEGEND
+        + (" " + LOWER_TRACK_LEGEND if lower else "")
+        + (" " + MOUSE_LEGEND if pointer.recorded else ""),
         "mouse": {"recorded": pointer.recorded, "mode": pointer.mode},
         "timeline": "\n".join(e.text for e in events) + ("\n" if events else ""),
     }
