@@ -203,6 +203,7 @@ class _Tick:
     zoom: list[dict[str, Any]] = field(default_factory=list)
     background: str | None = None
     grid: dict[str, int] | None = None
+    grid_source: str | None = None
     clipboard: str | None = None
 
 
@@ -261,9 +262,13 @@ class Recorder:
         # stored in the sidecars as ``background``.
         self.background_provider: BackgroundProvider | None = None
         # The snapping grid (ui.overlay.DrawingOverlay.grid): {screen id: spacing in pixels
-        # of that screen's image} while Ctrl is held in drawing mode, else None; stored in
-        # every sidecar as ``grid`` (that screen's spacing, null while not snapping).
+        # of that screen's image} while snapping in drawing mode (Ctrl or Snap to grid),
+        # else None; stored in every sidecar as ``grid`` (that screen's spacing, null
+        # while not snapping).
         self.grid_provider: GridProvider | None = None
+        # Why the points snap (ui.overlay.DrawingOverlay.grid_source): "toggle" (Snap to
+        # grid pressed) or "ctrl" (Ctrl held), None while not snapping; ``grid_source``.
+        self.grid_source_provider: BackgroundProvider | None = None
         # The text clipboard (ui.clipboard.ClipboardTracker.take): a text the user copied
         # since the previous tick (at most 65535 characters, "..." when cut), stored as
         # ``clipboard`` in the sidecars of this tick only; None (null) in every other tick.
@@ -870,6 +875,12 @@ class Recorder:
                 tick.grid = dict(grid) if grid else None
             except Exception:  # pragma: no cover - never let drawing data stop capture
                 log.exception("grid provider failed")
+        grid_source_provider = self.grid_source_provider
+        if grid_source_provider is not None and tick.grid:
+            try:
+                tick.grid_source = grid_source_provider()
+            except Exception:  # pragma: no cover - never let drawing data stop capture
+                log.exception("grid source provider failed")
         tick.frames = self._grab_screens(grabber)
         clipboard_provider = self.clipboard_provider
         if clipboard_provider is not None and tick.frames:
@@ -899,6 +910,7 @@ class Recorder:
                 "zoom": tick.zoom,
                 "background": tick.background,
                 "grid": (tick.grid or {}).get(frame.screen_id),
+                "grid_source": tick.grid_source if tick.grid else None,
                 "clipboard": tick.clipboard,
                 "captured_at": now_iso(),
             }

@@ -83,10 +83,12 @@ removes the shapes; the timeline shows them as `REMOVED`; while paused the drawi
 frozen). While drawing, the user picks
 rectangle, ellipse, line, brush, arrow or eraser and one of 9 colors (the right mouse
 button always draws an arrow; Shift makes a square, a circle, a closed brush shape,
-connected lines or an arrow with a head at both ends; Ctrl snaps the points to a
-grid, `GRID on` / `GRID off` in the timeline), and **Sketch**
-(`S`) swaps every screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH
-off` in the timeline). A thick colored border around every screen in the frames is
+connected lines or an arrow with a head at both ends; Ctrl, or the **Snap to grid**
+button (`Ctrl+G`) that stays pressed until clicked again, snaps the points to a grid,
+`GRID on` / `GRID off` in the timeline; `Ctrl+Z` undoes and `Ctrl+Y` redoes a shape or
+an eraser stroke), and **Sketch** (`S`, also a button that stays pressed) swaps every
+screen for a plain white canvas to sketch on (`SKETCH on` / `SKETCH off` in the
+timeline). A thick colored border around every screen in the frames is
 not a drawing, only a signal to the user: red / dark red during the first second after
 drawing starts, green / dark green during the half second after it ends; it never
 appears in the timeline or among the shapes. The window can also be
@@ -154,7 +156,7 @@ One event per line, ordered by time in milliseconds since the recording started:
 27500 DRAW #2 ellipse #000000 screen1 corners 400,300 900,700 (on the sketch canvas) (pressed 26800, released 27500; frames before 26500, after 28000)
 29000 SKETCH off (the screens again; sketching since 26000)
 32500 REMOVED #1 (last seen 32000: Undo, Clear, Eraser or the drawing layer closed)
-33500 RESTORED #1 (gone at 32500, back by Undo of an Eraser stroke; same shapes as drawn)
+33500 RESTORED #1 (gone at 32500, back by Undo or Redo; same shapes as drawn)
 43000 CLIPBOARD "Say what you want to get out of this recording, ..." (225 chars)
 51000 CURSOR -> screen2 412,388
 60000 KEYPOINT 1
@@ -204,7 +206,8 @@ One event per line, ordered by time in milliseconds since the recording started:
   lines drawn one after another, each starting where the previous one ended (one route
   or outline; read them in segment order). Every segment gets its DRAW line as soon as
   the click ends it, so the speech between them comments the route as it grows.
-  `(snapped to the N px grid, Ctrl)`: its points were snapped to the grid on purpose,
+  `(snapped to the N px grid, Ctrl)` or `(..., Snap to grid)`: its points were snapped
+  to the grid on purpose,
   so round coordinates and aligned edges are intended, not a coincidence. A line or an arrow drawn across screens is
   stored as one piece per screen with the same `group` (`(... split at a screen edge,
   group g)`); the arrow's head is on the piece whose tool is `arrow`.
@@ -213,20 +216,24 @@ One event per line, ordered by time in milliseconds since the recording started:
   finished` (cancelled with Esc, the drawing layer closed, or a click without size).
 - `REMOVED` - shapes that disappeared (Undo, Clear, the eraser, or the drawing layer
   was closed). The eraser removes a whole group at once (all connected lines, every
-  piece of a line or arrow across screens), so they appear in one `REMOVED` line. `RESTORED` - shapes the eraser removed that Undo brought back (same id
-  and geometry as their `DRAW` line).
+  piece of a line or arrow across screens), so they appear in one `REMOVED` line.
+  `RESTORED` - shapes back on the screen: Undo of an eraser stroke, or Redo (`Ctrl+Y`)
+  of a shape Undo had taken away (same id and geometry as their `DRAW` line).
 - `SKETCH on` / `SKETCH off` - while drawing, the user switched every screen to a plain
   white canvas and back (the shapes stay on either background). In between the user is
   sketching an idea - a layout, a diagram, a flow - not pointing at something on the
   screen, and the frames show only the canvas with the shapes; what was on the screen
   is in the frames before `SKETCH on`. Each frame says it as `background` (`screen`,
   `sketch`, or null while not drawing), each shape as `background` in the sidecar.
-- `GRID on` / `GRID off` - while drawing, the user held Ctrl: the points of rectangles,
+- `GRID on` / `GRID off` - while drawing, the user held Ctrl (`Ctrl held` / `Ctrl
+  released`) or pressed the Snap to grid button (`Snap to grid switched on` / `off`;
+  then the grid can stay on for a long time without Ctrl): the points of rectangles,
   ellipses, lines and arrows snap to a grid (`N px` in pixels of that screen's image;
   the spacing is the Drawing Grid setting). On the sketch canvas the grid is visible in
   the frames, on the screen it is not. The user is aligning things on purpose - boxes
   of a layout, a diagram - so equal sizes and aligned edges are meant. Each frame says
-  it as `grid` (that screen's spacing, null while not snapping).
+  it as `grid` (that screen's spacing, null while not snapping) and `grid_source`
+  (`toggle` for the button, `ctrl` for Ctrl, null while not snapping).
 - `CLIPBOARD` - text the user copied (Ctrl+C) just before that moment, cut after 200
   characters; `frames --at <ms>` returns the whole text in `clipboard` (texts over 65535
   characters end with `...`; what was in the clipboard before the recording is never

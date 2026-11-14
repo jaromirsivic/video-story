@@ -10,26 +10,26 @@ below it.
 
 A small floating toolbar (top-left of the primary screen at first; drag its title bar
 to move it whatever tool is selected, the cross closes drawing mode; black outline,
-always sized to its contents) offers Sketch/Screen / Undo / Clear on the first row, the
+always sized to its contents) offers Sketch / Snap to grid / Clear on the first row, the
 tools Rectangle / Ellipse / Line / Brush / Arrow / Eraser (icon and key only; rectangle
 is the default) on the second and the 9-color palette in one row below; every button
 names its shortcut in brackets. The left mouse button draws with the selected tool (the
-eraser removes every shape whose line it touches or crosses; Undo brings them back),
+eraser removes every shape whose line it touches or crosses; Ctrl+Z brings them back),
 the right mouse button always draws an arrow. The eraser removes a whole group at
 once: all connected lines, every piece of a line or arrow split at screen edges. Other
 windows (the control window) can be kept above the overlay with
 :meth:`DrawingOverlay.keep_above`; like the toolbar they stay movable and clickable.
 
-Sketch: the Sketch/Screen button (``S``) switches the background of every screen
-between the screens as they are (the default whenever drawing mode is entered) and a
-plain white canvas to sketch on; the shapes stay where they are either way. The
+Sketch: the Sketch button (``S``) stays pressed while every screen shows a plain white
+canvas to sketch on and is released for the screens as they are (the default whenever
+drawing mode is entered); the shapes stay where they are either way. The
 background is reported for the frame sidecars (:meth:`DrawingOverlay.background`) and
 stored with every shape.
 
 Keyboard shortcuts, in every Video Story window while drawing: ``Esc`` close,
-``Ctrl+Z`` undo (nothing while Shift is held), ``Ctrl+Alt+C`` clear, ``S``
-sketch/screen, ``R`` / ``E`` / ``L`` / ``B`` / ``A`` / ``U`` select a tool, ``1``-``9``
-a color. On the overlay windows also ``0`` resets the zoom.
+``Ctrl+Z`` undo and ``Ctrl+Y`` redo (nothing while Shift is held), ``Ctrl+Alt+C`` clear,
+``S`` sketch, ``Ctrl+G`` snap to grid, ``R`` / ``E`` / ``L`` / ``B`` / ``A`` / ``U``
+select a tool, ``1``-``9`` a color. On the overlay windows also ``0`` resets the zoom.
 
 Shift (the eraser ignores it): an arrow - drawn with the Arrow tool or with the right
 button - gets a head at both ends while Shift is held (what is held at the release
@@ -55,11 +55,16 @@ sketch canvas the grid is painted in light grey while Ctrl is held (it shows in 
 recording); on the screens it stays invisible. A shape with a snapped point carries
 ``grid``; :meth:`DrawingOverlay.grid` tells the recorder while snapping is on.
 
+Snap to grid (``Ctrl+G``, a button that stays pressed): while it is pressed, points snap
+exactly as while Ctrl is held, the grid is painted on the sketch canvas all the time
+(never on the screens), and :meth:`DrawingOverlay.grid_source` says ``"toggle"`` (Ctrl
+alone: ``"ctrl"``). It is released whenever drawing mode starts, like Sketch.
+
 Lines and arrows can cross screens: while drawn they live in global coordinates in
 :class:`DrawingOverlay` and every window paints its part; when finished they are split
 at the screen edges into one shape per screen (the same ``group``; the pieces of an
-arrow without the head are lines with ``part_of: "arrow"``). Undo and the eraser treat
-the pieces of one split shape as one.
+arrow without the head are lines with ``part_of: "arrow"``). Undo, Redo and the eraser
+treat the pieces of one split shape as one.
 
 Flash border: when drawing mode starts (:meth:`DrawingOverlay.show`) a border of
 :func:`flash_border_px` (20 px or 1 % of the screen's longer side) flashes around every
@@ -178,11 +183,13 @@ SKETCH_COLOR = QColor("#FFFFFF")  # the sketch canvas
 GRID_COLOR = QColor("#E2E2E2")  # the snapping grid on the sketch canvas (Ctrl held)
 DEFAULT_GRID_PX = 16  # grid spacing in logical pixels (Settings > Drawing Grid)
 UNDO_SHORTCUT = "Ctrl+Z"
+REDO_SHORTCUT = "Ctrl+Y"
+GRID_SHORTCUT = "Ctrl+G"
 CLEAR_SHORTCUT = "Ctrl+Alt+C"
 SHIFT_POLL_MS = 30  # how often Shift and Ctrl are polled while the overlay is shown
 SKETCH_SHORTCUT = "S"
-SKETCH_LABEL = "Sketch"  # the button while the screens are shown (switches to sketch)
-SCREEN_LABEL = "Screen"  # the button while sketching (switches back to the screens)
+SKETCH_LABEL = "Sketch"  # pressed while the white canvas is shown
+GRID_LABEL = "Snap to grid"  # pressed while points snap to the grid (as with Ctrl held)
 # The border flashed around every screen when drawing mode starts and ends (not a shape).
 FLASH_MIN_PX = 20  # border thickness in pixels of the screen, at least ...
 FLASH_SCREEN_RATIO = 0.01  # ... or 1 % of the screen's longer side, whichever is more
@@ -287,7 +294,9 @@ class Shape:
     arrow without its head. ``split`` (internal, not exported) is shared by the pieces of
     one split shape, 0 for a shape that was not split. ``closed_ms``: when Shift closed a
     brush stroke already being drawn (``None`` when it was held from the press).
-    ``grid``: the grid spacing (canvas units) its points snapped to while Ctrl was held.
+    ``grid``: the grid spacing (canvas units) its points snapped to while Ctrl was held
+    or Snap to grid was pressed; ``grid_toggle``: Snap to grid was pressed then (JSON
+    ``grid_source: "toggle"``; Ctrl alone writes no source).
     ``heads``: where an arrow has its heads - :data:`HEADS_END` (at ``points[-1]``, the
     usual arrow), :data:`HEADS_BOTH` (drawn with Shift) or :data:`HEADS_START` (at
     ``points[0]`` only: the first piece of a double-headed arrow split at screen edges).
@@ -308,6 +317,7 @@ class Shape:
     split: int = 0
     closed_ms: int | None = None
     grid: int | None = None
+    grid_toggle: bool = False
     heads: str = "end"
 
     @property
@@ -388,6 +398,8 @@ def shape_to_json(shape: Shape, screen: Screen, device_pixel_ratio: float) -> di
             data["closed_ms"] = shape.closed_ms
     if shape.grid is not None:
         data["grid"] = round(shape.grid * device_pixel_ratio)
+        if shape.grid_toggle:
+            data["grid_source"] = "toggle"
     if shape.group is not None:
         data["group"] = shape.group
     if shape.segment is not None:
@@ -833,14 +845,15 @@ class OverlayWindow(QWidget):
 
     def _shaped_end(self, shape: Shape) -> QPointF:
         """The dragged corner: the cursor, or the square's corner while Shift is held; on
-        the grid while Ctrl is held."""
+        the grid while Ctrl is held or Snap to grid is pressed."""
         end = self._raw_end if self._raw_end is not None else shape.points[-1]
         controller = self._controller
         if shape.tool not in (Tool.RECTANGLE, Tool.ELLIPSE):
             return QPointF(end)
-        step = controller.grid_px if controller.ctrl_held else None
+        step = controller.grid_px if controller.snapping else None
         if step is not None:
             shape.grid = step
+            shape.grid_toggle = shape.grid_toggle or controller.grid_locked
         if controller.shift_held:
             if step is not None:
                 return snap_square(shape.points[0], end, step)
@@ -929,7 +942,7 @@ class OverlayWindow(QWidget):
         if self._controller.sketch:
             # Sketch: a plain white canvas hides the screen (zoomed or not).
             painter.fillRect(self.rect(), SKETCH_COLOR)
-            if self._controller.ctrl_held:
+            if self._controller.snapping:
                 self._paint_grid(painter)
         elif self._zoom > MIN_ZOOM and self._snapshot is not None:
             # Zoomed: show the frozen picture magnified, with crisp (unsmoothed) pixels.
@@ -968,8 +981,8 @@ class OverlayWindow(QWidget):
         painter.fillPath(border, color)
 
     def _paint_grid(self, painter: QPainter) -> None:
-        """The snapping grid (Ctrl held on the sketch canvas): 1 px lines on the multiples
-        of the grid spacing, magnified with the zoom like the shapes."""
+        """The snapping grid (Ctrl or Snap to grid, on the sketch canvas): 1 px lines on
+        the multiples of the grid spacing, magnified with the zoom like the shapes."""
         step = float(self._controller.grid_px)
         visible = self.visible_canvas_rect()
         pen = QPen(GRID_COLOR, 1)
@@ -1090,7 +1103,7 @@ class OverlayWindow(QWidget):
             event.accept()
             return
         shift = controller.shift_held
-        snap = tool in (Tool.RECTANGLE, Tool.ELLIPSE) and controller.ctrl_held
+        snap = tool in (Tool.RECTANGLE, Tool.ELLIPSE) and controller.snapping
         if snap:
             pos = snap_to_grid(pos, controller.grid_px)
         self._current = Shape(
@@ -1102,6 +1115,7 @@ class OverlayWindow(QWidget):
             # A square / circle, or a closed brush shape (Shift may also come later).
             shift=shift and tool in (Tool.RECTANGLE, Tool.ELLIPSE, Tool.BRUSH),
             grid=controller.grid_px if snap else None,
+            grid_toggle=snap and controller.grid_locked,
         )
         self._raw_end = pos
         self.update()
@@ -1213,7 +1227,7 @@ class OverlayWindow(QWidget):
         plain = not ctrl and not alt
         letter = chr(key) if ord("A") <= key <= ord("Z") else ""
         frozen_key = key == Qt.Key.Key_Escape or (
-            (ctrl and not alt and key == Qt.Key.Key_Z)
+            (ctrl and not alt and key in (Qt.Key.Key_Z, Qt.Key.Key_Y, Qt.Key.Key_G))
             or (ctrl and alt and key == Qt.Key.Key_C)
             or (plain and (letter == SKETCH_SHORTCUT or letter in TOOL_KEYS))
             or (plain and Qt.Key.Key_0 <= key < Qt.Key.Key_1 + len(PALETTE))
@@ -1230,6 +1244,10 @@ class OverlayWindow(QWidget):
             self._controller._user_close()
         elif key == Qt.Key.Key_Z and ctrl and not alt and not shift:
             self._controller.undo()
+        elif key == Qt.Key.Key_Y and ctrl and not alt and not shift:
+            self._controller.redo()
+        elif key == Qt.Key.Key_G and ctrl and not alt and not shift:
+            self._controller.toggle_grid_lock()
         elif key == Qt.Key.Key_C and ctrl and alt and not shift:
             self._controller.clear()
         elif letter == SKETCH_SHORTCUT and plain:
@@ -1266,12 +1284,12 @@ class OverlayWindow(QWidget):
 
 
 class OverlayToolbar(QWidget):
-    """Floating tool window: Sketch/Screen / Undo / Clear, the tools and the palette."""
+    """Floating tool window: Sketch / Snap to grid / Clear, the tools and the palette."""
 
     tool_selected = Signal(object)  # Tool
     color_selected = Signal(object)  # PaletteColor
     sketch_requested = Signal()
-    undo_requested = Signal()
+    grid_requested = Signal()  # Snap to grid was clicked
     clear_requested = Signal()
     close_requested = Signal()
 
@@ -1299,7 +1317,8 @@ class OverlayToolbar(QWidget):
             " border-radius: 3px; padding: 3px 8px; }"
             "QWidget#overlayToolbar QToolButton:hover, QWidget#overlayToolbar QPushButton:hover {"
             " background: #E8F0FF; }"
-            "QWidget#overlayToolbar QToolButton:checked {"
+            "QWidget#overlayToolbar QToolButton:checked,"
+            " QWidget#overlayToolbar QPushButton:checked {"
             " background: #FFD27F; border: 1px solid #A06000; }"
             "QWidget#overlayToolbarHeader { background: #DCDCDC;"
             " border-bottom: 1px solid #B0B0B0; }"
@@ -1355,20 +1374,30 @@ class OverlayToolbar(QWidget):
         outer.addLayout(root)
 
         # Every button shows its keyboard shortcut in brackets (the tools only that).
-        # Row 1: Sketch/Screen / Undo / Clear, each two columns wide; row 2: the six
-        # tools, one column each.
+        # Row 1: Sketch / Snap to grid / Clear, each two columns wide (Sketch and Snap to
+        # grid stay pressed while on); row 2: the six tools, one column each. Undo and
+        # Redo are the shortcuts Ctrl+Z and Ctrl+Y only.
         buttons = QGridLayout()
         buttons.setSpacing(4)
-        self.sketch_button = QPushButton(self)
-        self.set_sketch(False)
-        actions: list[tuple[QPushButton, Signal]] = [(self.sketch_button, self.sketch_requested)]
-        for label, shortcut, tip, signal in (
-            ("Undo", UNDO_SHORTCUT, "Undo the last shape or eraser stroke", self.undo_requested),
-            ("Clear", CLEAR_SHORTCUT, "Remove all drawings", self.clear_requested),
-        ):
-            button = QPushButton(f"{label} ({shortcut})", self)
-            button.setToolTip(f"{tip} ({shortcut})")
-            actions.append((button, signal))
+        self.sketch_button = QPushButton(f"{SKETCH_LABEL} ({SKETCH_SHORTCUT})", self)
+        self.sketch_button.setCheckable(True)
+        self.sketch_button.setToolTip(
+            f"Sketch on a white canvas on every screen ({SKETCH_SHORTCUT}); press again for "
+            "the screens. The drawings stay"
+        )
+        self.grid_button = QPushButton(f"{GRID_LABEL} ({GRID_SHORTCUT})", self)
+        self.grid_button.setCheckable(True)
+        self.grid_button.setToolTip(
+            f"Snap the points to the grid as while Ctrl is held ({GRID_SHORTCUT}); the grid "
+            "shows on the sketch canvas. Press again to stop"
+        )
+        self.clear_button = QPushButton(f"Clear ({CLEAR_SHORTCUT})", self)
+        self.clear_button.setToolTip(f"Remove all drawings ({CLEAR_SHORTCUT})")
+        actions: list[tuple[QPushButton, Signal]] = [
+            (self.sketch_button, self.sketch_requested),
+            (self.grid_button, self.grid_requested),
+            (self.clear_button, self.clear_requested),
+        ]
         for column, (button, signal) in enumerate(actions):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(signal.emit)
@@ -1402,13 +1431,9 @@ class OverlayToolbar(QWidget):
             group.addButton(button)
             buttons.addWidget(button, 1, column)
             self._tool_buttons[tool] = button
-        # Equal columns: wide enough for every tool and for half of every action button
-        # (the Sketch button with either of its texts).
+        # Equal columns: wide enough for every tool and for half of every action button.
         widest_tool = max(b.sizeHint().width() for b in self._tool_buttons.values())
         widest_action = max(b.sizeHint().width() for b, _signal in actions)
-        self.set_sketch(True)
-        widest_action = max(widest_action, self.sketch_button.sizeHint().width())
-        self.set_sketch(False)
         column_width = max(widest_tool, (widest_action - buttons.spacing() + 1) // 2)
         for column in range(len(TOOL_BUTTONS)):
             buttons.setColumnStretch(column, 1)
@@ -1489,19 +1514,12 @@ class OverlayToolbar(QWidget):
         self._title.setText("Drawing tools (paused)" if frozen else "Drawing tools")
 
     def set_sketch(self, sketch: bool) -> None:
-        """The button names what a click switches to: Sketch on the screens, Screen while
-        sketching."""
-        if sketch:
-            self.sketch_button.setText(f"{SCREEN_LABEL} ({SKETCH_SHORTCUT})")
-            self.sketch_button.setToolTip(
-                f"Show the screens again instead of the white canvas ({SKETCH_SHORTCUT}); "
-                "the drawings stay"
-            )
-        else:
-            self.sketch_button.setText(f"{SKETCH_LABEL} ({SKETCH_SHORTCUT})")
-            self.sketch_button.setToolTip(
-                f"Sketch on a white canvas on every screen ({SKETCH_SHORTCUT}); the drawings stay"
-            )
+        """Sketch is pressed while the white canvas is shown (the text never changes)."""
+        self.sketch_button.setChecked(bool(sketch))
+
+    def set_grid_locked(self, locked: bool) -> None:
+        """Snap to grid is pressed while the points snap without Ctrl."""
+        self.grid_button.setChecked(bool(locked))
 
     def set_color(self, hex_value: str) -> None:
         self._current_hex = hex_value.upper()
@@ -1609,6 +1627,7 @@ class DrawingOverlay(QObject):
         self._windows: list[OverlayWindow] = []
         # What Undo takes back, oldest first: a shape drawn, or what one eraser drag removed.
         self._history: list[_Action] = []
+        self._redo: list[_Action] = []  # what Redo applies again, the last undone step last
         self._toolbar: OverlayToolbar | None = None
         self._keep_above: list[QWidget] = []  # other windows kept above the overlay
         self._floating: _FloatingDrag | None = None
@@ -1625,6 +1644,8 @@ class DrawingOverlay(QObject):
         self._span: _Span | None = None  # the line or arrow being drawn
         self._shift = False  # Shift as last seen (mouse events, key events, polling)
         self._ctrl = False  # Ctrl as last seen: points snap to the grid while held
+        self._grid_locked = False  # Snap to grid pressed: points snap without Ctrl
+        self._grid_source: str | None = None  # "ctrl" / "toggle" for the sidecars
         self._grid_px = DEFAULT_GRID_PX
         self._grid: dict[str, int] | None = None  # grid spacing per screen for the sidecars
         # Where Shift is polled while a shape is being drawn (replaceable in tests).
@@ -1734,6 +1755,43 @@ class DrawingOverlay(QObject):
         return self._ctrl
 
     @property
+    def grid_locked(self) -> bool:
+        """Snap to grid is pressed: points snap to the grid without Ctrl."""
+        return self._grid_locked
+
+    @property
+    def snapping(self) -> bool:
+        """Points snap to the grid: Ctrl held or Snap to grid pressed."""
+        return self._ctrl or self._grid_locked
+
+    def set_grid_locked(self, locked: bool) -> None:
+        """Press (``True``) or release Snap to grid: like holding / releasing Ctrl."""
+        locked = bool(locked)
+        if locked != self._grid_locked:
+            was = self.snapping
+            self._grid_locked = locked
+            if self.snapping != was:
+                self._snapping_changed()
+            else:
+                self._refresh_drawings()  # the source changed ("ctrl" <-> "toggle")
+        if self._toolbar is not None:
+            self._toolbar.set_grid_locked(self._grid_locked)
+
+    def toggle_grid_lock(self) -> None:
+        """The Snap to grid button or Ctrl+G (only while drawing)."""
+        if not self._visible:
+            if self._toolbar is not None:
+                self._toolbar.set_grid_locked(self._grid_locked)
+            return
+        self.set_grid_locked(not self._grid_locked)
+
+    def grid_source(self) -> str | None:
+        """Why the points snap, for the sidecars: ``"toggle"`` (Snap to grid pressed),
+        ``"ctrl"`` (only Ctrl held) or ``None`` (no snapping). Thread-safety as for
+        :meth:`drawings`."""
+        return self._grid_source
+
+    @property
     def grid_px(self) -> int:
         """The grid spacing in logical pixels (canvas units)."""
         return self._grid_px
@@ -1746,9 +1804,9 @@ class DrawingOverlay(QObject):
         self._refresh_drawings()
 
     def grid(self) -> dict[str, int] | None:
-        """``{screen id: spacing in pixels of that screen's image}`` while Ctrl is held in
-        drawing mode (points snap to the grid), else ``None``. Thread-safety as for
-        :meth:`drawings`."""
+        """``{screen id: spacing in pixels of that screen's image}`` while Ctrl is held or
+        Snap to grid is pressed in drawing mode (points snap to the grid), else ``None``.
+        Thread-safety as for :meth:`drawings`."""
         return self._grid
 
     def keep_above(self, window: QWidget) -> None:
@@ -1782,8 +1840,10 @@ class DrawingOverlay(QObject):
             self._destroy_windows()
             self._windows = [OverlayWindow(self, index) for index in range(len(screens))]
         if not self._visible:
-            # Every drawing session starts on the screens (the Sketch button).
+            # Every drawing session starts on the screens (the Sketch button) and without
+            # Snap to grid.
             self._set_sketch_state(False)
+            self.set_grid_locked(False)
             # Grab every screen before the overlay covers it: the picture to zoom into.
             for window, screen in zip(self._windows, screens, strict=True):
                 window.set_snapshot(self._grab_screen(screen))
@@ -1838,6 +1898,7 @@ class DrawingOverlay(QObject):
             window.reset_zoom()
             window.update()
         self._ctrl = False
+        self.set_grid_locked(False)
         self._refresh_drawings()
         self._update_shift_timer()
         self._start_flash(CLOSE_FLASH, done=self.hide)
@@ -1866,6 +1927,7 @@ class DrawingOverlay(QObject):
             window.hide()
         self._cancel_span()
         self._ctrl = False
+        self.set_grid_locked(False)
         self._refresh_drawings()
         self._update_shift_timer()
 
@@ -1882,6 +1944,7 @@ class DrawingOverlay(QObject):
         for window in self._windows:
             window.clear_shapes()
         self._history.clear()
+        self._redo.clear()
 
     def undo(self) -> None:
         """Take back the last step: remove the last shape drawn (every piece of a split
@@ -1902,11 +1965,37 @@ class DrawingOverlay(QObject):
                         per_window.append((window, [(index, shape)]))
                 for window, entries in per_window:
                     window.restore_shapes(entries)
+                self._redo.append(action)
                 return
             removed = False
             for window, shape in action.added:
                 removed = window.remove_shape(shape) or removed
             if removed:
+                self._redo.append(action)
+                return
+
+    def redo(self) -> None:
+        """Apply the last undone step again: draw the shape(s) Undo took away again (same
+        ids, on top), or remove again what the undone eraser drag had removed. A new
+        shape, an eraser drag or Clear forgets what could be redone. Nothing while Shift
+        is held."""
+        if self._shift_source() & Qt.KeyboardModifier.ShiftModifier:
+            return
+        while self._redo:
+            action = self._redo.pop()
+            if action.erased:
+                removed = False
+                for window, _index, shape in action.erased:
+                    removed = window.remove_shape(shape) or removed
+                if removed:
+                    self._history.append(action)
+                    return
+                continue
+            live = [(w, shape) for w, shape in action.added if w in self._windows]
+            for window, shape in live:
+                window.add_shape(shape)
+            if live:
+                self._history.append(action)
                 return
 
     def set_tool(self, tool: Tool) -> None:
@@ -1935,6 +2024,13 @@ class DrawingOverlay(QObject):
 
     def toggle_sketch(self) -> None:
         self.set_sketch(not self._sketch)
+
+    def _sketch_clicked(self) -> None:
+        """The Sketch button: a click checks or unchecks it by itself; the button always
+        shows the real state afterwards (also when nothing could change)."""
+        self.toggle_sketch()
+        if self._toolbar is not None:
+            self._toolbar.set_sketch(self._sketch)
 
     def _set_sketch_state(self, sketch: bool) -> None:
         self._sketch = sketch
@@ -2017,13 +2113,14 @@ class DrawingOverlay(QObject):
             toolbar = OverlayToolbar()
             toolbar.tool_selected.connect(self.set_tool)
             toolbar.color_selected.connect(self.set_color)
-            toolbar.sketch_requested.connect(self.toggle_sketch)
-            toolbar.undo_requested.connect(self.undo)
+            toolbar.sketch_requested.connect(self._sketch_clicked)
+            toolbar.grid_requested.connect(self.toggle_grid_lock)
             toolbar.clear_requested.connect(self.clear)
             toolbar.close_requested.connect(self._user_close)
             toolbar.set_tool(self._tool)
             toolbar.set_color(self._color.name().upper())
             toolbar.set_sketch(self._sketch)
+            toolbar.set_grid_locked(self._grid_locked)
             self._create_shortcuts(toolbar)
             self._toolbar = toolbar
         return self._toolbar
@@ -2048,6 +2145,7 @@ class DrawingOverlay(QObject):
             window.deleteLater()
         self._windows = []
         self._history.clear()
+        self._redo.clear()
 
     def _now_ms(self) -> int | None:
         """Now on the recording timeline (``None`` without a clock or when it fails)."""
@@ -2077,6 +2175,7 @@ class DrawingOverlay(QObject):
             window.add_shape(shape)
         if parts:
             self._history.append(_Action(added=list(parts)))
+            self._redo.clear()
 
     def _record_erase(
         self,
@@ -2088,6 +2187,7 @@ class DrawingOverlay(QObject):
         split shapes from other windows): one undoable step."""
         entries = [(window, index, shape) for index, shape in erased] + list(other or [])
         self._history.append(_Action(erased=entries))
+        self._redo.clear()
 
     def _take_split_pieces(
         self, shape: Shape, origin: OverlayWindow
@@ -2135,10 +2235,19 @@ class DrawingOverlay(QObject):
         """Ctrl is ``held`` (seen in a mouse or key event, or polled)."""
         if held == self._ctrl:
             return
+        was = self.snapping
         self._ctrl = held
+        if self.snapping != was:
+            self._snapping_changed()
+        else:
+            self._refresh_drawings()  # Snap to grid pressed: only the source changes
+
+    def _snapping_changed(self) -> None:
+        """Snapping went on or off (Ctrl or Snap to grid): the end being dragged snaps
+        to the grid or is free again, the grid on the sketch canvas comes or goes."""
         span = self._span
         if span is not None and span.raw_end is not None:
-            self._move_span(span.raw_end)  # the end snaps to the grid or is free again
+            self._move_span(span.raw_end)
         for window in list(self._windows):
             window._on_ctrl_changed()
         self._refresh_drawings()
@@ -2186,9 +2295,10 @@ class DrawingOverlay(QObject):
     def _snapped_global(
         self, global_pos: QPointF, window: OverlayWindow | None = None
     ) -> tuple[QPointF, bool]:
-        """``global_pos`` on the grid of the screen under it while Ctrl is held, and
-        whether it was snapped. The grid is in canvas units of that window (its zoom)."""
-        if not self._ctrl:
+        """``global_pos`` on the grid of the screen under it while snapping (Ctrl held or
+        Snap to grid pressed), and whether it was snapped. The grid is in canvas units of
+        that window (its zoom)."""
+        if not self.snapping:
             return QPointF(global_pos), False
         if window is None:
             point = global_pos.toPoint()
@@ -2338,6 +2448,7 @@ class DrawingOverlay(QObject):
                 part_of=Tool.ARROW if arrow and not head else None,
                 split=split,
                 grid=self._grid_px if span.start_snapped or span.end_snapped else None,
+                grid_toggle=(span.start_snapped or span.end_snapped) and self._grid_locked,
                 heads=heads,
             )
             parts.append((window, shape))
@@ -2362,6 +2473,7 @@ class DrawingOverlay(QObject):
             self._drawing_now = None
             self._zoom = []
             self._grid = None
+            self._grid_source = None
             return
         grid: dict[str, int] = {}
         qscreens = QGuiApplication.screens()
@@ -2378,7 +2490,7 @@ class DrawingOverlay(QObject):
             if screen is None:
                 continue
             ratio = float(qscreen.devicePixelRatio())
-            if self._ctrl:
+            if self.snapping:
                 grid[screen.id] = round(self._grid_px * ratio)
             for shape in window.view_shapes(include_current=False):
                 if shape.points:
@@ -2410,6 +2522,7 @@ class DrawingOverlay(QObject):
         self._drawing_now = drawing_now
         self._zoom = zoom
         self._grid = grid or None
+        self._grid_source = None if not grid else ("toggle" if self._grid_locked else "ctrl")
 
     def _floating_windows(self) -> list[QWidget]:
         """Visible windows kept above the overlay, bottom to top (the toolbar last)."""
@@ -2470,12 +2583,14 @@ class DrawingOverlay(QObject):
     def _create_shortcuts(self, parent: QWidget) -> None:
         """Drawing shortcuts for every Video Story window (enabled while shown).
 
-        Esc close, Ctrl+Z undo, Ctrl+Alt+C clear, S sketch/screen, R / E / L / B / A / U
-        select a tool and 1-9 a palette color.
+        Esc close, Ctrl+Z undo, Ctrl+Y redo, Ctrl+Alt+C clear, S sketch, Ctrl+G snap to
+        grid, R / E / L / B / A / U select a tool and 1-9 a palette color.
         """
         bindings: list[tuple[QKeySequence, object]] = [
             (QKeySequence(Qt.Key.Key_Escape), self._user_close),
             (QKeySequence(UNDO_SHORTCUT), self.undo),
+            (QKeySequence(REDO_SHORTCUT), self.redo),
+            (QKeySequence(GRID_SHORTCUT), self.toggle_grid_lock),
             (QKeySequence(CLEAR_SHORTCUT), self.clear),
             (QKeySequence(SKETCH_SHORTCUT), self.toggle_sketch),
         ]

@@ -61,6 +61,7 @@ def make_recording(
                 "zoom": extra.get("zoom", []),
                 "background": extra.get("background"),
                 "grid": extra.get("grid"),
+                "grid_source": extra.get("grid_source"),
                 "clipboard": extra.get("clipboard"),
             }
             (frames / frame_filename(t, sid, "png")).write_bytes(b"\x89PNG")
@@ -348,10 +349,7 @@ def test_eraser_removal_and_undo_restore(tmp_path: Path):
         "1500 REMOVED #1 #2 (last seen 1000: Undo, Clear, Eraser or the drawing layer closed)"
         in text
     )
-    assert (
-        "2000 RESTORED #1 #2 (gone at 1500, back by Undo of an Eraser stroke; same shapes as drawn)"
-        in text
-    )
+    assert "2000 RESTORED #1 #2 (gone at 1500, back by Undo or Redo; same shapes as drawn)" in text
     assert [x for x in lines(result) if " DRAW " in x][0].startswith("400 DRAW #1 rectangle")
     assert sum(" DRAW " in x for x in lines(result)) == 3  # restored shapes are not drawn again
     assert result["counts"]["restored"] == 2

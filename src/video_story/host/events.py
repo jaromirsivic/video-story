@@ -59,10 +59,11 @@ LEGEND = (
     "soon as the click ends it, so they interleave with the speech. DRAWING: a shape "
     "pressed in the range that is not finished there (cut by the range end, or cancelled). "
     "REMOVED: shapes gone (Undo, Clear, the "
-    "Eraser or the drawing layer closed). RESTORED: shapes back (Undo of an Eraser "
-    "stroke). SKETCH on / off: every screen shows a plain white canvas instead of the "
-    "screen - the user sketches an idea there. GRID on / off: Ctrl held while drawing, "
-    "points snap to a grid (shown on the sketch canvas only). "
+    "Eraser or the drawing layer closed). RESTORED: shapes back (Undo or Redo; same "
+    "shapes as drawn). SKETCH on / off: every screen shows a plain white canvas instead "
+    "of the screen - the user sketches an idea there. GRID on / off: Ctrl held or the "
+    "Snap to grid button (Ctrl+G) pressed while drawing, points snap to a grid (shown "
+    "on the sketch canvas only). "
     "CLIPBOARD: text the user copied. CURSOR: the "
     "cursor moved to another screen. ZOOM: a screen shown magnified (coordinates are "
     "then in pixels of the zoomed image). KEYPOINT: a moment the user marked. "
@@ -282,7 +283,8 @@ def _shape_note(shape: dict[str, Any]) -> str:
             notes.append(f"{kind}, Shift")
     grid = shape.get("grid")
     if isinstance(grid, int):
-        notes.append(f"snapped to the {grid} px grid, Ctrl")
+        how = "Snap to grid" if shape.get("grid_source") == "toggle" else "Ctrl"
+        notes.append(f"snapped to the {grid} px grid, {how}")
     group, segment = shape.get("group"), shape.get("segment")
     if isinstance(group, int):
         if isinstance(segment, int):
@@ -388,8 +390,8 @@ def _track_shapes(ticks: _Ticks) -> tuple[list[_Shape], _Changes, _Changes]:
 
     Removals and restorations are ``(time, previous tick, labels)``. Shapes with an
     ``id`` are exact; one that comes back with the same id after it was gone was
-    restored (Undo of an eraser stroke). Older recordings stored a shape while it was
-    being dragged: a shape that replaces one of the same tool, color, screen and
+    restored (Undo of an eraser stroke, Redo of a shape). Older recordings stored a
+    shape while it was being dragged: a shape that replaces one of the same tool, color, screen and
     starting point within one tick is the same shape growing, not a new one.
     """
     shapes: list[_Shape] = []
@@ -496,8 +498,8 @@ def _shape_events(ticks: _Ticks, window: Crop) -> tuple[list[_Event], dict[str, 
                 _Event(
                     time_ms,
                     2,
-                    f"{time_ms} RESTORED {ids} (gone at {last_seen}, back by Undo of an "
-                    "Eraser stroke; same shapes as drawn)",
+                    f"{time_ms} RESTORED {ids} (gone at {last_seen}, back by Undo or "
+                    "Redo; same shapes as drawn)",
                 )
             )
             restored_count += len(labels)
@@ -565,9 +567,11 @@ def _unfinished_events(ticks: _Ticks, window: Crop, shapes: list[_Shape]) -> lis
 
 
 def _grid_events(ticks: _Ticks, window: Crop) -> list[_Event]:
-    """``GRID on`` / ``GRID off``: Ctrl held while drawing (sidecar ``grid``, the spacing
-    in pixels of that screen's image). A short Ctrl (under ``GRID_MIN_MS``) without a
-    shape snapped meanwhile is a keyboard shortcut and left out."""
+    """``GRID on`` / ``GRID off``: Ctrl held or Snap to grid pressed while drawing
+    (sidecar ``grid``, the spacing in pixels of that screen's image; ``grid_source``
+    ``"toggle"`` for the button, ``"ctrl"`` or absent for Ctrl). A short Ctrl (under
+    ``GRID_MIN_MS``) without a shape snapped meanwhile is a keyboard shortcut and left
+    out; snapping switched on with the button always counts."""
     snapped: list[int] = sorted(
         {
             shape["finished_ms"]
@@ -578,36 +582,43 @@ def _grid_events(ticks: _Ticks, window: Crop) -> list[_Event]:
             and isinstance(shape.get("finished_ms"), int)
         }
     )
-    intervals: list[tuple[int, int | None, int, str]] = []  # (on, off, px, screen)
-    on: tuple[int, int, str] | None = None
+    # (on, off, px, screen, source at the start, source at the end, button seen)
+    intervals: list[tuple[int, int | None, int, str, str, str, bool]] = []
+    on: list[Any] | None = None
     for time_ms, sidecar in zip(ticks.times, ticks.data, strict=True):
         grid = sidecar.get("grid")
+        source = "toggle" if sidecar.get("grid_source") == "toggle" else "ctrl"
         if isinstance(grid, int) and on is None:
-            on = (time_ms, grid, str(sidecar.get("screen")))
+            on = [time_ms, grid, str(sidecar.get("screen")), source, source, source == "toggle"]
+        elif isinstance(grid, int) and on is not None:
+            on[4] = source
+            on[5] = on[5] or source == "toggle"
         elif not isinstance(grid, int) and on is not None:
-            intervals.append((on[0], time_ms, on[1], on[2]))
+            intervals.append((on[0], time_ms, on[1], on[2], on[3], on[4], on[5]))
             on = None
     if on is not None:
-        intervals.append((on[0], None, on[1], on[2]))
+        intervals.append((on[0], None, on[1], on[2], on[3], on[4], on[5]))
     events: list[_Event] = []
-    for start, end, px, screen in intervals:
+    for start, end, px, screen, first, last, button in intervals:
         stop = end if end is not None else ticks.times[-1]
         used = any(start <= t <= stop for t in snapped)
-        if end is not None and end - start < GRID_MIN_MS and not used:
+        if end is not None and end - start < GRID_MIN_MS and not used and not button:
             continue
         at = max(start, window.start_ms)
         if at <= window.end_ms and (end is None or end > window.start_ms):
             early = " (held before the range)" if start < window.start_ms else ""
+            why = "Snap to grid switched on (Ctrl+G)" if first == "toggle" else "Ctrl held"
             events.append(
                 _Event(
                     at,
                     1,
-                    f"{at} GRID on: Ctrl held, points snap to a {px} px grid (pixels of the "
+                    f"{at} GRID on: {why}, points snap to a {px} px grid (pixels of the "
                     f"{screen} image; the grid shows on the sketch canvas only){early}",
                 )
             )
         if end is not None and window.start_ms <= end <= window.end_ms:
-            events.append(_Event(end, 1, f"{end} GRID off (Ctrl released; snapping since {start})"))
+            why = "Snap to grid switched off" if last == "toggle" else "Ctrl released"
+            events.append(_Event(end, 1, f"{end} GRID off ({why}; snapping since {start})"))
     return events
 
 

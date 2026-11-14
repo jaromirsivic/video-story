@@ -239,9 +239,8 @@ def test_shortcuts_work_from_other_windows_while_drawing(overlay, qtbot):
     drag(window, [(10, 10), (40, 40)])
     drag(window, [(50, 50), (80, 80)])
     shortcuts = {s.key().toString(): s for s in overlay._shortcuts}
-    assert set(shortcuts) == {"Esc", "Ctrl+Z", "Ctrl+Alt+C", "S", "R", "E", "L", "B", "A", "U"} | {
-        str(n) for n in range(1, 10)
-    }
+    keys = {"Esc", "Ctrl+Z", "Ctrl+Y", "Ctrl+G", "Ctrl+Alt+C", "S", "R", "E", "L", "B", "A", "U"}
+    assert set(shortcuts) == keys | {str(n) for n in range(1, 10)}
     assert all(
         s.context() == Qt.ShortcutContext.ApplicationShortcut and s.isEnabled()
         for s in shortcuts.values()
@@ -614,7 +613,7 @@ def test_toolbar_order_cross_and_drag(overlay, qtbot):
     tools = [b.text() for b in toolbar.findChildren(QToolButton) if b.isCheckable()]
     assert tools == ["(R)", "(E)", "(L)", "(B)", "(A)", "(U)"]
     actions = [b.text() for b in toolbar.findChildren(QPushButton)]
-    assert actions == ["Sketch (S)", "Undo (Ctrl+Z)", "Clear (Ctrl+Alt+C)"]
+    assert actions == ["Sketch (S)", "Snap to grid (Ctrl+G)", "Clear (Ctrl+Alt+C)"]
 
     # Drag the title bar: the toolbar follows and keeps its spot after hide/show.
     start = toolbar.pos()
@@ -895,11 +894,12 @@ def test_sketch_switches_background_and_keeps_shapes(overlay, qtbot):
     window = overlay.windows[0]
     toolbar = overlay._toolbar
     assert overlay.background() == "screen" and not overlay.sketch
-    assert toolbar.sketch_button.text() == "Sketch (S)"
+    assert toolbar.sketch_button.text() == "Sketch (S)" and not toolbar.sketch_button.isChecked()
     drag(window, [(10, 10), (60, 60)])  # on the screen
     toolbar.sketch_button.click()
     assert overlay.sketch and overlay.background() == "sketch"
-    assert toolbar.sketch_button.text() == "Screen (S)"
+    # The button stays pressed while sketching; its text never changes.
+    assert toolbar.sketch_button.isChecked() and toolbar.sketch_button.text() == "Sketch (S)"
     assert len(overlay.shapes()) == 1  # switching removes nothing
     drag(window, [(100, 100), (160, 160)])  # on the canvas
     assert [d["background"] for d in overlay.drawings()] == ["screen", "sketch"]
@@ -916,7 +916,7 @@ def test_sketch_switches_background_and_keeps_shapes(overlay, qtbot):
     overlay.undo()  # undo is unaffected by the background
     assert len(overlay.shapes()) == 1
     overlay.toggle_sketch()
-    assert not overlay.sketch and toolbar.sketch_button.text() == "Sketch (S)"
+    assert not overlay.sketch and not toolbar.sketch_button.isChecked()
     assert window.zoom == 1.0  # no screen picture to zoom into here
     assert len(overlay.shapes()) == 1
     image = window.grab().toImage()
@@ -928,4 +928,4 @@ def test_sketch_switches_background_and_keeps_shapes(overlay, qtbot):
     assert overlay.background() is None
     overlay.show()
     assert not overlay.sketch and overlay.background() == "screen"
-    assert toolbar.sketch_button.text() == "Sketch (S)"
+    assert not toolbar.sketch_button.isChecked()

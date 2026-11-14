@@ -1001,6 +1001,7 @@ class ControlWindow(QWidget):
         zoom = getattr(self._overlay, "zoom", None)
         background = getattr(self._overlay, "background", None)
         grid = getattr(self._overlay, "grid", None)
+        grid_source = getattr(self._overlay, "grid_source", None)
         if set_screens is not None:
             set_screens(list(getattr(recorder, "screens", [])))
         clock = getattr(recorder, "clock", None)
@@ -1017,6 +1018,8 @@ class ControlWindow(QWidget):
             recorder.background_provider = background
         if grid is not None:
             recorder.grid_provider = grid
+        if grid_source is not None:
+            recorder.grid_source_provider = grid_source
 
     def _share_drawing_windows(self) -> None:
         """Tell the recorder which windows are the drawing layer (a click there is drawing,

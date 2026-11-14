@@ -1,6 +1,6 @@
 # Video Story – implementační plán: kontextové menu titulků, Undo/Redo, dvojklik a drobnosti editoru
 
-Stav: **část A (editor) implementována 14. 11. 2026**, schváleno po odpovědích Q1–Q6 a N1–N4; platné chování je ve [video-story-spec.md](video-story-spec.md) (kap. 8 Editor). Ruční test v reálném editoru ještě neproběhl; u splitteru se chyba offscreen nepodařilo vyvolat, oprava (linky na celých fyzických pixelech, překreslení po posunu) se musí ověřit na displeji se škálováním 125 %. **Část B (kreslení) čeká.** Z nahrávky `20261114-014631` (celá, 0:00–8:14, Process z editoru, master instrukce „Goal: an implementation plan“).
+Stav: **část A (editor) implementována 14. 11. 2026**, schváleno po odpovědích Q1–Q6 a N1–N4; platné chování je ve [video-story-spec.md](video-story-spec.md) (kap. 8 Editor). Ruční test v reálném editoru ještě neproběhl; u splitteru se chyba offscreen nepodařilo vyvolat, oprava (linky na celých fyzických pixelech, překreslení po posunu) se musí ověřit na displeji se škálováním 125 %. **Část B (kreslení) implementována 14. 11. 2026** (Redo `Ctrl+Y`, lišta Sketch / Snap to grid / Clear, `grid_source` v sidecar a ve `frames`, texty `GRID` a `RESTORED`); ani ona zatím neprošla ručním testem při nahrávání. Z nahrávky `20261114-014631` (celá, 0:00–8:14, Process z editoru, master instrukce „Goal: an implementation plan“).
 
 ## 1. Shrnutí cíle
 
