@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 DARK = "dark"
 LIGHT = "light"
+PROCESS_GREEN = "#1e9e3e"  # the Process button; the open padlock in the light theme
 
 
 def system_prefers_dark(app: QApplication | None = None) -> bool:

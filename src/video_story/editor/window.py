@@ -148,6 +148,7 @@ from PySide6.QtGui import (
     QFont,
     QKeyEvent,
     QKeySequence,
+    QPalette,
     QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
@@ -193,8 +194,8 @@ from video_story.core.folders import (
 )
 from video_story.core.instructions import read_instructions, write_instructions
 from video_story.core.session import SessionPaths
-from video_story.core.timeline import format_timestamp, parse_timestamp
-from video_story.core.transcript import transcript_status
+from video_story.core.timeline import format_hundredths, format_timestamp, parse_timestamp
+from video_story.core.transcript import Segment, transcript_status
 from video_story.export import ExportRequest, ExportResult
 from video_story.host.editor_session import (
     AttachRequest,
@@ -228,14 +229,24 @@ from .player import Player
 from .preview import PreviewPanel
 from .recording import LoadedRecording
 from .recordings_model import FolderHeader, FolderRole, ItemRole, RecordingItem, RecordingsModel
-from .recordings_view import BADGE_ARCHIVED, MIN_LIST_WIDTH, RecordingsListView, format_percent
+from .recordings_view import (
+    BADGE_ARCHIVED,
+    MENU_DOTS_BOX,
+    MIN_LIST_WIDTH,
+    RecordingsListView,
+    format_percent,
+    menu_dots_icon,
+)
 from .render_dialog import ExportFn, RenderVideoDialog, default_output_path
 from .rendering import RenderManager
 from .search import SearchJob, SearchSignals, normalize_query, text_matches
 from .separators import SeparatorSplitter
 from .subtitle_dialog import SubtitleDialog
+from .subtitle_undo import SubtitleHistory
 from .theme import apply_theme, system_prefers_dark
+from .timeline import narration_edit
 from .timeline.model import TimelineModel
+from .timeline.narration_edit import NEW_SUBTITLE_MS
 from .timeline.view import TimelineView, format_eta
 from .transcription import TranscriptionManager
 from .workers import automatic_gc_paused, collect_garbage
@@ -294,6 +305,16 @@ FOLDERS_MENU_TEXT = "⋯"
 FOLDERS_MENU_TOOLTIP = "Folders"
 COLLAPSE_ALL_LABEL = "Collapse all"
 EXPAND_ALL_LABEL = "Expand all"
+# The narration's context menu (right mouse button on the subtitle tracks).
+UNLOCK_NARRATION_LABEL = "Unlock narration track"
+LOCK_NARRATION_LABEL = "Lock narration track"
+ADD_SUBTITLE_LABEL = "Add New Subtitle"
+DELETE_SUBTITLE_LABEL = "Delete Subtitle"
+NEW_SUBTITLE_TITLE = "New Subtitle"
+NO_ROOM_FOR_SUBTITLE = (
+    "A subtitle cannot be added here: there is not enough free space.\n\n"
+    "Right-click a place with at least one second free."
+)
 SET_MAIN_LABEL = "Set as Main Folder"
 SET_MAIN_TOOLTIP = "New recordings are saved to the main folder"
 MOVE_UP_LABEL = "Move Up"
@@ -397,7 +418,7 @@ class _MouseDetailsJob(QRunnable):
 
 def format_crop_time(ms: int) -> str:
     """``HH:MM:SS.cc`` - the crop editors and length show hundredths only (narrower)."""
-    return format_timestamp(max(0, int(ms)))[:-1]
+    return format_hundredths(ms)
 
 
 class TimeEdit(QLineEdit):
@@ -551,6 +572,7 @@ class EditorWindow(QMainWindow):
         # there ("Loading ..." replaces whatever the status bar said before).
         self._status_after_load: str | None = None
         self._transcription_failed: dict[str, str] = {}  # session id -> message
+        self._subtitle_history = SubtitleHistory()  # Ctrl+Z / Ctrl+Y of the subtitles
         self._transcription_fraction: dict[str, float] = {}
         # session id -> (monotonic time, fraction) of the first progress event: the ETA
         # is extrapolated from the progress made since then.
@@ -645,6 +667,10 @@ class EditorWindow(QMainWindow):
         # "..." right of it: a menu with Collapse all / Expand all for the folders.
         self.folders_menu_button = QToolButton()
         self.folders_menu_button.setText(FOLDERS_MENU_TEXT)
+        # The dots of a folder header as an icon: the "⋯" character was a thin speck in
+        # the dark theme and vanished in the light one.
+        self.folders_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.folders_menu_button.setIconSize(QSize(MENU_DOTS_BOX, MENU_DOTS_BOX))
         self.folders_menu_button.setToolTip(FOLDERS_MENU_TOOLTIP)
         self.folders_menu_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.folders_menu_button.setAutoRaise(True)
@@ -755,6 +781,8 @@ class EditorWindow(QMainWindow):
         self.timeline.audio_track_toggled.connect(self.toggle_audio_track)
         self.timeline.transcribe_requested.connect(self.request_transcribe_again)
         self.timeline.segment_edit_requested.connect(self.apply_segment_edit)
+        self.timeline.narration_menu_requested.connect(self._show_narration_menu)
+        self.timeline.segment_double_clicked.connect(self._on_segment_double_clicked)
         self.timeline.narration_lock_toggled.connect(self._on_narration_lock_toggled)
         bottom_layout.addWidget(self.timeline, 1)
 
@@ -838,6 +866,8 @@ class EditorWindow(QMainWindow):
         self.search_button.setIcon(search_icon(SEARCH_ICON_SIZE * 2))
         self.refresh_button.setIcon(refresh_icon(SEARCH_ICON_SIZE * 2))
         self.new_folder_button.setIcon(new_folder_icon(SEARCH_ICON_SIZE * 2))
+        ink = QApplication.palette().color(QPalette.ColorRole.Text)  # as the folder headers
+        self.folders_menu_button.setIcon(menu_dots_icon(ink))
 
     def _build_actions(self) -> None:
         def action(text: str, keys: list[str] | str, slot) -> QAction:
@@ -868,6 +898,8 @@ class EditorWindow(QMainWindow):
         self.instructions_action = action("Instructions", "Ctrl+I", self.edit_instructions)
         self.theme_action = action("Toggle theme", "Ctrl+T", self.toggle_theme)
         self.refresh_action = action("Refresh", "F5", self.refresh_recordings)
+        self.undo_action = action("Undo", "Ctrl+Z", self.undo_subtitles)
+        self.redo_action = action("Redo", "Ctrl+Y", self.redo_subtitles)
 
     # Recordings list --------------------------------------------------------
 
@@ -1779,6 +1811,7 @@ class EditorWindow(QMainWindow):
         self._stop_countdown()
         self._auto_cancelled = False  # a cancelled countdown belongs to the previous recording
         self.recording = recording
+        self._subtitle_history.clear(recording.session_id if recording else None)
         self.preview.view.clear()
         archived = recording is not None and recording.archived
         self.preview.view.set_badge(BADGE_ARCHIVED if archived else None)  # blinks
@@ -2425,15 +2458,19 @@ class EditorWindow(QMainWindow):
     def _subtitle_dialog(self, segment, duration_ms: int) -> SubtitleDialog:
         return SubtitleDialog(segment, duration_ms, self)
 
-    def edit_subtitle(self) -> bool:
+    def edit_subtitle(self, segments: list | None = None) -> bool:
         """Edit the segments shown as the subtitle at the playhead (the upper and the
-        lower track's, or the one that is there); True when saved."""
+        lower track's, or the one that is there) or, given, only ``segments`` (a double
+        click on one subtitle); True when saved."""
         recording = self.recording
         if recording is None:
             return False
         if self.player.playing:
             self.toggle_play()
-        segments = list(recording.segments_at(self.model.playhead_ms).values())
+        if segments is None:
+            segments = list(recording.segments_at(self.model.playhead_ms).values())
+        else:
+            segments = [s for s in segments if s in recording.segments]
         if not segments:
             self._show_status_message("No subtitle at the playhead.")
             return False
@@ -2459,6 +2496,12 @@ class EditorWindow(QMainWindow):
             log.warning("cannot save subtitle of %s: %s", recording.session_id, exc)
             self._show_status_message(f"Cannot save the subtitle: {exc}")
             return False
+        self._record_subtitle_step(
+            recording,
+            [o for o, _ in changed],
+            [n for _, n in changed],
+            "subtitle text edited" if len(changed) == 1 else "subtitle texts edited",
+        )
         self._after_subtitles_changed()
         first = changed[0][1]
         self._show_status_message(
@@ -2481,22 +2524,186 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Cannot change the subtitle: {exc}")
             self.timeline.update()
             return False
-        self._after_subtitles_changed()
         if len(new) == 2:
             edge = new[0].end_ms
+            self._record_subtitle_step(recording, old, new, "subtitles rolled")
             self._show_status_message(f"Subtitles meet at {format_timestamp(edge)}.")
         else:
             segment = new[0]
             track = "lower" if segment.track else "upper"
+            self._record_subtitle_step(recording, old, new, "subtitle moved")
             self._show_status_message(
                 f"Subtitle moved: {format_timestamp(segment.start_ms)}-"
                 f"{format_timestamp(segment.end_ms)} ({track} track)"
             )
+        self._after_subtitles_changed()
+        return True
+
+    def add_subtitle(self, track: int, at_ms: int) -> bool:
+        """Add New Subtitle (the narration's context menu, unlocked): a subtitle of
+        :data:`NEW_SUBTITLE_MS` at ``at_ms`` on ``track``, its text typed in the Edit
+        window (Cancel adds nothing). Without a free second there, a message box says
+        so. True when added."""
+        recording = self.recording
+        if recording is None or not self.timeline.narration_unlocked:
+            return False
+        if self.player.playing:
+            self.toggle_play()
+        slot = narration_edit.free_slot(
+            recording.segments, track, at_ms, recording.duration_ms, NEW_SUBTITLE_MS
+        )
+        if slot is None:
+            self._inform(ADD_SUBTITLE_LABEL, NO_ROOM_FOR_SUBTITLE)
+            return False
+        draft = Segment(slot[0], slot[1], "", track)
+        dialog = self._subtitle_dialog(draft, recording.duration_ms)
+        dialog.setWindowTitle(NEW_SUBTITLE_TITLE)
+        try:
+            if dialog.exec() != SubtitleDialog.DialogCode.Accepted:
+                return False
+            edited = dialog.segments()
+        finally:
+            dialog.deleteLater()
+        if not edited or self.recording is not recording:
+            return False
+        segment = edited[0]
+        try:
+            recording.apply_segment_edit((), (segment,))
+        except (OSError, ValueError) as exc:
+            log.warning("cannot add subtitle to %s: %s", recording.session_id, exc)
+            self._show_status_message(f"Cannot add the subtitle: {exc}")
+            return False
+        self._record_subtitle_step(recording, (), (segment,), "subtitle added")
+        self._after_subtitles_changed()
+        self._show_status_message(
+            f"Subtitle added: {format_timestamp(segment.start_ms)}-"
+            f"{format_timestamp(segment.end_ms)}; drag its edges to make it longer."
+        )
+        return True
+
+    def delete_subtitle(self, segment: Segment) -> bool:
+        """Delete Subtitle (the narration's context menu, unlocked): no question asked,
+        Ctrl+Z brings it back. True when deleted."""
+        recording = self.recording
+        if recording is None or not self.timeline.narration_unlocked:
+            return False
+        try:
+            recording.apply_segment_edit((segment,), ())
+        except (OSError, ValueError) as exc:
+            log.warning("cannot delete subtitle of %s: %s", recording.session_id, exc)
+            self._show_status_message(f"Cannot delete the subtitle: {exc}")
+            return False
+        self._record_subtitle_step(recording, (segment,), (), "subtitle deleted")
+        self._after_subtitles_changed()
+        self._show_status_message("Subtitle deleted (Ctrl+Z restores it).")
+        return True
+
+    def narration_menu(self, lane: int, time_ms: int | None, segment) -> QMenu:
+        """The context menu of the narration tracks: locked, only Unlock narration
+        track (disabled while the padlock cannot be opened); unlocked, Add New Subtitle
+        (with a time), Delete Subtitle (over a subtitle) and Lock narration track."""
+        menu = QMenu(self)
+        view = self.timeline
+        if not view.narration_unlocked:
+            unlock = menu.addAction(UNLOCK_NARRATION_LABEL)
+            unlock.setEnabled(view.narration_editable)
+            unlock.triggered.connect(lambda: view.set_narration_unlocked(True))
+            return menu
+        if time_ms is not None:
+            add = menu.addAction(ADD_SUBTITLE_LABEL)
+            add.triggered.connect(lambda: self.add_subtitle(lane, time_ms))
+            if segment is not None:
+                delete = menu.addAction(DELETE_SUBTITLE_LABEL)
+                delete.triggered.connect(lambda: self.delete_subtitle(segment))
+            menu.addSeparator()
+        lock = menu.addAction(LOCK_NARRATION_LABEL)
+        lock.triggered.connect(lambda: view.set_narration_unlocked(False))
+        return menu
+
+    def _show_narration_menu(self, lane: int, time_ms, segment, global_pos: QPoint) -> None:
+        menu = self.narration_menu(lane, time_ms, segment)
+        try:
+            menu.exec(global_pos)
+        finally:
+            menu.deleteLater()
+
+    def _on_segment_double_clicked(self, segment) -> None:
+        """A double click on a subtitle: Edit for that subtitle only."""
+        self.edit_subtitle([segment])
+
+    def _inform(self, title: str, text: str) -> None:
+        """An information box (tests override this)."""
+        QMessageBox.information(self, title, text)
+
+    # Subtitle undo / redo ----------------------------------------------------
+
+    @property
+    def subtitle_history(self) -> SubtitleHistory:
+        return self._subtitle_history
+
+    def _record_subtitle_step(self, recording: LoadedRecording, old, new, label: str) -> None:
+        history = self._subtitle_history
+        if history.owner != recording.session_id:
+            history.clear(recording.session_id)
+        history.record(old, new, label)
+
+    def _clear_subtitle_history(self, session_id: str | None = None) -> None:
+        """The transcript changed outside the editor's steps (another recording,
+        Transcribe again, the background transcription): nothing to undo any more."""
+        if session_id is None or self._subtitle_history.owner == session_id:
+            owner = self.recording.session_id if self.recording is not None else None
+            self._subtitle_history.clear(owner)
+
+    def undo_subtitles(self) -> bool:
+        """Ctrl+Z: take back the last subtitle change (only while the narration is
+        unlocked). True when something was undone."""
+        return self._step_subtitles(undo=True)
+
+    def redo_subtitles(self) -> bool:
+        """Ctrl+Y: apply the last undone subtitle change again (only while unlocked)."""
+        return self._step_subtitles(undo=False)
+
+    def _step_subtitles(self, *, undo: bool) -> bool:
+        recording = self.recording
+        word = "undo" if undo else "redo"
+        if recording is None:
+            return False
+        if not self.timeline.narration_unlocked:
+            self._show_status_message(f"Narration is locked: unlock it to {word}.")
+            return False
+        if self.timeline.segment_dragging:
+            return False
+        history = self._subtitle_history
+        if history.owner != recording.session_id:
+            history.clear(recording.session_id)
+        step = history.peek_undo() if undo else history.peek_redo()
+        if step is None:
+            self._show_status_message(f"Nothing to {word}.")
+            return False
+        old, new = (step.new, step.old) if undo else (step.old, step.new)
+        try:
+            recording.apply_segment_edit(old, new)
+        except ValueError as exc:
+            log.warning("cannot %s subtitles of %s: %s", word, recording.session_id, exc)
+            history.clear(recording.session_id)  # the transcript no longer matches
+            self._show_status_message(f"Cannot {word}: {exc}")
+            return False
+        except OSError as exc:
+            log.warning("cannot %s subtitles of %s: %s", word, recording.session_id, exc)
+            self._show_status_message(f"Cannot {word}: {exc}")
+            return False
+        if undo:
+            history.undone()
+        else:
+            history.redone()
+        self._after_subtitles_changed()
+        self._show_status_message(f"{'Undone' if undo else 'Redone'}: {step.label}.")
         return True
 
     def _after_subtitles_changed(self) -> None:
         self._sync_playhead()
         self._update_current_search_match()
+        self.timeline.update()
 
     def _on_narration_lock_toggled(self, unlocked: bool) -> None:
         self._show_status_message(
@@ -2724,6 +2931,7 @@ class EditorWindow(QMainWindow):
             self._show_status_message(f"Cannot delete the narration: {exc}")
             return False
         session_id = recording.session_id
+        self._clear_subtitle_history(session_id)
         self._stop_countdown()
         self._transcription_failed.pop(session_id, None)
         self._transcription_fraction.pop(session_id, None)
@@ -2823,6 +3031,7 @@ class EditorWindow(QMainWindow):
         recording = self._shown(session_id)
         if recording is None:
             return
+        self._clear_subtitle_history(session_id)  # the transcript grew under the steps
         self.timeline.set_transcription(
             "transcribing", self._arrow_ms(recording), self._transcription_eta.get(session_id)
         )

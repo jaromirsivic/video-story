@@ -24,6 +24,7 @@ from video_story.editor.timeline.narration_edit import (
     Magnets,
     Zone,
     apply,
+    free_slot,
     hit_test,
     own_zone,
     validate,
@@ -229,6 +230,31 @@ def test_apply_and_validate():
     assert validate([a, Segment(500, 1500, "x", LOWER_TRACK)]) is None
     with pytest.raises(ValueError):
         apply([a], (b,), (a,))
+
+
+def test_apply_adds_and_deletes():
+    a, b = Segment(0, 1000, "a"), Segment(1500, 2000, "b")
+    added = Segment(1000, 1500, "new", LOWER_TRACK)
+    assert apply([a, b], (), (added,)) == [a, b, added]
+    assert apply([a, b], (a,), ()) == [b]
+    with pytest.raises(ValueError):
+        apply([a], (b,), ())  # not in the transcript
+
+
+def test_free_slot_for_a_new_subtitle():
+    a, b = Segment(1000, 2000, "a"), Segment(4000, 5000, "b")
+    segments = [a, b]
+    assert free_slot([], 0, 3456, 10_000) == (3460, 4460)  # 10 ms steps
+    assert free_slot(segments, 0, 2500, 10_000) == (2500, 3500)
+    assert free_slot(segments, 0, 3600, 10_000) == (3000, 4000)  # moved left to fit
+    assert free_slot(segments, 0, 2000, 10_000) == (2000, 3000)  # at the edge of a
+    assert free_slot(segments, 0, 1500, 10_000) is None  # inside a subtitle
+    assert free_slot([a, Segment(2990, 4000, "c")], 0, 2500, 10_000) is None  # 0.99 s gap
+    assert free_slot(segments, 0, 9800, 10_000) == (9000, 10_000)  # the recording's end
+    assert free_slot(segments, 0, 300, 10_000) == (0, 1000)
+    assert free_slot(segments, LOWER_TRACK, 1500, 10_000) == (1500, 2500)  # other track
+    assert free_slot([Segment(1000, 2000, "  ")], 0, 1500, 10_000) == (1500, 2500)  # no words
+    assert free_slot(segments, 0, 500, 800) is None  # recording shorter than a second
 
 
 # What the agent gets ------------------------------------------------------------------

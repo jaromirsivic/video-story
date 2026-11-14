@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from video_story.core.cursor import CursorPosition
-from video_story.core.timeline import format_timestamp
+from video_story.core.timeline import format_hundredths
 from video_story.host.runner import FrameRef
 from video_story.ui.icons import (
     moon_icon,
@@ -820,7 +820,7 @@ class PreviewPanel(QWidget):
         controls.addWidget(self.theme_button, 0, 2, Qt.AlignmentFlag.AlignRight)
         self._apply_icons()
 
-        self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
+        self.time_label = QLabel("00:00:00.00 / 00:00:00.00")  # hundredths, as In / Out
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.time_label.font()
         font.setFamily("Consolas")
@@ -902,9 +902,7 @@ class PreviewPanel(QWidget):
         self.play_button.setToolTip("Pause (Space)" if playing else "Play (Space)")
 
     def set_time(self, position_ms: int, total_ms: int) -> None:
-        self.time_label.setText(
-            f"{format_timestamp(max(0, position_ms))} / {format_timestamp(max(0, total_ms))}"
-        )
+        self.time_label.setText(f"{format_hundredths(position_ms)} / {format_hundredths(total_ms)}")
 
     def set_subtitle(self, text: str) -> None:
         """Subtitles are always shown (there is no switch to hide them)."""

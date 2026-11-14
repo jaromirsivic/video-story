@@ -62,6 +62,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QHelpEvent,
+    QIcon,
     QImage,
     QMouseEvent,
     QPainter,
@@ -69,6 +70,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPalette,
     QPen,
+    QPixmap,
     QPolygonF,
     QTextLayout,
 )
@@ -249,6 +251,22 @@ def draw_menu_dots(painter: QPainter, box: QRectF, color: QColor) -> None:
     for k in (-1, 0, 1):
         painter.drawEllipse(QPointF(center.x() + k * step, center.y()), radius, radius)
     painter.restore()
+
+
+MENU_DOTS_BOX = HEADER_BUTTON - 6  # the dots of a folder header fill this square
+
+
+def menu_dots_icon(color: QColor, scale: float = 2.0) -> QIcon:
+    """The ``⋯`` of a folder header as an icon (:data:`MENU_DOTS_BOX` logical pixels,
+    drawn at ``scale`` for sharp dots): the same dots on the Folders menu button."""
+    side = max(1, round(MENU_DOTS_BOX * scale))
+    pixmap = QPixmap(side, side)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    draw_menu_dots(painter, QRectF(0, 0, MENU_DOTS_BOX, MENU_DOTS_BOX), QColor(color))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def draw_chevron(painter: QPainter, box: QRectF, color: QColor, collapsed: bool) -> None:

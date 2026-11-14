@@ -55,10 +55,11 @@ again. The view only reports the clicks (:attr:`audio_track_toggled`,
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QContextMenuEvent,
     QFont,
     QMouseEvent,
     QPainter,
@@ -69,13 +70,14 @@ from PySide6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QScrollBar, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QScrollBar, QToolTip, QWidget
 
 from video_story.core.audio_mix import COMPUTER, MICROPHONE
 from video_story.core.timeline import format_timestamp
 from video_story.editor.recording import LoadedRecording
 
 from ..search import normalize_query, text_matches
+from ..theme import PROCESS_GREEN
 from . import narration_edit
 from .model import TimelineModel
 from .narration_edit import Zone
@@ -187,6 +189,7 @@ DARK_COLORS = {
     "transcribing": COLOR_TRANSCRIBING,
     "narration": COLOR_NARRATION,
     "narration_edge": COLOR_NARRATION_EDGE,
+    "lock": COLOR_KEYPOINT,  # the open padlock
 }
 LIGHT_COLORS = {
     "bg": QColor("#e4e4e4"),
@@ -202,6 +205,7 @@ LIGHT_COLORS = {
     "transcribing": COLOR_TRANSCRIBING_LIGHT,
     "narration": QColor("#c3ccd5"),
     "narration_edge": QColor("#98a5b2"),
+    "lock": QColor(PROCESS_GREEN),  # the bright green fades on the light header
 }
 
 TRANSCRIBING_LABEL = "transcribing"
@@ -264,6 +268,10 @@ class TimelineView(QWidget):
     narration_lock_toggled = Signal(bool)  # the padlock was clicked: True = unlocked
     # A subtitle drag ended with a valid change: (old segments, new segments), tuples.
     segment_edit_requested = Signal(object, object)
+    # The right mouse button on the narration: (track, time ms or None over the header,
+    # the subtitle under the pointer or None, global position) - the window shows the menu.
+    narration_menu_requested = Signal(int, object, object, QPoint)
+    segment_double_clicked = Signal(object)  # a double click on a subtitle box: Edit it
 
     def __init__(self, model: TimelineModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -293,6 +301,12 @@ class TimelineView(QWidget):
         self._segment_drag: narration_edit.Drag | None = None
         self._segment_press_x = 0.0
         self._segment_proposal: narration_edit.Proposal | None = None
+        # A click on a subtitle box moves the playhead only once no double click
+        # followed (a double click opens Edit and leaves the playhead where it is).
+        self._pending_click: QPoint | None = None
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._apply_pending_click)
         self.colors = dict(DARK_COLORS)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -311,6 +325,7 @@ class TimelineView(QWidget):
         self._narration_unlocked = False  # every recording opens locked
         self._narration_editable = False
         self._end_segment_drag()
+        self._cancel_pending_click()
         self.thumbnails.clear()
         self.model.set_duration(recording.duration_ms if recording else 0)
         self.model.set_screens(recording.screen_ids if recording else [])
@@ -860,8 +875,17 @@ class TimelineView(QWidget):
             return
         hit = self.segment_hit(pos)
         if hit.editable and self.recording is not None:
+            self._cancel_pending_click()
             self._start_segment_drag(hit, pos.x())
             return
+        if pos.x() >= HEADER_W and self.narration_segment_at(pos) is not None:
+            # Maybe the first click of a double click: the playhead waits (see
+            # _apply_pending_click); moving the mouse scrubs as usual.
+            self._click_timer.stop()
+            self._pending_click = QPoint(pos)
+            self._drag = "pending"
+            return
+        self._cancel_pending_click()
         screen_id = self.track_at(pos)
         if screen_id is not None and self.model.select_screen(screen_id):
             self.screen_selected.emit(screen_id)
@@ -881,6 +905,12 @@ class TimelineView(QWidget):
             self._drag_handle_to(pos.x())
         elif self._drag == "playhead":
             self._move_playhead_to(pos.x())
+        elif self._drag == "pending":
+            press = self._pending_click
+            if press is None or (pos - press).manhattanLength() >= QApplication.startDragDistance():
+                self._pending_click = None
+                self._drag = "playhead"
+                self._move_playhead_to(pos.x())
         else:
             fit = self._on_fit_button(pos)
             if fit is not None:
@@ -1001,6 +1031,64 @@ class TimelineView(QWidget):
                 self.playhead_drag_finished.emit()
             elif drag == "segment":
                 self._finish_segment_drag()
+            elif drag == "pending" and self._pending_click is not None:
+                self._click_timer.start(QApplication.doubleClickInterval())
+
+    @property
+    def click_pending(self) -> bool:
+        """A click on a subtitle waits for a possible second click."""
+        return self._pending_click is not None
+
+    def _apply_pending_click(self) -> None:
+        """No double click followed the click on a subtitle: move the playhead there
+        as a plain click would have."""
+        press, self._pending_click = self._pending_click, None
+        if press is None or self.recording is None:
+            return
+        self._move_playhead_to(press.x())
+        self.playhead_drag_finished.emit()
+
+    def _cancel_pending_click(self) -> None:
+        self._click_timer.stop()
+        self._pending_click = None
+        if self._drag == "pending":
+            self._drag = None
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        """A double click on a subtitle box opens Edit for that subtitle only; the
+        playhead does not move. Elsewhere it is a press (Qt's default)."""
+        pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton and pos.y() < self._canvas_height():
+            segment = None if self._on_lock(pos) else self.narration_segment_at(pos)
+            if segment is not None:
+                self._cancel_pending_click()
+                if self._drag == "segment":
+                    self._end_segment_drag()
+                self._drag = None
+                event.accept()
+                self.segment_double_clicked.emit(segment)
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        """The right mouse button on the narration tracks (or their header): the
+        window shows the narration menu (Unlock / Add / Delete / Lock)."""
+        pos = event.pos()
+        busy = self._drag is not None or self._pan is not None
+        if busy or pos.y() >= self._canvas_height() or not self.narration_rect().contains(pos):
+            event.ignore()
+            return
+        lane = self.narration_lane_at(pos)
+        if lane is None:
+            event.ignore()
+            return
+        if pos.x() < HEADER_W:
+            time_ms, segment = None, None
+        else:
+            time_ms = self._time(pos.x())
+            segment = self.narration_segment_at(pos)
+        event.accept()
+        self.narration_menu_requested.emit(lane, time_ms, segment, event.globalPos())
 
     def focusOutEvent(self, event) -> None:  # noqa: N802
         self.cancel_segment_drag()  # a drag never survives losing the keyboard
@@ -1358,7 +1446,7 @@ class TimelineView(QWidget):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         unlocked = self._narration_unlocked
-        color = QColor(COLOR_KEYPOINT if unlocked else self.colors["text_dim"])
+        color = QColor(self.colors["lock"] if unlocked else self.colors["text_dim"])
         if not self._narration_editable:
             color.setAlpha(110)
         body = QRectF(rect.x(), rect.y() + rect.height() * 0.45, rect.width(),

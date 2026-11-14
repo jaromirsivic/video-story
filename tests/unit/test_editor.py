@@ -25,7 +25,6 @@ from video_story.core.manifest import AudioInfo, Manifest, write_manifest  # noq
 from video_story.core.naming import frame_filename, sidecar_filename  # noqa: E402
 from video_story.core.screens import RawScreen, assign_screen_ids  # noqa: E402
 from video_story.core.session import SessionPaths  # noqa: E402
-from video_story.core.timeline import format_timestamp  # noqa: E402
 from video_story.core.transcript import Segment, Transcript, write_transcript  # noqa: E402
 from video_story.editor import player as player_mod  # noqa: E402
 from video_story.editor.preview import IMAGE_CACHE_SIZE  # noqa: E402
@@ -462,7 +461,7 @@ def test_window_loads_newest_recording_and_workers(editor, qtbot):
     assert editor.model.screens == ["screen1", "screen2"]
     assert editor.model.selected_screen == "screen1"
     assert (editor.model.in_ms, editor.model.out_ms) == (0, DURATION_MS)
-    assert editor.preview.time_label.text() == "00:00:00.000 / 00:00:02.500"
+    assert editor.preview.time_label.text() == "00:00:00.00 / 00:00:02.50"
     assert NEWEST in editor.status_label.text() and "320x200" in editor.status_label.text()
     assert editor.in_edit.text() == "00:00:00.00" and editor.out_edit.text() == "00:00:02.50"
 
@@ -580,7 +579,7 @@ def test_subtitle_label_follows_playhead(editor):
     editor.model.set_playhead(500)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == "hello world"
-    assert editor.preview.time_label.text().startswith("00:00:00.500 /")
+    assert editor.preview.time_label.text().startswith("00:00:00.50 /")
     editor.model.set_playhead(1200)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == ""
@@ -753,7 +752,7 @@ def test_playhead_drag_while_playing_scrubs_and_resumes_once(editor, qtbot, no_s
         _mouse_move(view, QPoint(x0 + dx, y))
         assert editor.model.playhead_ms == view._time(x0 + dx)
         assert editor.preview.time_label.text().startswith(
-            f"{format_timestamp(editor.model.playhead_ms)} /"
+            f"{format_crop_time(editor.model.playhead_ms)} /"
         )
     assert len(plays) == 1 and not editor.player.playing
     qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(x0 + 20, y))

@@ -7,16 +7,19 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtGui import QColor, QPalette  # noqa: E402
+import pytest  # noqa: E402
+from PySide6.QtCore import QRectF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette  # noqa: E402
 from PySide6.QtWidgets import QLabel, QWidget  # noqa: E402
 
 from video_story.editor.preview import PreviewPanel  # noqa: E402
 from video_story.editor.separators import (  # noqa: E402
     HANDLE_LINE_GAP,
     HANDLE_WIDTH,
+    SEPARATOR_LINE_HEIGHT,
     SeparatorLine,
     SeparatorSplitter,
+    line_offsets,
     splitter_line_color,
 )
 
@@ -69,3 +72,47 @@ def test_splitter_handle_paints_two_lines_4_px_apart(qtbot):
     image = handle.grab().toImage()
     rows = [y for y in range(image.height()) if image.pixelColor(100, y) == QColor("#A0A0A0")]
     assert len(rows) == 2 and rows[1] - rows[0] == HANDLE_LINE_GAP == 4
+
+
+@pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5, 1.75, 2.0])
+@pytest.mark.parametrize("origin", range(0, 9))
+def test_handle_lines_land_on_whole_physical_pixels(dpr: float, origin: int):
+    """With a fractional display scale both lines stay one physical pixel each, apart
+    (the second one vanished at some splitter positions at 125 %)."""
+    offsets = line_offsets(origin, HANDLE_WIDTH, dpr, 2)
+    rows = [(origin + offset) * dpr for offset in offsets]
+    assert all(abs(row - round(row)) < 1e-6 for row in rows)
+    first, second = (round(row) for row in rows)
+    assert second - first == max(2, round(HANDLE_LINE_GAP * dpr))
+    assert origin * dpr <= first + 1e-6 and second + 1 <= (origin + HANDLE_WIDTH) * dpr + 1e-6
+    # Painted where Qt puts a widget at ``origin``: exactly two separate physical rows.
+    image = QImage(40, int(40 * dpr), QImage.Format.Format_ARGB32)
+    image.setDevicePixelRatio(dpr)
+    image.fill(QColor("#F0F0F0"))
+    painter = QPainter(image)
+    painter.translate(0, origin)
+    for offset in offsets:
+        painter.fillRect(QRectF(0, offset, 40, 1.0 / dpr), QColor("#A0A0A0"))
+    painter.end()
+    painted = [y for y in range(image.height()) if image.pixelColor(20, y) == QColor("#A0A0A0")]
+    assert painted == [first, second]
+
+
+def test_a_single_line_stays_in_the_middle():
+    assert line_offsets(0, SEPARATOR_LINE_HEIGHT, 1.0, 1) == [1.0]
+    rows = [(5 + o) * 1.25 for o in line_offsets(5, SEPARATOR_LINE_HEIGHT, 1.25, 1)]
+    assert rows == [round(rows[0])]
+
+
+def test_moving_the_splitter_repaints_the_handle(qtbot, monkeypatch):
+    splitter = SeparatorSplitter(Qt.Orientation.Vertical)
+    qtbot.addWidget(splitter)
+    splitter.addWidget(QLabel("top"))
+    splitter.addWidget(QWidget())
+    splitter.resize(200, 200)
+    splitter.show()
+    calls: list[int] = []
+    handle = splitter.handle(1)
+    monkeypatch.setattr(handle, "update", lambda *a: calls.append(1))
+    splitter.moveSplitter(120, 1)
+    assert calls

@@ -39,6 +39,7 @@ FULL_ZONES_PX = 48  # boxes this wide or wider have yellow, green (and orange) z
 MIN_DURATION_MS = 500  # shortest subtitle the user can make
 STEP_MS = 10  # subtitles move in hundredths of a second
 SNAP_PX = 8  # the magnet (as for the crop handles)
+NEW_SUBTITLE_MS = 1000  # Add New Subtitle: the length of the new subtitle
 
 TRACKS = (UPPER_TRACK, LOWER_TRACK)
 
@@ -278,14 +279,52 @@ class Drag:
 
 
 def apply(segments: list[Segment], old: tuple[Segment, ...], new: tuple[Segment, ...]):
-    """``segments`` with ``old`` replaced by ``new`` (same order as given)."""
-    if len(old) != len(new):
-        raise ValueError("old and new differ in length")
-    mapping = dict(zip(old, new, strict=False))
+    """``segments`` with ``old`` replaced by ``new``.
+
+    Of equal length, ``old[i]`` becomes ``new[i]`` in its place (a drag, an Edit).
+    Otherwise every subtitle of ``old`` is removed and every one of ``new`` added at
+    the end: ``old`` empty adds a subtitle, ``new`` empty deletes one (the caller sorts).
+    """
     missing = [s for s in old if s not in segments]
     if missing:
         raise ValueError("a subtitle to change is not part of the transcript")
-    return [mapping.get(s, s) for s in segments]
+    if len(old) == len(new):
+        mapping = dict(zip(old, new, strict=False))
+        return [mapping.get(s, s) for s in segments]
+    remaining = list(segments)
+    for segment in old:
+        remaining.remove(segment)  # one occurrence per subtitle of ``old``
+    return remaining + list(new)
+
+
+def free_slot(
+    segments: list[Segment],
+    track: int,
+    at_ms: float,
+    duration_ms: int,
+    length_ms: int = NEW_SUBTITLE_MS,
+) -> tuple[int, int] | None:
+    """Where Add New Subtitle puts a subtitle of ``length_ms`` for a click at ``at_ms``
+    on ``track``: starting at the click (rounded to :data:`STEP_MS`), moved left as far
+    as needed to end inside the free gap around the click (and the recording).
+    ``None`` when the click lies on a subtitle or the gap is shorter than
+    ``length_ms``."""
+    duration_ms = max(0, int(duration_ms))
+    if at_ms < 0 or at_ms > duration_ms or length_ms <= 0:
+        return None
+    gap_start, gap_end = 0, duration_ms
+    for segment in track_segments(segments, track):
+        if segment.start_ms < at_ms < segment.end_ms:
+            return None  # inside a subtitle
+        if segment.end_ms <= at_ms:
+            gap_start = max(gap_start, segment.end_ms)
+        elif segment.start_ms >= at_ms:
+            gap_end = min(gap_end, segment.start_ms)
+    if gap_end - gap_start < length_ms:
+        return None
+    start = max(gap_start, quantize(at_ms))
+    start = min(start, gap_end - length_ms)
+    return start, start + length_ms
 
 
 def validate(segments: list[Segment]) -> str | None:
@@ -304,6 +343,7 @@ __all__ = [
     "FULL_ZONES_PX",
     "MIN_DURATION_MS",
     "MIN_INTERACTIVE_PX",
+    "NEW_SUBTITLE_MS",
     "ROLL_PX",
     "SNAP_PX",
     "STEP_MS",
@@ -313,6 +353,7 @@ __all__ = [
     "Proposal",
     "Zone",
     "apply",
+    "free_slot",
     "has_text",
     "hit_test",
     "own_zone",

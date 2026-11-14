@@ -22,6 +22,12 @@ def format_timestamp(ms: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
+def format_hundredths(ms: int) -> str:
+    """``HH:MM:SS.cc``: :func:`format_timestamp` with the thousandths cut off (not
+    rounded) - the editor's In, Out, length and the time under the player."""
+    return format_timestamp(max(0, int(ms)))[:-1]
+
+
 def parse_timestamp(text: str) -> int:
     """Parse ``HH:MM:SS.mmm`` back into milliseconds."""
     try:
@@ -140,4 +146,4 @@ class RecordingClock:
         return (self._start_ns + self._paused_ns + elapsed_ns) / 1e9
 
 
-__all__ = ["RecordingClock", "format_timestamp", "parse_timestamp"]
+__all__ = ["RecordingClock", "format_hundredths", "format_timestamp", "parse_timestamp"]
