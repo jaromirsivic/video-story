@@ -1,13 +1,18 @@
 """Settings dialog: items in the order required by the specification, followed by the
-retention setting and the recording folder actions (Open Folder, Delete All)."""
+archiving setting and the recording folder action (Open Folder)."""
 
 from __future__ import annotations
 
 import logging
+import sys
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -22,14 +27,16 @@ from PySide6.QtWidgets import (
 )
 
 from video_story.core.config import (
+    ARCHIVE_AFTER_MAX_DAYS,
+    ARCHIVE_AFTER_MIN_DAYS,
     AUTO_STOP_MAX_MINUTES,
     AUTO_STOP_MIN_MINUTES,
     CAPTURE_INTERVAL_MAX_MS,
     CAPTURE_INTERVAL_MIN_MS,
+    DRAWING_GRID_MAX_PX,
+    DRAWING_GRID_MIN_PX,
     JPEG_QUALITY_MAX,
     JPEG_QUALITY_MIN,
-    RETENTION_MAX_DAYS,
-    RETENTION_MIN_DAYS,
     Config,
     ConfigError,
     config_from_dict,
@@ -38,14 +45,30 @@ from video_story.core.config import (
 
 log = logging.getLogger(__name__)
 
+ARCHIVE_NEVER_TEXT = "Never"  # Archive After at 0: nothing is archived automatically
+
+LIVE_TRANSCRIPTION_CHOICES = (
+    ("off", "Off – transcribe in the editor"),
+    ("light", "Light – low CPU use (recommended)"),
+    ("faster", "Faster – more CPU"),
+)
+LIVE_TRANSCRIPTION_TOOLTIP = (
+    "Transcribes your speech while you record, so the editor has less left to do. Light "
+    "uses spare CPU only; Faster uses more CPU but still leaves room for your work. The "
+    "speech-to-text runs on this computer."
+)
+
 SYSTEM_DEFAULT_LABEL = "System default input"
 
 
 class SettingsDialog(QDialog):
     """Edit ``config.json``. ``result_config`` holds the saved configuration on accept.
 
-    ``current_session_id`` is the session of the open control window; its work folder
-    is never touched by **Delete All Recordings**.
+    ``current_session_id`` is the session of the open control window. ``config_file``
+    is the file to save
+    to (default: ``config.json`` in the state folder). ``save_guard(config)`` returns a context
+    manager entered around the save: the control window uses it to move its session to
+    a newly chosen Recording Folder; an exception from it keeps the dialog open.
     """
 
     def __init__(
@@ -53,6 +76,8 @@ class SettingsDialog(QDialog):
         config: Config,
         parent: QWidget | None = None,
         current_session_id: str | None = None,
+        config_file: Path | None = None,
+        save_guard: Callable[[Config], AbstractContextManager[None]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Video Story Settings")
@@ -60,6 +85,8 @@ class SettingsDialog(QDialog):
         self.setModal(True)
         self._config = config
         self._current_session_id = current_session_id
+        self._config_file = config_file
+        self._save_guard = save_guard
         self.result_config: Config | None = None
 
         form = QFormLayout(self)
@@ -105,6 +132,48 @@ class SettingsDialog(QDialog):
         self._populate_audio_devices(config.audio_input)
         form.addRow("Audio Input", self.audio_combo)
 
+        # 4b. Computer Audio: also record what this computer plays
+        self.computer_audio_check = QCheckBox("Record computer audio (off: Mute PC at the start)")
+        self.computer_audio_check.setChecked(config.computer_audio)
+        self.computer_audio_check.setToolTip(
+            "Also record what this computer plays (a video in the background, a call) as a "
+            "second audio track. The editor mixes it with the microphone; either track can "
+            "be switched off there. Unticked, every recording starts with Mute PC pressed: "
+            "silence is recorded until you press Mute PC (Ctrl+Alt+L) again. Windows only "
+            "for now."
+        )
+        if sys.platform != "win32":
+            self.computer_audio_check.setEnabled(False)
+        form.addRow("Computer Audio", self.computer_audio_check)
+
+        # 4c. Mouse: clicks, drags, wheel and what was under the mouse
+        self.mouse_check = QCheckBox("Record mouse actions")
+        self.mouse_check.setChecked(config.mouse_actions)
+        self.mouse_check.setToolTip(
+            "Record clicks, double clicks, drags, the wheel and two-finger touchpad gestures, "
+            "with the window titles, the element under the mouse and its content (at most "
+            "4096 characters; never the content of password fields). The agent reads them "
+            "like the screenshots and the clipboard. Windows only for now."
+        )
+        if sys.platform != "win32":
+            self.mouse_check.setEnabled(False)
+        form.addRow("Mouse", self.mouse_check)
+
+        # 4d. Live Transcription: transcribe while recording
+        self.live_combo = QComboBox()
+        for value, label in LIVE_TRANSCRIPTION_CHOICES:
+            self.live_combo.addItem(label, value)
+        self.live_combo.setCurrentIndex(max(0, self.live_combo.findData(config.live_transcription)))
+        self.live_combo.setToolTip(LIVE_TRANSCRIPTION_TOOLTIP)
+        if config.whisper_backend != "pywhispercpp":
+            self.live_combo.setCurrentIndex(0)
+            self.live_combo.setEnabled(False)
+            self.live_combo.setToolTip(
+                "Transcribing while recording needs the built-in whisper backend "
+                '(whisper_backend "pywhispercpp"); with whisper-cli the editor transcribes.'
+            )
+        form.addRow("Live Transcription", self.live_combo)
+
         # 5. Auto Stop Recording
         self.auto_stop_spin = QSpinBox()
         self.auto_stop_spin.setRange(AUTO_STOP_MIN_MINUTES, AUTO_STOP_MAX_MINUTES)
@@ -115,26 +184,39 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Auto Stop Recording", self.auto_stop_spin)
 
-        # 6. Keep Recordings (retention)
-        self.retention_spin = QSpinBox()
-        self.retention_spin.setRange(RETENTION_MIN_DAYS, RETENTION_MAX_DAYS)
-        self.retention_spin.setSuffix(" days")
-        self.retention_spin.setValue(config.retention_days)
-        self.retention_spin.setToolTip(
-            "Recordings older than this are deleted automatically when Video Story starts"
+        # 6. Archive After: older recordings become one MP4 per screen; the lowest value
+        # (0) reads "Never"
+        self.archive_after_spin = QSpinBox()
+        self.archive_after_spin.setRange(ARCHIVE_AFTER_MIN_DAYS, ARCHIVE_AFTER_MAX_DAYS)
+        self.archive_after_spin.setSuffix(" days")
+        self.archive_after_spin.setSpecialValueText(ARCHIVE_NEVER_TEXT)
+        self.archive_after_spin.setValue(config.archive_after_days)
+        self.archive_after_spin.setToolTip(
+            "Recordings older than this are archived (one MP4 video per screen and one AAC "
+            "file per audio track; the frames and the WAV audio are deleted) when the "
+            "Video Story Editor starts. No recording is deleted automatically. "
+            f"{ARCHIVE_AFTER_MIN_DAYS} ({ARCHIVE_NEVER_TEXT}): old recordings are not "
+            "archived by themselves; Archive Video in the editor still works."
         )
-        form.addRow("Keep Recordings", self.retention_spin)
+        form.addRow("Archive After", self.archive_after_spin)
 
-        # 7. Recordings: open the folder, delete everything
+        # 7. Drawing Grid: Ctrl while drawing snaps to it (shown on the sketch canvas)
+        self.grid_spin = QSpinBox()
+        self.grid_spin.setRange(DRAWING_GRID_MIN_PX, DRAWING_GRID_MAX_PX)
+        self.grid_spin.setSuffix(" px")
+        self.grid_spin.setValue(config.drawing_grid_px)
+        self.grid_spin.setToolTip(
+            "Holding Ctrl while drawing snaps rectangles, ellipses, lines and arrows to a "
+            "grid with this spacing; the grid is shown on the white Sketch canvas"
+        )
+        form.addRow("Drawing Grid", self.grid_spin)
+
+        # 8. Recordings: open the folder (recordings are deleted in the editor)
         self.open_folder_button = QPushButton("Open Folder")
         self.open_folder_button.setToolTip("Open the recording folder in the file manager")
         self.open_folder_button.clicked.connect(self._open_folder)
-        self.delete_all_button = QPushButton("Delete All Recordings...")
-        self.delete_all_button.setToolTip("Delete every stored recording (asks first)")
-        self.delete_all_button.clicked.connect(self._delete_all)
         actions_row = QHBoxLayout()
         actions_row.addWidget(self.open_folder_button)
-        actions_row.addWidget(self.delete_all_button)
         actions_row.addStretch(1)
         form.addRow("Recordings", actions_row)
 
@@ -198,34 +280,12 @@ class SettingsDialog(QDialog):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.warning(self, "Cannot open folder", f"No file manager opened {folder}.")
 
-    def _delete_all(self) -> None:
-        """Delete every recording in the configured folder after confirmation."""
-        from video_story.host.retention import delete_all_recordings, summarize_recordings
-
-        folder = self._config.recording_folder
-        summary = summarize_recordings(folder, exclude_session_id=self._current_session_id)
-        if summary.count == 0:
-            QMessageBox.information(self, "Delete All Recordings", f"No recordings in {folder}.")
-            return
-        answer = QMessageBox.question(
-            self,
-            "Delete All Recordings",
-            f"Delete all {summary.count} recording(s) ({summary.total_text}) in\n{folder}?\n\n"
-            "This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        deleted = delete_all_recordings(folder, exclude_session_id=self._current_session_id)
-        QMessageBox.information(
-            self, "Delete All Recordings", f"Deleted {len(deleted)} recording(s)."
-        )
-
     # Values -------------------------------------------------------------------
 
     def values(self) -> dict[str, object]:
         data = self._config.to_json_dict()
+        if self.live_combo.isEnabled():
+            data["live_transcription"] = self.live_combo.currentData()
         data.update(
             {
                 "recording_folder": self.folder_edit.text().strip(),
@@ -233,8 +293,11 @@ class SettingsDialog(QDialog):
                 "image_format": self.format_combo.currentData(),
                 "jpeg_quality": self.quality_spin.value(),
                 "audio_input": self.audio_combo.currentData(),
+                "computer_audio": self.computer_audio_check.isChecked(),
+                "mouse_actions": self.mouse_check.isChecked(),
                 "auto_stop_minutes": self.auto_stop_spin.value(),
-                "retention_days": self.retention_spin.value(),
+                "archive_after_days": self.archive_after_spin.value(),
+                "drawing_grid_px": self.grid_spin.value(),
             }
         )
         return data
@@ -243,11 +306,13 @@ class SettingsDialog(QDialog):
         try:
             config = config_from_dict(self.values())
             config.recording_folder.mkdir(parents=True, exist_ok=True)
-            path = save_config(config)
+            guard = self._save_guard(config) if self._save_guard else nullcontext()
+            with guard:
+                path = save_config(config, self._config_file)
         except ConfigError as exc:
             QMessageBox.warning(self, "Invalid setting", str(exc))
             return
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:  # RuntimeError: the save guard refused
             QMessageBox.warning(self, "Cannot save settings", f"{exc}")
             return
         log.info("settings saved to %s", path)
@@ -255,4 +320,4 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
-__all__ = ["SettingsDialog"]
+__all__ = ["ARCHIVE_NEVER_TEXT", "SettingsDialog"]

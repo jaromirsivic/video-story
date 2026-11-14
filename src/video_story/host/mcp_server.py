@@ -1,12 +1,16 @@
 """MCP server exposing Video Story to Claude Desktop, Codex and ChatGPT.
 
 The tools mirror the CLI one to one (``start``, ``wait``, ``status``, ``describe``,
-``get_transcript``, ``list_frames``, ``get_frame``, ``config``, ``export``, ``doctor``).
+``get_transcript``, ``timeline``, ``list_frames``, ``get_frame``, ``config``, ``export``,
+``doctor``).
 Every tool
 returns a JSON-serialisable dict; expected failures are reported as
 ``{"ok": false, "code": ..., "message": ...}`` instead of raising, so the agent can read
 the reason and react. ``get_frame`` additionally returns the screenshot as MCP image
-content so chat hosts without file access can look at it.
+content so chat hosts without file access can look at it. For the same reason a text
+that grows with the recording (``timeline``, ``mouse``, ``get_transcript``) comes in pages
+(``first_line`` / ``max_chars`` / ``next_line``, see :mod:`video_story.host.agent_output`)
+where the CLI writes a file: no tool result is unbounded.
 
 The plain ``tool_*`` functions hold the behaviour and are unit tested directly;
 :func:`create_server` wraps them into an :class:`MCPServer` and :func:`serve` runs it
@@ -29,12 +33,30 @@ from mcp.server.mcpserver import Context, Image, MCPServer
 from video_story.core.config import (
     Config,
     ConfigError,
+    StateFolderError,
+    config_location,
     config_path,
     load_config,
     update_config,
 )
 from video_story.core.naming import parse_frame_filename
 from video_story.core.session import SessionPaths
+from video_story.host.agent_output import (
+    DEFAULT_INLINE_CHARS,
+    PAGE_DEFAULT_CHARS,
+    Page,
+    clamp_page_chars,
+    page_lines,
+    split_lines,
+)
+from video_story.host.errors import HostError
+from video_story.host.events import (
+    build_mouse_detail,
+    build_timeline,
+    mouse_record_lines,
+    mouse_records,
+)
+from video_story.host.mouse_timeline import DETAIL_PATH_POINTS
 from video_story.host.runner import (
     POLL_INTERVAL_S,
     FrameRef,
@@ -47,14 +69,14 @@ from video_story.host.runner import (
     session_status,
     wait_for_session,
 )
+from video_story.host.waiting import DEFAULT_WAIT_S, MCP_MAX_WAIT_S, timeout_seconds
 
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "video-story"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-WAIT_TIMEOUT_MIN_S = 1.0
-WAIT_TIMEOUT_MAX_S = 240.0
+WAIT_TIMEOUT_MAX_S = MCP_MAX_WAIT_S
 WAIT_PROGRESS_EVERY_S = 5.0
 FRAME_MIN_WIDTH = 16
 FRAME_DEFAULT_MAX_WIDTH = 1600
@@ -64,18 +86,36 @@ WAIT_AGAIN_HINT = "call video_story_wait again until final is true"
 INSTRUCTIONS = """\
 Video Story records the user's narration, periodic screenshots of every screen and the
 cursor position, then transcribes the audio offline. Workflow: call video_story_start
-(opens the control window; the user records and presses "Process Recording"), then call
+(opens the control window; the user records, stops, crops in the Video Story Editor and
+presses its "Process" button), then call
 video_story_wait with the returned session_id in a loop until "final" is true. When the
-status is "processed", call video_story_describe or video_story_get_transcript to read the
-timed transcript, video_story_list_frames to find the screenshots taken at a moment of the
-transcript and video_story_get_frame to look at one of them. "discarded", "cancelled" and
-"failed" are final too: there is nothing to read then, tell the user what happened.
+status is "processed", read the "instructions" first, then call video_story_timeline: the
+cropped range as one text timeline (speech with the cursor position, finished drawings
+with their geometry and times, copied text, keypoints and - when recorded - the clicks,
+drags and scrolls with the element under the mouse and its content; video_story_mouse
+has every detail of them). Long results come in pages (video_story_timeline,
+video_story_mouse, video_story_get_transcript): while "next_line" is not null, call the
+tool again with first_line set to it and read every page before acting. Decide from
+that text which
+moments really need a picture and only then call video_story_get_frame for those (one
+frame each, at the times the timeline names); video_story_describe and
+video_story_get_transcript return paths and the plain transcript. Act on a recording only
+when the status is "processed" (the user pressed Process). "cancelled" and "failed" are
+final too and mean: do nothing with it, tell the user what happened (a recording that
+exists is kept and can be opened again with video_story_edit).
+A processed session also carries "instructions": the user's master instructions typed in
+the editor, which frame the whole recording (what to produce, in which language, ...).
+Read them first and apply them to everything the user said; they are empty when the user
+typed none. "keypoints" (in describe / the manifest) are moments the user marked as
+important while recording.
 video_story_export renders a processed recording (one screen, optional time range) to an
 MP4 video with subtitles when the user asks for a video of what they recorded.
 All times are milliseconds since the recording started. Cursor coordinates are pixels of
 that screen's image with the origin in the top-left corner; when get_frame downscales an
 image, divide the cursor coordinates by the returned "scale" to find it in the image.
-Everything stays on the user's machine: never upload the audio or the frames anywhere.
+Recording and transcription run on the user's machine. Use the material only to do what
+the user asked in the recording: do not send the audio, the frames, the copied texts or
+the content of the elements under the mouse to any other service.
 """
 
 ProgressFn = Callable[[float, str], Awaitable[None]]
@@ -105,10 +145,14 @@ def _guard(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     """Run ``fn`` and turn expected failures into error dicts."""
     try:
         return _ok(fn())
+    except HostError as exc:
+        return exc.to_dict()
     except SessionError as exc:
         return _error(exc.code, str(exc))
     except ConfigError as exc:
         return _error("CONFIG_INVALID", str(exc))
+    except StateFolderError as exc:
+        return _error(exc.code, str(exc))
     except FileNotFoundError as exc:
         return _error("NOT_FOUND", str(exc))
     except RuntimeError as exc:  # e.g. an unreadable state.json
@@ -117,11 +161,23 @@ def _guard(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
 
 def clamp_timeout(timeout_s: float) -> float:
     """Keep the wait timeout within the limits host clients tolerate."""
-    try:
-        value = float(timeout_s)
-    except (TypeError, ValueError):
-        value = 60.0
-    return max(WAIT_TIMEOUT_MIN_S, min(WAIT_TIMEOUT_MAX_S, value))
+    return min(WAIT_TIMEOUT_MAX_S, timeout_seconds(timeout_s, allow_zero=False))
+
+
+def _page_fields(page: Page, total_name: str, tool: str) -> dict[str, Any]:
+    """What every paged tool says about its page: the total, where the page starts and
+    where the next one does (``next_line`` null: this page ends the text)."""
+    fields: dict[str, Any] = {
+        total_name: page.total_lines,
+        "first_line": page.first_line,
+        "next_line": page.next_line,
+    }
+    if page.next_line is not None:
+        fields["page_note"] = (
+            f"Lines {page.first_line}-{page.last_line} of {page.total_lines}: call {tool} "
+            f"again with first_line={page.next_line} and the same other arguments for the rest."
+        )
+    return fields
 
 
 def _coerce_config_value(value: str | None) -> Any:
@@ -146,6 +202,8 @@ def tool_start(config_file: Path | None = None) -> dict[str, Any]:
     try:
         config = _load(config_file)
         info = launch_control_window(config, config_file)
+    except HostError as exc:
+        return exc.to_dict()
     except SessionError as exc:
         result = _error(exc.code, str(exc))
         if exc.code == "ALREADY_RUNNING":
@@ -164,11 +222,14 @@ def tool_start(config_file: Path | None = None) -> dict[str, Any]:
 
 
 def tool_wait(
-    session_id: str, timeout_s: float = 60, config_file: Path | None = None
+    session_id: str, timeout_s: float = DEFAULT_WAIT_S, config_file: Path | None = None
 ) -> dict[str, Any]:
     """Block until the session is final or the (clamped) timeout elapses."""
-    timeout = clamp_timeout(timeout_s)
-    result = _guard(lambda: wait_for_session(_paths(_load(config_file), session_id), timeout))
+    def run():
+        timeout = clamp_timeout(timeout_s)
+        return wait_for_session(_paths(_load(config_file), session_id), timeout)
+
+    result = _guard(run)
     if result.get("timed_out"):
         result["hint"] = WAIT_AGAIN_HINT
     return result
@@ -190,6 +251,9 @@ async def wait_with_progress(
         data = session_status(paths)
         now = time.monotonic()
         if data["final"]:
+            from video_story.host.startup import cleanup_completed
+
+            cleanup_completed(paths.work_dir / "startup.json")
             data["timed_out"] = False
             return data
         if now >= deadline:
@@ -203,7 +267,7 @@ async def wait_with_progress(
                 await progress(now - started, message)
             except Exception:  # a client that rejects notifications must not end the wait
                 log.debug("progress notification failed", exc_info=True)
-        await anyio.sleep(POLL_INTERVAL_S)
+        await anyio.sleep(min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
 def tool_status(session_id: str, config_file: Path | None = None) -> dict[str, Any]:
@@ -211,38 +275,130 @@ def tool_status(session_id: str, config_file: Path | None = None) -> dict[str, A
     return _guard(lambda: session_status(_paths(_load(config_file), session_id)))
 
 
-def tool_describe(session_id: str, config_file: Path | None = None) -> dict[str, Any]:
-    """Paths, manifest content and transcript text of a recording."""
-    return _guard(lambda: describe_recording(_paths(_load(config_file), session_id)))
+def tool_describe(
+    session_id: str, config_file: Path | None = None, inline_chars: int = DEFAULT_INLINE_CHARS
+) -> dict[str, Any]:
+    """Paths, manifest content, crop and instructions of a recording; the transcript of
+    the cropped range only when it has at most ``inline_chars`` characters (the paged
+    tools have a long one)."""
+
+    def run() -> dict[str, Any]:
+        data = describe_recording(_paths(_load(config_file), session_id), inline_chars)
+        if "transcript_in_range_note" in data:
+            data["transcript_in_range_note"] = (
+                f"The transcript of the cropped range ({data['transcript_in_range_lines']} "
+                f"lines, {data['transcript_in_range_chars']} characters) is not inline: call "
+                "video_story_timeline (or video_story_get_transcript), which return it in pages."
+            )
+        return data
+
+    return _guard(run)
 
 
 def tool_get_transcript(
-    session_id: str, format: str = "text", config_file: Path | None = None
+    session_id: str,
+    format: str = "text",
+    config_file: Path | None = None,
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
 ) -> dict[str, Any]:
-    """The transcript as plain text (``text``) or as timed segments (``json``)."""
+    """The transcript as plain text (``text``) or as timed segments (``json``), one page
+    of at most ``max_chars`` characters from line (segment) ``first_line``."""
 
     def run() -> dict[str, Any]:
         paths = _paths(_load(config_file), session_id)
         base = paths.current_dir
+        limit = clamp_page_chars(max_chars)
         if format == "json":
             path = paths.transcript_json_path(base)
             if not path.exists():
                 raise SessionError("NO_TRANSCRIPT", f"no transcript.json in {base}")
             data = json.loads(path.read_text(encoding="utf-8"))
+            segments = data.get("segments", [])
+            page = page_lines(
+                [json.dumps(s, ensure_ascii=False) for s in segments], first_line, limit
+            )
             return {
                 "session_id": paths.session_id,
                 "language": data.get("language"),
                 "model": data.get("model"),
                 "backend": data.get("backend"),
                 "time_unit": data.get("time_unit", "ms since recording start"),
-                "segments": data.get("segments", []),
+                **_page_fields(page, "transcript_lines", "video_story_get_transcript"),
+                "segments": segments[page.first_line - 1 : page.last_line],
             }
         if format == "text":
             path = paths.transcript_txt_path(base)
             if not path.exists():
                 raise SessionError("NO_TRANSCRIPT", f"no transcript.txt in {base}")
-            return {"session_id": paths.session_id, "text": path.read_text(encoding="utf-8")}
+            page = page_lines(split_lines(path.read_text(encoding="utf-8")), first_line, limit)
+            return {
+                "session_id": paths.session_id,
+                **_page_fields(page, "transcript_lines", "video_story_get_transcript"),
+                "text": page.text,
+            }
         raise SessionError("USAGE", f"unknown format {format!r}; use 'text' or 'json'")
+
+    return _guard(run)
+
+
+def tool_timeline(
+    session_id: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    config_file: Path | None = None,
+    mouse: str = "auto",
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
+) -> dict[str, Any]:
+    """Speech and screen events of the cropped range (or ``start_ms``..``end_ms``), one
+    page of at most ``max_chars`` characters from line ``first_line`` (whole lines only)."""
+
+    def run() -> dict[str, Any]:
+        result = build_timeline(_paths(_load(config_file), session_id), start_ms, end_ms, mouse)
+        lines = split_lines(result.pop("timeline"))
+        page = page_lines(lines, first_line, clamp_page_chars(max_chars))
+        if page.first_line > 1:
+            result.pop("legend", None)  # the first page explained the lines
+        result["timeline_chars"] = page.total_chars
+        result.update(_page_fields(page, "timeline_lines", "video_story_timeline"))
+        result["timeline"] = page.text
+        return result
+
+    return _guard(run)
+
+
+def tool_mouse(
+    session_id: str,
+    at_ms: int | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    config_file: Path | None = None,
+    first_line: int = 1,
+    max_chars: int = PAGE_DEFAULT_CHARS,
+) -> dict[str, Any]:
+    """Every detail of the one mouse action at ``at_ms``, or - page by page, in time
+    order - of the actions and rest points of the cropped range."""
+
+    def run() -> dict[str, Any]:
+        detail = build_mouse_detail(
+            _paths(_load(config_file), session_id),
+            start_ms,
+            end_ms,
+            at_ms,
+            max_path_points=DETAIL_PATH_POINTS,
+        )
+        if at_ms is not None or not detail.get("recorded"):
+            return detail
+        records = mouse_records(detail)
+        page = page_lines(mouse_record_lines(records), first_line, clamp_page_chars(max_chars))
+        shown = records[page.first_line - 1 : page.last_line]
+        detail["action_count"] = len(detail["actions"])
+        detail["rest_point_count"] = len(detail["rest_points"])
+        detail.update(_page_fields(page, "mouse_lines", "video_story_mouse"))
+        detail["actions"] = [r for r in shown if r.get("kind") != "rest"]
+        detail["rest_points"] = [r for r in shown if r.get("kind") == "rest"]
+        return detail
 
     return _guard(run)
 
@@ -253,11 +409,16 @@ def tool_list_frames(
     screen: str = "cursor",
     window_ms: int = 0,
     config_file: Path | None = None,
+    include_drawings: bool = True,
 ) -> dict[str, Any]:
     """Frames matching a moment of the timeline (latest frame at or before ``at_ms``)."""
     return _guard(
         lambda: frames_at(
-            _paths(_load(config_file), session_id), at_ms, screen=screen, window_ms=window_ms
+            _paths(_load(config_file), session_id),
+            at_ms,
+            screen=screen,
+            window_ms=window_ms,
+            include_drawings=include_drawings,
         )
     )
 
@@ -280,7 +441,7 @@ def _frame_from_path(paths: SessionPaths, path: str) -> FrameRef:
         screen_id=parsed.screen_id,
         time_ms=parsed.time_ms,
         image=candidate,
-        sidecar=frames_dir / f"{parsed.base}.json",
+        sidecar=paths.frames_info_dir(paths.current_dir) / f"{parsed.base}.json",
     )
 
 
@@ -291,6 +452,12 @@ def _frame_at(paths: SessionPaths, at_ms: int, screen: str) -> FrameRef:
     if not found["frames"]:
         raise SessionError("NO_FRAMES", f"no frame for screen {screen!r} at {at_ms} ms")
     ref = found["frames"][0]
+    if ref["image"] is None:
+        raise SessionError(
+            "ARCHIVED",
+            "this recording is archived: the frame images are gone; "
+            "see `archive` in the result of describe or timeline",
+        )
     return FrameRef(
         screen_id=ref["screen"],
         time_ms=ref["time_ms"],
@@ -391,7 +558,7 @@ def tool_config(
 
     def run() -> dict[str, Any]:
         if action == "path":
-            return {"path": str(path), "exists": path.exists()}
+            return config_location(config_file, "server --config")
         if action == "get":
             data = load_config(path).to_json_dict()
             if key:
@@ -466,7 +633,7 @@ def tool_edit(session: str | None = None, config_file: Path | None = None) -> di
     return _guard(lambda: launch_editor(_load(config_file), session, config_file))
 
 
-def tool_wait_editor(editor_session: str, timeout_s: float = 60) -> dict[str, Any]:
+def tool_wait_editor(editor_session: str, timeout_s: float = DEFAULT_WAIT_S) -> dict[str, Any]:
     """Wait for the editor's Process / close event; mirror of ``wait --editor``."""
     from video_story.host.editor_session import wait_for_editor
 
@@ -503,20 +670,27 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     """Build the MCP server with every tool bound to ``config_file`` (not started)."""
     server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS)
 
-    def video_story_start() -> dict[str, Any]:
+    async def video_story_start() -> dict[str, Any]:
         """Open the Video Story control window for the user. Returns the session_id to
-        pass to video_story_wait; the user records and then presses Process Recording."""
-        return tool_start(config_file)
+        pass to video_story_wait; the user records, stops and presses Process in the editor."""
+        return await anyio.to_thread.run_sync(lambda: tool_start(config_file))
 
     async def video_story_wait(
-        session_id: str, timeout_s: float = 60, ctx: Context | None = None
+        session_id: str, timeout_s: float = DEFAULT_WAIT_S, ctx: Context | None = None
     ) -> dict[str, Any]:
-        """Wait until the session is final (processed, discarded, cancelled or failed) or
-        timeout_s (1..240) elapses; when "timed_out" is true call it again. Status
+        """Wait until the session is final (processed, cancelled or failed) or
+        timeout_s (positive, at most 240; default 45) elapses. When "timed_out" is true,
+        call it again. Status
         "editing" means the user is cropping the recording in the editor: keep waiting.
-        A processed session carries the paths of manifest, transcript and frames and
-        "crop" {start_ms, end_ms}: act only on that part of the recording."""
-        timeout = clamp_timeout(timeout_s)
+        Only "processed" (the user pressed Process) is a request to act.
+        A processed session carries the paths of manifest, transcript and frames,
+        "crop" {start_ms, end_ms}: act only on that part of the recording, and
+        "instructions": the user's master instructions for the whole recording (read
+        them first; "" when none)."""
+        try:
+            timeout = clamp_timeout(timeout_s)
+        except HostError as exc:
+            return exc.to_dict()
 
         async def progress(elapsed: float, message: str) -> None:
             if ctx is not None:
@@ -541,24 +715,88 @@ def create_server(config_file: Path | None = None) -> MCPServer:
         return tool_status(session_id, config_file)
 
     def video_story_describe(session_id: str) -> dict[str, Any]:
-        """Paths, manifest content (screens, duration, capture interval), the full
-        transcript text, the stored crop {start_ms, end_ms} and transcript_in_range
-        (only the segments inside the crop) of a processed recording."""
+        """Paths, manifest content (screens, duration, capture interval, keypoints), the
+        stored crop {start_ms, end_ms} and "instructions" (the user's master
+        instructions for the whole recording, "" when none) of a processed recording.
+        transcript_in_range (the segments inside the crop) is included only when it is
+        short (transcript_in_range_inline); otherwise transcript_in_range_note says
+        which paged tool to call."""
         return tool_describe(session_id, config_file)
 
-    def video_story_get_transcript(session_id: str, format: str = "text") -> dict[str, Any]:
-        """The transcript: format "text" returns timestamped lines, "json" returns
-        segments with start_ms, end_ms and text."""
-        return tool_get_transcript(session_id, format, config_file)
+    def video_story_get_transcript(
+        session_id: str,
+        format: str = "text",
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
+    ) -> dict[str, Any]:
+        """The transcript of the whole recording: format "text" returns timestamped
+        lines ("[lower track]" marks a subtitle the user moved to the second track),
+        "json" returns segments with start_ms, end_ms, text and track (1 for the lower
+        track, absent for the upper one). Paged: at most
+        max_chars characters from line (segment) first_line; transcript_lines is the
+        total, next_line the first_line of the next call (null: complete)."""
+        return tool_get_transcript(session_id, format, config_file, first_line, max_chars)
+
+    def video_story_timeline(
+        session_id: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        mouse: str = "auto",
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
+    ) -> dict[str, Any]:
+        """Read this first after the instructions: the whole cropped range as one text
+        timeline (no images). Lines: SAY (speech with the cursor screen and position),
+        DRAW #id (a finished shape with its geometry, press/release times and the frame
+        times before and after it), REMOVED, CLIPBOARD (copied text), CURSOR (moved to
+        another screen), ZOOM, KEYPOINT and, when the mouse was recorded, CLICK,
+        DOUBLE-CLICK, DRAG, SCROLL, ZOOM-SCROLL, GESTURE with the element under the mouse
+        and its content (and "over ..." in SAY: what the pointer rested on). Times are
+        ms; pass them to video_story_get_frame only where the words and coordinates are
+        not enough. start_ms / end_ms override the crop; mouse is auto, full, summary
+        (scrolls merged per 10 s) or off. Paged: "timeline" holds whole lines from
+        first_line (1-based), at most max_chars characters (1000..100000, default
+        20000); timeline_lines is the total. While next_line is not null the timeline
+        is incomplete: call again with first_line = next_line and the same other
+        arguments until it is null, before you act (the legend comes with the first
+        page only)."""
+        return tool_timeline(
+            session_id, start_ms, end_ms, config_file, mouse, first_line, max_chars
+        )
+
+    def video_story_mouse(
+        session_id: str,
+        at_ms: int | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        first_line: int = 1,
+        max_chars: int = PAGE_DEFAULT_CHARS,
+    ) -> dict[str, Any]:
+        """Everything recorded about the mouse actions the timeline lists: the element
+        (role, name, bounds in pixels of the screen image, ancestors, window), its whole
+        content up to 4096 characters, the selection, drag paths (at most 200 points;
+        path_points is the real count). at_ms (the time a timeline line starts with)
+        returns that one action - prefer it. Without it the actions and rest points of
+        the cropped range (start_ms / end_ms override the crop) come in time order page
+        by page: first_line / max_chars / next_line work as in video_story_timeline,
+        action_count and rest_point_count are the totals."""
+        return tool_mouse(session_id, at_ms, start_ms, end_ms, config_file, first_line, max_chars)
 
     def video_story_list_frames(
-        session_id: str, at_ms: int, screen: str = "cursor", window_ms: int = 0
+        session_id: str,
+        at_ms: int,
+        screen: str = "cursor",
+        window_ms: int = 0,
+        include_drawings: bool = True,
     ) -> dict[str, Any]:
         """Screenshots taken at at_ms (latest frame at or before it). screen: "cursor"
         (the screen the cursor was on), "all" or a screen id like "screen2"; window_ms > 0
-        also lists every frame within at_ms +/- window_ms. Returns paths and cursor
-        positions, not images: use video_story_get_frame to see one."""
-        return tool_list_frames(session_id, at_ms, screen, window_ms, config_file)
+        also lists the frames within at_ms +/- window_ms (at most 24, the nearest ones).
+        Returns paths and cursor positions, not images: use video_story_get_frame to see
+        one. include_drawings false lists only the drawing ids per frame
+        (video_story_timeline has the shapes). "truncated" true: the result was
+        shortened to stay small, truncated_note says how."""
+        return tool_list_frames(session_id, at_ms, screen, window_ms, config_file, include_drawings)
 
     def video_story_get_frame(
         session_id: str,
@@ -625,25 +863,27 @@ def create_server(config_file: Path | None = None) -> MCPServer:
             )
         )
 
-    def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
+    async def video_story_edit(session_id: str | None = None) -> dict[str, Any]:
         """Open the Video Story Editor window for the user: a list of the stored
         recordings, a preview with subtitles, a timeline per screen with In/Out crop
         handles, a Render button (MP4 + SRT) and a green Process button. session_id
         preselects a recording (default: the newest). Returns at once with
         editor_session: then call video_story_wait_editor with it until the user
-        presses Process (event "process" with session_id and crop {start_ms, end_ms}:
-        act only on that range of the recording) or closes the window (event "closed":
+        presses Process (event "process" with session_id, crop {start_ms, end_ms}: act
+        only on that range of the recording, and "instructions": the user's master
+        instructions for the whole recording) or closes the window (event "closed":
         do nothing). An already open editor is reused (attached). NO_RECORDINGS:
         nothing to edit yet."""
-        return tool_edit(session_id, config_file)
+        return await anyio.to_thread.run_sync(lambda: tool_edit(session_id, config_file))
 
     async def video_story_wait_editor(
-        editor_session: str, timeout_s: float = 60, ctx: Context | None = None
+        editor_session: str, timeout_s: float = DEFAULT_WAIT_S, ctx: Context | None = None
     ) -> dict[str, Any]:
         """Wait until the editor opened by video_story_edit reports event "process"
         (the user pressed Process: session_id and crop {start_ms, end_ms} tell which
-        recording and which part to act on) or "closed" (nothing to do), or until
-        timeout_s (1..240) elapses ("timed_out": call again)."""
+        recording and which part to act on, "instructions" how) or "closed" (nothing to
+        do), or until
+        timeout_s (positive, at most 240; default 45) elapses ("timed_out": call again)."""
         return await anyio.to_thread.run_sync(lambda: tool_wait_editor(editor_session, timeout_s))
 
     def video_story_doctor() -> dict[str, Any]:
@@ -656,6 +896,8 @@ def create_server(config_file: Path | None = None) -> MCPServer:
     server.add_tool(video_story_status)
     server.add_tool(video_story_describe)
     server.add_tool(video_story_get_transcript)
+    server.add_tool(video_story_timeline)
+    server.add_tool(video_story_mouse)
     server.add_tool(video_story_list_frames)
     server.add_tool(video_story_get_frame, structured_output=False)
     server.add_tool(video_story_config)
@@ -709,8 +951,10 @@ __all__ = [
     "tool_get_frame",
     "tool_get_transcript",
     "tool_list_frames",
+    "tool_mouse",
     "tool_start",
     "tool_status",
+    "tool_timeline",
     "tool_wait",
     "wait_with_progress",
 ]

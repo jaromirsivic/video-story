@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from video_story.core import config as cfg
+from video_story.core import fileio
 from video_story.core.cursor import locate_cursor
 from video_story.core.manifest import Manifest, read_manifest, write_manifest
 from video_story.core.naming import (
@@ -38,7 +39,8 @@ def test_config_defaults():
     assert c.image_format == "jpeg"
     assert c.jpeg_quality == 70
     assert c.auto_stop_minutes == 120
-    assert c.retention_days == 30
+    assert c.archive_after_days == 30
+    assert c.drawing_grid_px == 16
     assert c.audio_input is None
     assert c.recording_folder.name == "VideoStory"
 
@@ -74,6 +76,29 @@ def test_auto_stop_bounds():
     assert cfg.config_from_dict({"auto_stop_minutes": 1440}).auto_stop_minutes == 1440
     with pytest.raises(cfg.ConfigError):
         cfg.config_from_dict({"auto_stop_minutes": 0})
+
+
+@pytest.mark.parametrize("value", [0, "0", 1, 30, 3650])
+def test_archive_after_accepts_zero_for_never(value):
+    assert cfg.config_from_dict({"archive_after_days": value}).archive_after_days == int(value)
+    assert cfg.ARCHIVE_AFTER_NEVER == cfg.ARCHIVE_AFTER_MIN_DAYS == 0
+
+
+@pytest.mark.parametrize("value", [-1, 3651, "never", 1.5])
+def test_archive_after_bounds_rejected(value):
+    with pytest.raises(cfg.ConfigError):
+        cfg.config_from_dict({"archive_after_days": value})
+
+
+def test_cli_config_set_archive_after_zero(tmp_path: Path, capsys):
+    from video_story.host import cli
+
+    path = tmp_path / "config.json"
+    assert cli.main(["--config", str(path), "config", "set", "archive_after_days", "0"]) == 0
+    assert json.loads(capsys.readouterr().out)["config"]["archive_after_days"] == 0
+    assert cfg.load_config(path).archive_after_days == 0
+    assert cli.main(["--config", str(path), "config", "set", "archive_after_days", "-1"]) != 0
+    assert cfg.load_config(path).archive_after_days == 0
 
 
 def test_config_roundtrip(tmp_path: Path):
@@ -210,7 +235,7 @@ def test_session_id_and_paths(tmp_path: Path):
     state = SessionState(session_id=sid, status=Status.RECORDING, recording_folder=str(tmp_path))
     write_state(paths.state_path, state)
     final = paths.finalize()
-    assert final == tmp_path / sid
+    assert final == tmp_path / "default" / sid  # the main folder (default at first)
     assert (final / "frames" / "0_000_screen1.png").exists()
     assert paths.state_path.exists()  # state survives for `wait`
     assert read_state(paths.state_path).status is Status.RECORDING
@@ -228,9 +253,10 @@ def test_finalize_with_open_ui_log(tmp_path: Path):
     and leave ``ui.log`` (and ``state.json``) behind."""
     paths = SessionPaths(tmp_path, "20260101-000000")
     paths.create_work_dirs()
-    (paths.work_dir / "audio.wav").write_bytes(b"x")
+    paths.audio_path(paths.work_dir).write_bytes(b"x")
     (paths.work_dir / "manifest.json").write_text("{}", encoding="utf-8")
     paths.frames_dir(paths.work_dir).joinpath("0_000_screen1.png").write_bytes(b"y")
+    paths.frames_info_dir(paths.work_dir).joinpath("0_000_screen1.json").write_bytes(b"{}")
     paths.lock_path.write_text("1", encoding="utf-8")
     write_state(
         paths.state_path,
@@ -240,14 +266,128 @@ def test_finalize_with_open_ui_log(tmp_path: Path):
         ui_log.write(b"window output\n")
         ui_log.flush()
         final = paths.finalize()
-    assert final == tmp_path / paths.session_id
-    assert sorted(p.name for p in final.iterdir()) == ["audio.wav", "frames", "manifest.json"]
+    assert final == tmp_path / "default" / paths.session_id
+    assert sorted(p.name for p in final.iterdir()) == [
+        "audio",
+        "frames",
+        "frames_info",
+        "manifest.json",
+    ]
     assert (final / "frames" / "0_000_screen1.png").read_bytes() == b"y"
+    assert (final / "frames_info" / "0_000_screen1.json").read_bytes() == b"{}"
+    assert (final / "audio" / "audio.wav").read_bytes() == b"x"
+    assert list((final / "frames").glob("*.json")) == []
     assert sorted(p.name for p in paths.work_dir.iterdir()) == ["lock", "state.json", "ui.log"]
     assert read_state(paths.state_path).status is Status.PROCESSING
     assert paths.current_dir == final
     with pytest.raises(FileExistsError):
         paths.finalize()
+
+
+def test_replace_with_retry_survives_transient_permission_error(tmp_path: Path, monkeypatch):
+    src, dst = tmp_path / "a.tmp", tmp_path / "a"
+    src.write_text("new", encoding="utf-8")
+    dst.write_text("old", encoding="utf-8")
+    real_replace = fileio.os.replace
+    calls: list[int] = []
+
+    def flaky(a, b):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(13, "Access is denied")
+        real_replace(a, b)
+
+    monkeypatch.setattr(fileio.os, "replace", flaky)
+    fileio.replace_with_retry(src, dst, attempts=5, delay=0)
+    assert len(calls) == 3 and dst.read_text(encoding="utf-8") == "new" and not src.exists()
+
+    calls.clear()
+    src.write_text("newer", encoding="utf-8")
+    with pytest.raises(PermissionError):
+        fileio.replace_with_retry(src, dst, attempts=2, delay=0)
+    assert len(calls) == 2 and dst.read_text(encoding="utf-8") == "new"
+
+
+def test_atomic_write_text_removes_tmp_on_failure(tmp_path: Path, monkeypatch):
+    target = tmp_path / "sub" / "state.json"
+    fileio.atomic_write_text(target, "{}")
+    assert target.read_text(encoding="utf-8") == "{}" and list(target.parent.iterdir()) == [target]
+
+    def always_denied(a, b):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(fileio.os, "replace", always_denied)
+    monkeypatch.setattr(fileio, "REPLACE_ATTEMPTS", 2)
+    monkeypatch.setattr(fileio, "REPLACE_DELAY_S", 0)
+    with pytest.raises(PermissionError):
+        fileio.atomic_write_text(target, "{broken")
+    assert target.read_text(encoding="utf-8") == "{}" and list(target.parent.iterdir()) == [target]
+
+
+def test_write_state_while_another_reader_holds_the_file(tmp_path: Path):
+    """The agent polls ``state.json`` while the window rewrites it. On Windows a reader
+    without ``FILE_SHARE_DELETE`` makes the rename fail with WinError 5; the write
+    must wait for the reader instead of failing the recording."""
+    import threading
+
+    path = tmp_path / "state.json"
+    state = SessionState(
+        session_id="20260101-000000", status=Status.PROCESSING, recording_folder="x"
+    )
+    write_state(path, state)
+    stop = threading.Event()
+    seen: list[str] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                with open(path, "rb") as f:  # like the agent's ``video-story wait``
+                    seen.append(f.read().decode("utf-8"))
+            except FileNotFoundError:  # pragma: no cover - never expected: rename is atomic
+                seen.append("MISSING")
+            except PermissionError:  # the mirror image: opened while being replaced
+                seen.append("")
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    try:
+        for i in range(150):
+            state.progress = i / 150
+            write_state(path, state)
+    finally:
+        stop.set()
+        thread.join(5)
+    assert "MISSING" not in seen
+    assert all(s == "" or json.loads(s)["session_id"] == "20260101-000000" for s in seen)
+    assert read_state(path).progress == 149 / 150
+
+
+def test_read_json_with_retry(tmp_path: Path, monkeypatch):
+    path = tmp_path / "x.json"
+    with pytest.raises(FileNotFoundError):
+        fileio.read_json_with_retry(path)
+    path.write_text('{"a": 1}', encoding="utf-8")
+    monkeypatch.setattr(fileio, "READ_DELAY_S", 0)
+    real_read_text = Path.read_text
+    calls: list[int] = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        if len(calls) == 2:
+            return '{"a": '  # torn read
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert fileio.read_json_with_retry(path) == {"a": 1} and len(calls) == 3
+    calls.clear()
+    with pytest.raises(PermissionError):
+        fileio.read_json_with_retry(path, attempts=1)
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError):
+        fileio.read_json_with_retry(path, attempts=2)
 
 
 def test_session_discard(tmp_path: Path):
@@ -346,3 +486,15 @@ def test_pixel_ratio_mapping():
     from video_story.core.screens import Screen
 
     assert Screen.from_manifest(data).pixel_ratio == 2.0
+
+
+@pytest.mark.parametrize("value", [8, 16, 33, 128])
+def test_drawing_grid_any_value_in_range_is_accepted(value):
+    assert cfg.config_from_dict({"drawing_grid_px": value}).drawing_grid_px == value
+
+
+@pytest.mark.parametrize("value", [7, 129, 0, "abc", 2.5])
+def test_drawing_grid_out_of_range_is_rejected(value):
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.config_from_dict({"drawing_grid_px": value})
+    assert exc.value.field_name == "drawing_grid_px"

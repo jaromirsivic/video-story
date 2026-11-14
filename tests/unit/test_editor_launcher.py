@@ -22,6 +22,13 @@ from video_story.host.editor_lock import EditorLock, lock_holder_pid
 from video_story.host.runner import SessionError
 
 
+@pytest.fixture(autouse=True)
+def isolated_launcher(monkeypatch):
+    # These tests own the spawn/lock contract, not a real GUI. Startup is tested separately.
+    monkeypatch.setattr(launcher, "require_ready", lambda cfg: {})
+    monkeypatch.setattr(launcher.startup, "wait_ready", lambda *a, **k: {"phase": "ready"})
+
+
 def _processed(root: Path, session_id: str, valid: bool = True) -> SessionPaths:
     paths = SessionPaths(root, session_id)
     paths.frames_dir(paths.final_dir).mkdir(parents=True)
@@ -146,7 +153,7 @@ def test_launch_spawns_detached_process(tmp_path: Path, monkeypatch):
     result = launcher.launch_editor(cfg, config_file=tmp_path / "config.json")
     assert result["pid"] == 4242 and result["session_id"] == "20261002-090000"
     assert result["recordings"] == 2 and result["attached"] is False
-    assert "--session" not in spawned[0]
+    assert spawned[0][spawned[0].index("--session") + 1] == "20261002-090000"
     assert str(tmp_path / "config.json") in spawned[0]
     editor_session = Path(result["editor_session"])
     assert editor_session.exists() and spawned[0][-2:] == ["--editor-session", str(editor_session)]

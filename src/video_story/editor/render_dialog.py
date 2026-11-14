@@ -1,4 +1,4 @@
-"""Render flow: Save As dialog, export in a QThread with progress and Cancel, result box."""
+"""Render Video dialog (screen and MP4 file), the Save As dialog and the export worker."""
 
 from __future__ import annotations
 
@@ -6,14 +6,15 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
-    QProgressBar,
+    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -96,117 +97,116 @@ class ExportWorker(QObject):
         self.finished.emit(result)
 
 
-class RenderProgressDialog(QDialog):
-    """Modal progress dialog with a Cancel button; closing it also cancels."""
+SELECT_FILE_PLACEHOLDER = "Select File Name"
+RENDER_DIALOG_TITLE = "Render Video"
 
-    cancel_requested = Signal()
+
+class FileNameEdit(QLineEdit):
+    """Read-only field that asks for the file name when clicked."""
+
+    clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Rendering")
+        self.setReadOnly(True)
+        self.setPlaceholderText(SELECT_FILE_PLACEHOLDER)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click to choose where the MP4 video is saved")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class RenderVideoDialog(QDialog):
+    """**Render Video...**: the screen to render and the MP4 file to write.
+
+    ``screens`` are ``(screen id, label)`` pairs; ``suggest(screen_id)`` is the file
+    name offered by the Save As dialog. The field starts empty (placeholder
+    ``Select File Name``); a click on it opens the Save As dialog (MP4 only). Render
+    is enabled once a file is chosen.
+    """
+
+    def __init__(
+        self,
+        screens: list[tuple[str, str]],
+        default_screen: str,
+        suggest: Callable[[str], Path],
+        parent: QWidget | None = None,
+        title: str = "",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(RENDER_DIALOG_TITLE)
         self.setModal(True)
-        self.setWindowFlags(
-            Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint
-        )
+        self._suggest = suggest
+        self._output: Path | None = None
         layout = QVBoxLayout(self)
-        self.message_label = QLabel("Preparing export")
-        layout.addWidget(self.message_label)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        self.bar.setValue(0)
-        layout.addWidget(self.bar)
+        if title:
+            layout.addWidget(QLabel(title))
+        form = QFormLayout()
+        self.screen_combo = QComboBox()
+        for screen_id, label in screens:
+            self.screen_combo.addItem(label, screen_id)
+        index = self.screen_combo.findData(default_screen)
+        self.screen_combo.setCurrentIndex(max(0, index))
+        form.addRow("Screen", self.screen_combo)
+        self.file_edit = FileNameEdit()
+        self.file_edit.clicked.connect(self.choose_file)
+        form.addRow("File", self.file_edit)
+        layout.addLayout(form)
         row = QHBoxLayout()
         row.addStretch(1)
+        self.render_button = QPushButton("Render")
+        self.render_button.setDefault(True)
+        self.render_button.setEnabled(False)
+        self.render_button.clicked.connect(self.accept)
+        row.addWidget(self.render_button)
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self._on_cancel)
+        self.cancel_button.clicked.connect(self.reject)
         row.addWidget(self.cancel_button)
         layout.addLayout(row)
-        self.setMinimumWidth(420)
-        self.result: ExportResult | None = None
-        self.error: str | None = None
+        self.setMinimumWidth(460)
 
-    # Slots: the worker's signals land here (queued into the GUI thread).
+    @property
+    def screen_id(self) -> str:
+        return str(self.screen_combo.currentData())
 
-    def finish_with(self, result: object) -> None:
-        self.result = result  # type: ignore[assignment]
-        self.accept()
+    @property
+    def output(self) -> Path | None:
+        """The chosen MP4 file, ``None`` until one is chosen."""
+        return self._output
 
-    def fail_with(self, message: str) -> None:
-        self.error = message
-        self.done(QDialog.DialogCode.Rejected)
+    def set_output(self, path: Path | None) -> None:
+        self._output = path
+        self.file_edit.setText(str(path) if path is not None else "")
+        self.render_button.setEnabled(path is not None)
 
-    def set_progress(self, fraction: float, message: str) -> None:
-        self.bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
-        if message:
-            self.message_label.setText(message)
-
-    def _on_cancel(self) -> None:
-        self.cancel_button.setEnabled(False)
-        self.message_label.setText("Cancelling")
-        self.cancel_requested.emit()
-
-    def reject(self) -> None:  # Esc / close box = Cancel, the dialog stays until the worker ends
-        if self.cancel_button.isEnabled():
-            self._on_cancel()
-
-
-def run_render(
-    parent: QWidget | None,
-    config: Config,
-    request: ExportRequest,
-    export_fn: ExportFn | None = None,
-    show_result: bool = True,
-) -> ExportResult | None:
-    """Export ``request`` with a progress dialog; returns the result or ``None``.
-
-    Blocks the caller in a nested event loop while the worker thread runs. The result
-    (or the error) is shown in a message box unless ``show_result`` is False.
-    """
-    worker = ExportWorker(request, config, export_fn or default_export_fn)
-    thread = QThread()
-    worker.moveToThread(thread)
-    dialog = RenderProgressDialog(parent)
-    # Connect to methods of the dialog (a GUI-thread QObject) so the calls are queued;
-    # a plain Python callable would run on the worker thread.
-    thread.started.connect(worker.run)
-    worker.progress.connect(dialog.set_progress)
-    worker.finished.connect(dialog.finish_with)
-    worker.failed.connect(dialog.fail_with)
-    dialog.cancel_requested.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
-    thread.start()
-    try:
-        dialog.exec()
-    finally:
-        thread.quit()
-        thread.wait(30_000)
-        worker.deleteLater()
-        dialog.deleteLater()
-
-    result = dialog.result
-    error = dialog.error
-    if show_result:
-        if result is not None:
-            lines = [f"Video saved to:\n{result.output}"]
-            if result.srt:
-                lines.append(f"Subtitles saved to:\n{result.srt}")
-            lines.append(
-                f"{result.width}x{result.height}, {result.duration_ms / 1000:.1f} s, "
-                f"screen {result.screen_id}"
-            )
-            QMessageBox.information(parent, "Render finished", "\n\n".join(lines))
-        elif worker.cancelled:
-            QMessageBox.information(parent, "Render cancelled", "The export was cancelled.")
-        else:
-            QMessageBox.critical(parent, "Render failed", error or "Unknown error")
-    return result
+    def choose_file(self) -> Path | None:
+        """The Save As dialog (MP4 only); a cancelled dialog keeps the previous choice."""
+        suggested = self._output or self._suggest(self.screen_id)
+        chosen = ask_output_path(self, suggested)
+        if chosen is not None:
+            self.set_output(chosen)
+        return chosen
 
 
 __all__ = [
+    "SELECT_FILE_PLACEHOLDER",
     "ExportFn",
     "ExportWorker",
-    "RenderProgressDialog",
+    "FileNameEdit",
+    "RenderVideoDialog",
     "ask_output_path",
     "default_export_fn",
     "default_output_path",
-    "run_render",
 ]

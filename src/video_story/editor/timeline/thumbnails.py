@@ -10,6 +10,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QImageReader
 
+from ..workers import automatic_gc_paused
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CAPACITY = 400
@@ -34,11 +36,12 @@ class _DecodeJob(QRunnable):
         self._height = height
 
     def run(self) -> None:
-        key = (str(self._path), self._height)
-        if not self._cache.is_wanted(self._generation, key):
-            self._cache.signals.decoded.emit(self._generation, key[0], key[1], None)
-            return
-        self._cache.signals.decoded.emit(self._generation, key[0], key[1], self._decode())
+        with automatic_gc_paused():
+            key = (str(self._path), self._height)
+            if not self._cache.is_wanted(self._generation, key):
+                self._cache.signals.decoded.emit(self._generation, key[0], key[1], None)
+                return
+            self._cache.signals.decoded.emit(self._generation, key[0], key[1], self._decode())
 
     def _decode(self) -> QImage:
         image = QImage()

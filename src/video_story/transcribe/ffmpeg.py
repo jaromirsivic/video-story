@@ -1,14 +1,18 @@
 """FFmpeg discovery, optional download of a static build and audio conversion.
 
-Lookup order: ``config.ffmpeg_path`` -> ``ffmpeg`` on ``PATH`` -> the bundled copy in
-``<plugin root>/bin/ffmpeg/<os>-<arch>/``. Downloads happen only from
-``video-story setup`` / ``doctor --fix``, never during a recording.
+Lookup order: ``config.ffmpeg_path`` -> ``ffmpeg`` on ``PATH`` -> the downloaded copy in
+``<state root>/bin/ffmpeg/<os>-<arch>/`` -> a copy bundled with the code in
+``<code root>/bin/ffmpeg/<os>-<arch>/`` (see :mod:`video_story.core.config` for both
+roots). Downloads go to the state root and happen only from ``video-story setup`` /
+``doctor --fix``, never during a recording.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import platform as _platform
 import re
 import shutil
@@ -17,13 +21,16 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from video_story.core.config import Config, plugin_root
+if TYPE_CHECKING:
+    import numpy as np
+
+from video_story.core.config import Config, code_root, state_root
 from video_story.host.downloads import (
     DownloadError,
     ProgressCallback,
@@ -105,19 +112,26 @@ def executable_name(base: str, os_name: str | None = None) -> str:
 
 
 def bundled_ffmpeg_dir(root: Path | None = None) -> Path:
+    """``<root>/bin/ffmpeg/<os>-<arch>``; the state root (download target) by default."""
     os_name, arch = platform_tag()
-    return (root or plugin_root()) / "bin" / "ffmpeg" / f"{os_name}-{arch}"
+    return (root or state_root()) / "bin" / "ffmpeg" / f"{os_name}-{arch}"
 
 
 def bundled_ffmpeg_path(root: Path | None = None) -> Path:
     return bundled_ffmpeg_dir(root) / executable_name("ffmpeg")
 
 
+def bundled_ffmpeg_candidates() -> list[Path]:
+    """The downloaded copy in the state root first, then one bundled with the code."""
+    return list(dict.fromkeys([bundled_ffmpeg_path(), bundled_ffmpeg_path(code_root())]))
+
+
 # Discovery --------------------------------------------------------------------
 
 
 def find_ffmpeg(config: Config) -> Path | None:
-    """Configured path, then ``PATH``, then the bundled copy; ``None`` when absent."""
+    """Configured path, then ``PATH``, then the copy in the state root, then the one in
+    the code root; ``None`` when absent."""
     if config.ffmpeg_path is not None:
         candidate = Path(config.ffmpeg_path).expanduser()
         if candidate.is_dir():
@@ -128,10 +142,30 @@ def find_ffmpeg(config: Config) -> Path | None:
     found = shutil.which("ffmpeg")
     if found:
         return Path(found)
-    bundled = bundled_ffmpeg_path()
-    if bundled.is_file():
-        return bundled
-    return None
+    return next((p for p in bundled_ffmpeg_candidates() if p.is_file()), None)
+
+
+def ffmpeg_origin(config: Config, path: Path) -> str:
+    """Where a found ffmpeg comes from: ``ffmpeg_path``, ``state folder``, ``code folder``
+    or ``PATH``."""
+    resolved = Path(path).resolve()
+    if config.ffmpeg_path is not None:
+        configured = Path(config.ffmpeg_path).expanduser()
+        if configured.is_dir():
+            configured = configured / executable_name("ffmpeg")
+        if resolved == configured.resolve():
+            return "ffmpeg_path"
+    if resolved == bundled_ffmpeg_path().resolve():
+        return "state folder"
+    if resolved == bundled_ffmpeg_path(code_root()).resolve():
+        return "code folder"
+    return "PATH"
+
+
+def ffmpeg_search_text() -> str:
+    """The places searched, for messages: config, PATH and both bundled folders."""
+    folders = ", ".join(str(p.parent) for p in bundled_ffmpeg_candidates())
+    return f"config ffmpeg_path, PATH, {folders}"
 
 
 def ensure_ffmpeg(
@@ -144,7 +178,7 @@ def ensure_ffmpeg(
     if download:
         return download_ffmpeg(bundled_ffmpeg_dir(), progress=progress)
     raise FfmpegNotFound(
-        "ffmpeg was not found (config ffmpeg_path, PATH or the bundled copy). "
+        f"ffmpeg was not found ({ffmpeg_search_text()}). "
         "Run `video-story setup` to download it, or install ffmpeg and set ffmpeg_path."
     )
 
@@ -170,6 +204,24 @@ def ffmpeg_version(path: Path | str) -> str | None:
     return match.group(1) if match else first[0].strip()
 
 
+def ffmpeg_usable(path: Path) -> bool:
+    """Explicit setup/diagnostic only, never called by the fast startup check."""
+    if ffmpeg_version(path) is None:
+        return False
+    try:
+        result = subprocess.run(
+            [str(path), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    encoders = {line.split()[1] for line in result.stdout.splitlines() if len(line.split()) > 1}
+    return result.returncode == 0 and {"libx264", "aac"} <= encoders
+
+
 # Conversion -------------------------------------------------------------------
 
 
@@ -177,8 +229,14 @@ def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
 
 
-def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
-    """Decode ``src`` to 16 kHz mono 16-bit PCM WAV at ``dst`` (whisper input)."""
+def convert_to_16k_mono(ffmpeg: Path, src: Path | Sequence[Path], dst: Path) -> None:
+    """Decode ``src`` to 16 kHz mono 16-bit PCM WAV at ``dst`` (whisper input).
+
+    Several sources (the microphone and the computer's sound) are added together
+    (``amix`` without level normalisation, as long as the longest of them)."""
+    sources = [src] if isinstance(src, Path) else list(src)
+    if not sources:
+        raise ValueError("no audio source to convert")
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(ffmpeg),
@@ -189,8 +247,18 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
         "-y",
         "-protocol_whitelist",
         "file,pipe",
-        "-i",
-        str(src),
+    ]
+    for source in sources:
+        cmd += ["-i", str(source)]
+    if len(sources) > 1:
+        inputs = "".join(f"[{i}:a]" for i in range(len(sources)))
+        cmd += [
+            "-filter_complex",
+            f"{inputs}amix=inputs={len(sources)}:duration=longest:normalize=0[mix]",
+            "-map",
+            "[mix]",
+        ]
+    cmd += [
         "-vn",
         "-sn",
         "-dn",
@@ -214,7 +282,52 @@ def convert_to_16k_mono(ffmpeg: Path, src: Path, dst: Path) -> None:
         raise FfmpegError(f"ffmpeg failed with exit code {proc.returncode}: {tail}")
     if not dst.exists() or dst.stat().st_size <= EMPTY_WAV_MAX_BYTES:
         tail = "\n".join((proc.stderr or "").strip().splitlines()[-10:])
-        raise FfmpegError(f"ffmpeg produced no audio for {src.name}: {tail or 'empty output'}")
+        names = ", ".join(source.name for source in sources)
+        raise FfmpegError(f"ffmpeg produced no audio for {names}: {tail or 'empty output'}")
+
+
+def resample_to_16k(ffmpeg: Path, samples: np.ndarray, rate: int) -> np.ndarray:
+    """Mono int16 ``samples`` at ``rate`` resampled to 16 kHz by ffmpeg through pipes
+    (the same resampler :func:`convert_to_16k_mono` uses, without temporary files)."""
+    import numpy as np
+
+    data = np.asarray(samples, dtype=np.int16)
+    if rate == 16000 or len(data) == 0:
+        return data
+    cmd = [
+        str(ffmpeg),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(int(rate)),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=data.astype("<i2").tobytes(),
+            capture_output=True,
+            creationflags=_creation_flags(),
+        )
+    except OSError as exc:
+        raise FfmpegError(f"cannot run ffmpeg {ffmpeg}: {exc}") from exc
+    if proc.returncode != 0:
+        tail = "\n".join(proc.stderr.decode("utf-8", "replace").strip().splitlines()[-10:])
+        raise FfmpegError(f"ffmpeg failed with exit code {proc.returncode}: {tail}")
+    return np.frombuffer(proc.stdout, dtype="<i2").astype(np.int16)
 
 
 # Download ---------------------------------------------------------------------
@@ -348,8 +461,13 @@ def download_ffmpeg(target_dir: Path, progress: ProgressCallback | None = None) 
             continue
         log.info("Downloading FFmpeg from %s", source.url)
         target_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="ffmpeg-dl-", dir=target_dir) as tmp:
-            archive = Path(tmp) / PurePosixPath(source.url).name
+        key = hashlib.sha256(
+            (source.url + str(source.sha256) + str(source.md5)).encode()
+        ).hexdigest()[:20]
+        download_dir = target_dir / ".downloads" / key
+        download_dir.mkdir(parents=True, exist_ok=True)
+        archive = download_dir / "archive"
+        with tempfile.TemporaryDirectory(prefix="ffmpeg-stage-", dir=target_dir) as tmp:
             try:
                 result = download_file(
                     source.url,
@@ -358,8 +476,27 @@ def download_ffmpeg(target_dir: Path, progress: ProgressCallback | None = None) 
                     expected_md5=source.md5,
                     progress=progress,
                 )
-                written = extract_binaries(archive, source.kind, target_dir, names)
-            except (DownloadError, OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+                staged = Path(tmp)
+                written = extract_binaries(archive, source.kind, staged, names)
+                if not ffmpeg_usable(staged / names[0]):
+                    raise FfmpegNotFound("FFmpeg cannot run or lacks libx264/AAC encoders")
+                # Publish the primary executable last, only after validating the staged copy.
+                for binary in sorted(written, key=lambda p: p.name == names[0]):
+                    os.replace(binary, target_dir / binary.name)
+                written = [target_dir / p.name for p in written]
+                archive.unlink(missing_ok=True)
+                download_dir.rmdir()
+                try:
+                    download_dir.parent.rmdir()
+                except OSError:
+                    pass  # another source still has a resumable partial
+            except (
+                DownloadError,
+                FfmpegNotFound,
+                OSError,
+                zipfile.BadZipFile,
+                tarfile.TarError,
+            ) as exc:
                 errors.append(f"{source.name}: {exc}")
                 log.warning("FFmpeg download from %s failed: %s", source.url, exc)
                 continue
@@ -396,6 +533,7 @@ __all__ = [
     "FfmpegError",
     "FfmpegNotFound",
     "FfmpegSource",
+    "bundled_ffmpeg_candidates",
     "bundled_ffmpeg_dir",
     "bundled_ffmpeg_path",
     "candidate_sources",
@@ -404,9 +542,12 @@ __all__ = [
     "ensure_ffmpeg",
     "executable_name",
     "extract_binaries",
+    "ffmpeg_origin",
+    "ffmpeg_search_text",
     "ffmpeg_version",
     "find_ffmpeg",
     "platform_tag",
     "resolve_btbn_source",
+    "resample_to_16k",
     "resolve_jvs_source",
 ]

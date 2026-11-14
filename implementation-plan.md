@@ -1,6 +1,8 @@
 # Video Story – implementační plán
 
-Stav: **implementováno; ověřeno na Windows a Linuxu (X11) lokálně a na macOS přes GitHub Actions** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15. Zadání je v [video-story-spec.md](video-story-spec.md).
+> **Historický záznam návrhu.** Platné chování aplikace popisuje [video-story-spec.md](video-story-spec.md); tento plán zachycuje, jak návrh vznikal (stav k 7. 11. 2026), a tam, kde se liší, neplatí. Liší se zejména: výchozí hodnoty (dnes 500 ms, JPEG 70 %, auto stop 120 min, model large-v3-turbo), konec nahrávání (vždy uložit a otevřít editor; v nahrávacím okně se nepřepisuje), stavový automat (bez Process Recording), manifest (vzniká už při Record) a soubory `scheduler.py`, `handoff.py`, `discard_dialog.py`, `progress_dialog.py`, `.mcp.json` a `config.example.json`, které neexistují.
+
+Stav: **implementováno; ověřeno na Windows a Linuxu (X11) lokálně a na macOS přes GitHub Actions** 7. 11. 2026; rozhodnutí jsou v kapitole 13, stav milníků v kapitole 15.
 
 Tento plán je česky (vznikl před rozhodnutím). Vše ostatní v repozitáři – README, instalace, skill, UI, hlášky, logy, CLI nápověda, kód a komentáře – je anglicky.
 
@@ -403,10 +405,12 @@ Odchylky od původního návrhu: žádná pauza při Stop dialogu (rozhodnutí 7
 Rozšíření ze 7. 11. 2026 (na žádost autora po prvním ručním ověření):
 
 - Sidecar JSON každého snímku (každé obrazovky) obsahuje `drawings`: tvary aktuálně nakreslené na overlay s `tool`, `color`, `screen` a body `{screen, x, y}` v pixelech obrázku dané obrazovky (`from`/`to` u obdélníku a šipky, `path` u štětce). Snímek overlay se přepočítává v GUI vlákně při každé změně kresby; capture vlákno ho čte při každém ticku.
+  - Úprava z 9. 11. 2026: do `drawings` se tvar dostane až po puštění tlačítka myši (geometrie je vždy konečná) a nese `id`, `started_ms` a `finished_ms` (stisk a puštění na časové ose nahrávky). Během tažení je v sidecaru jen `drawing_now: {tool, color, screen, started_ms}` bez geometrie (jinak `null`); obrázek snímku už rozkreslený tvar ukazuje.
 - Retence: `retention_days` (výchozí 30, v Nastavení jako **Keep Recordings**); starší nahrávky (podle času v id relace) se mažou na pozadí při startu okna. V Nastavení přibyla tlačítka **Open Folder** a **Delete All Recordings...** (potvrzovací dialog; relace otevřeného okna se nemaže).
 - Výchozí hodnoty: Auto Stop Recording 120 min (dříve 30), Capture Interval 500 ms (dříve 250 ms podle zadání).
 - Oprava finalizace na Windows: oddělený okenní proces drží otevřený `ui.log`, proto se nahrávka přesouvá po položkách a `state.json`, `lock` i `ui.log` zůstávají v `.work/<id>`.
 - Editor nahrávek (Edit Video Story, export do MP4 + SRT): samostatný plán a stav v `implementation-plan-editor.md`.
+- Oprava 9. 11. 2026: na Windows selhával zápis `state.json` (WinError 5), když agent (Codex) soubor zrovna četl; sdílené JSON soubory se nyní zapisují i čtou přes `core/fileio.py` s opakováním a zápis průběhu nikdy neshodí zpracování.
 - Model přepisu změněn (7. 11. 2026, na žádost autora) z `ggml-small.bin` na **`ggml-large-v3-turbo-q5_0.bin`** (548 MB, ověřováno SHA-256 z Hugging Face); stažení přes `video-story setup`.
 
 ---

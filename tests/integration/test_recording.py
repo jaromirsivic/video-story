@@ -34,7 +34,7 @@ def _record(tmp_path: Path, seconds: float, **cfg_changes) -> tuple[SessionPaths
 
 
 def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path):
-    paths, summary, cfg = _record(tmp_path, 2.0, capture_interval_ms=250)
+    paths, summary, cfg = _record(tmp_path, 2.0, capture_interval_ms=250, image_format="png")
     final = paths.final_dir
     assert final.is_dir() and not paths.work_dir.joinpath("frames").exists()
     manifest = read_manifest(paths.manifest_path(final))
@@ -42,7 +42,9 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
     assert screens, "at least one screen"
 
     frames = sorted(p for p in paths.frames_dir(final).iterdir() if p.suffix == ".png")
-    sidecars = {p.stem for p in paths.frames_dir(final).iterdir() if p.suffix == ".json"}
+    sidecars = {p.stem for p in paths.frames_info_dir(final).iterdir() if p.suffix == ".json"}
+    assert not any(p.suffix == ".json" for p in paths.frames_dir(final).iterdir())
+    assert paths.audio_path(final).is_file()
     assert len(frames) >= 5 * len(screens), f"expected >= 5 frames per screen, got {len(frames)}"
     assert {p.stem for p in frames} == sidecars, "every frame has a sidecar"
 
@@ -51,9 +53,12 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
         parsed = parse_frame_filename(frame.name)
         assert parsed is not None and parsed.screen_id in screens
         per_screen.setdefault(parsed.screen_id, []).append(parsed.time_ms)
-        sidecar = json.loads(frame.with_suffix(".json").read_text(encoding="utf-8"))
+        sidecar_path = paths.frames_info_dir(final) / f"{frame.stem}.json"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["screen"] == parsed.screen_id and sidecar["time_ms"] == parsed.time_ms
         assert sidecar["drawings"] == []  # no overlay in a headless recording
+        assert sidecar["zoom"] == []
+        assert sidecar["background"] is None  # not drawing
         cursor = sidecar["cursor"]
         if cursor is not None:
             assert cursor["screen"] in screens
@@ -70,6 +75,21 @@ def test_two_second_recording_produces_frames_sidecars_and_audio(tmp_path: Path)
     assert 1500 <= duration_ms <= 3500, duration_ms
     assert abs(summary.recorded_duration_ms - 2000) < 400
     assert manifest.frames.count == len(frames)
+
+    # What the computer played: a second track at the microphone's rate, as long as the
+    # microphone (it is kept on the recording clock even while nothing plays).
+    from video_story.capture.computer_audio import computer_audio_support
+
+    if computer_audio_support().supported:
+        computer = paths.computer_audio_path(final)
+        assert computer.is_file() and manifest.computer_audio is not None
+        with wave.open(str(computer), "rb") as wav:
+            assert wav.getnchannels() == 1 and wav.getsampwidth() == 2
+            assert wav.getframerate() == manifest.audio.sample_rate
+            computer_ms = wav.getnframes() * 1000 / wav.getframerate()
+        assert abs(computer_ms - duration_ms) < 300, (computer_ms, duration_ms)
+    else:
+        assert manifest.computer_audio is None
 
 
 def test_jpeg_format_and_auto_stop(tmp_path: Path):

@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="756" height="740" viewBox="8 50 756 740" role="img" aria-labelledby="title desc">
+  <title id="title">Computer mouse, top view</title>
+  <desc id="desc">Template of the mouse shown in the editor: five buttons, a vertical scroll module with the wheel and its arrows, a horizontal wheel with its arrows. Every control has its own id; the editor fills them as the playhead moves.</desc>
+  <rect id="background" width="1000" height="1000" fill="white" />
+  <g id="outline" stroke="black" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+    <path id="mouse-body" fill="white" d="M 470,80 C 320,80 230,145 220,280 L 205,530 C 198,690 285,760 470,760 C 655,760 742,690 735,530 L 720,280 C 710,145 620,80 470,80 Z" />
+    <path id="button-1" data-control="button" fill="white" d="M 400,112 C 313,124 254,179 250,282 L 241,438 Q 323,474 400,438 Z" transform="translate(0 112) scale(1 1.16) translate(0 -112)" />
+    <path id="button-2" data-control="button" fill="white" d="M 540,112 C 627,124 686,179 690,282 L 699,438 Q 617,474 540,438 Z" transform="translate(0 112) scale(1 1.16) translate(0 -112)" />
+    <rect id="vertical-scroll-module" x="410" y="112" width="120" height="338" rx="10" fill="white" transform="translate(0 112) scale(1 1.16) translate(0 -112)" />
+    <rect id="button-3" data-control="button" x="440" y="249" width="60" height="72" rx="8" fill="white" transform="translate(470 112) scale(1.1 1.16) translate(-470 -112)" />
+    <path id="scroll-up" data-control="scroll" fill="white" d="M 470,180 L 488,206 L 478,206 L 478,237 L 462,237 L 462,206 L 452,206 Z" transform="translate(470 112) scale(1.1 1.16) translate(-470 -112)" />
+    <path id="scroll-down" data-control="scroll" fill="white" d="M 462,335 L 478,335 L 478,366 L 488,366 L 470,392 L 452,366 L 462,366 Z" transform="translate(470 112) scale(1.1 1.16) translate(-470 -112)" />
+    <rect id="horizontal-scroll-wheel" x="182" y="550" width="52" height="100" rx="16" fill="white" />
+    <path id="scroll-left" data-control="scroll" fill="white" d="M 31,600 L 63,565 L 63,584 L 166,584 L 166,616 L 63,616 L 63,635 Z" />
+    <path id="scroll-right" data-control="scroll" fill="white" d="M 385,600 L 353,565 L 353,584 L 250,584 L 250,616 L 353,616 L 353,635 Z" />
+    <path id="button-4" data-control="button" fill="white" d="M 600,561 C 630,563 681,558 715,553 Q 723,552 722,563 C 721,615 707,648 678,675 Q 674,680 669,676 L 605,638 Q 590,628 578,618 Q 575,615 579,609 C 585,597 588,585 590,573 C 592,561 594,560.6 600,561 Z" transform="translate(-4 0)" />
+    <path id="button-5" data-control="button" fill="white" d="M 466,666 C 497,660 541,648 565,637 Q 573,634 579,640 C 601,660 622,678 639,689 C 645,692.88235 646,697 640,704 C 628,718 605,732 578,739 C 551,746 526,747 506,745 C 498,744.2 494,743 490,735 C 480,715 471,693 466,676 Q 462,668 466,666 Z" transform="translate(-5 -7)" />
+  </g>
+</svg>

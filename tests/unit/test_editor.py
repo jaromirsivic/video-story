@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json  # noqa: E402
+import re  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import wave  # noqa: E402
@@ -15,22 +16,25 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRunnable, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRunnable, Qt  # noqa: E402
 from PySide6.QtGui import QFocusEvent, QImage, QMouseEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from video_story.core.config import Config  # noqa: E402
 from video_story.core.manifest import AudioInfo, Manifest, write_manifest  # noqa: E402
 from video_story.core.naming import frame_filename, sidecar_filename  # noqa: E402
 from video_story.core.screens import RawScreen, assign_screen_ids  # noqa: E402
 from video_story.core.session import SessionPaths  # noqa: E402
-from video_story.core.timeline import format_timestamp  # noqa: E402
 from video_story.core.transcript import Segment, Transcript, write_transcript  # noqa: E402
 from video_story.editor import player as player_mod  # noqa: E402
 from video_story.editor.preview import IMAGE_CACHE_SIZE  # noqa: E402
 from video_story.editor.recording import LoadedRecording  # noqa: E402
-from video_story.editor.recordings_model import RecordingsModel, scan_recordings  # noqa: E402
-from video_story.editor.render_dialog import RenderProgressDialog  # noqa: E402
+from video_story.editor.recordings_model import (  # noqa: E402
+    RecordingsModel,
+    folder_size,
+    format_size,
+    scan_recordings,
+)
 from video_story.editor.timeline import thumbnails as thumbnails_mod  # noqa: E402
 from video_story.editor.timeline.model import MAX_ZOOM_PX_PER_S, TimelineModel  # noqa: E402
 from video_story.editor.timeline.thumbnails import ThumbnailCache  # noqa: E402
@@ -43,8 +47,7 @@ from video_story.editor.timeline.view import (  # noqa: E402
     tick_step_ms,
 )
 from video_story.editor.timeline.waveform import column_peaks, compute_peaks  # noqa: E402
-from video_story.editor.window import EditorWindow  # noqa: E402
-from video_story.export import ExportError, ExportRequest, ExportResult  # noqa: E402
+from video_story.editor.window import EditorWindow, format_crop_time  # noqa: E402
 
 FRAME_TIMES = (0, 500, 1000, 1500, 2000)
 DURATION_MS = 2500
@@ -70,7 +73,9 @@ def make_recording(
     paths = SessionPaths(root, session_id)
     final = paths.final_dir
     frames = paths.frames_dir(final)
+    info = paths.frames_info_dir(final)
     frames.mkdir(parents=True)
+    info.mkdir(parents=True)
     screens = assign_screen_ids(
         [RawScreen(0, 0, 320, 200, primary=True), RawScreen(320, 0, 160, 100)]
     )
@@ -81,13 +86,14 @@ def make_recording(
             ("screen2", (160, 100), (40, 80, t // 10 % 255)),
         ):
             Image.new("RGB", size, colour).save(frames / frame_filename(t, sid, "png"))
-            (frames / sidecar_filename(t, sid)).write_text(
+            (info / sidecar_filename(t, sid)).write_text(
                 json.dumps({"time_ms": t, "screen": sid, "cursor": cursor}), encoding="utf-8"
             )
     n = SAMPLE_RATE * (DURATION_MS if audio_ms is None else audio_ms) // 1000
     tt = np.arange(n) / SAMPLE_RATE
     samples = (np.sin(2 * np.pi * 440 * tt) * 12000).astype("<i2")
-    with wave.open(str(final / "audio.wav"), "wb") as wf:
+    paths.audio_dir(final).mkdir(parents=True, exist_ok=True)
+    with wave.open(str(paths.audio_path(final)), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
@@ -252,7 +258,7 @@ def test_subtitle_single_segment_at_touching_boundary(tmp_path: Path):
 
 def test_waveform_peaks(tmp_path: Path):
     paths = make_recording(tmp_path)
-    peaks = compute_peaks(paths.final_dir / "audio.wav")
+    peaks = compute_peaks(paths.audio_path(paths.final_dir))
     assert peaks.shape == (DURATION_MS // 20, 2)
     assert float(peaks[:, 1].max()) == pytest.approx(12000 / 32768, abs=0.01)
     assert float(peaks[:, 0].min()) == pytest.approx(-12000 / 32768, abs=0.01)
@@ -269,7 +275,7 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     make_recording(tmp_path, "20251231-000000", with_transcript=False)
     # Unprocessed (work only) and broken (no manifest) sessions are not listed.
     (tmp_path / ".work" / "20260103-000000").mkdir(parents=True)
-    (tmp_path / "20260104-000000").mkdir()
+    (tmp_path / "default" / "20260104-000000").mkdir()
 
     items = scan_recordings(tmp_path)
     assert [i.session_id for i in items] == [NEWEST, OLDER, "20251231-000000"]
@@ -277,30 +283,54 @@ def test_recordings_model_order_default_and_first_line(tmp_path: Path):
     assert items[1].first_line == "older one"
     assert items[2].first_line == ""
     assert "02.01.2026 09:00:00" in items[0].display_text
-    assert "2 screens" in items[0].details and "00:02.500" in items[0].details
+    # The length in whole seconds; the screens are the row's dots, not text.
+    assert re.fullmatch(r"00:02 \(\d+\.\d KB\)", items[0].details)
+    assert "screens" not in items[0].display_text
+    assert items[0].screen_ids == ("screen1", "screen2")
+    assert [s[2] for s in items[0].segments] == ["hello world", "second line"]
+    assert items[0].text_at(0) == "hello world"
+    assert items[0].text_at(1200) == "hello world"  # a pause keeps the previous sentence
+    assert items[0].text_at(2000) == "second line"
 
     model = RecordingsModel(tmp_path)
-    assert model.rowCount() == 3
-    assert model.default_row() == 0
-    assert model.default_row(OLDER) == 1
-    assert model.default_row("20200101-000000") == 0
-    assert model.data(model.index(1), Qt.ItemDataRole.DisplayRole).startswith("01.01.2026")
-    (tmp_path / NEWEST / "manifest.json").unlink()
+    assert model.rowCount() == 4  # the header of the default folder, then the recordings
+    assert model.header(0).label == "default (3)" and model.item(0) is None
+    assert model.default_row() == 1
+    assert model.default_row(OLDER) == 2
+    assert model.default_row("20200101-000000") == 1
+    assert model.data(model.index(2), Qt.ItemDataRole.DisplayRole).startswith("01.01.2026")
+    (tmp_path / "default" / NEWEST / "manifest.json").unlink()
     model.refresh()
-    assert model.rowCount() == 2 and model.default_row() == 0
+    assert model.rowCount() == 3 and model.default_row() == 1
 
 
 def test_recording_length_shows_hours_only_when_nonzero(tmp_path: Path):
     make_recording(tmp_path, NEWEST, duration_ms=65 * 60_000)
     make_recording(tmp_path, OLDER)
     items = {item.session_id: item for item in scan_recordings(tmp_path)}
-    assert items[NEWEST].details.startswith("01:05:00.000  |")
-    assert items[OLDER].details.startswith("00:02.500  |")
+    assert items[NEWEST].details.startswith("1:05:00 (")
+    assert items[OLDER].details.startswith("00:02 (")  # no milliseconds
+
+
+def test_size_format_and_folder_size(tmp_path: Path):
+    assert format_size(0) == "0.0 KB" and format_size(500) == "0.5 KB"
+    assert format_size(1536) == "1.5 KB" and format_size(1023 * 1024) == "1023.0 KB"
+    assert format_size(1024 * 1024 - 10) == "1.0 MB"  # never "1024.0 KB"
+    assert format_size(int(2.5 * 1024**2)) == "2.5 MB"
+    assert format_size(3 * 1024**3) == "3.0 GB" and format_size(5 * 1024**4) == "5.0 TB"
+    assert format_size(2048 * 1024**4) == "2048.0 TB"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.bin").write_bytes(b"1" * 1000)
+    (tmp_path / "y.bin").write_bytes(b"1" * 24)
+    assert folder_size(tmp_path) == 1024
+    assert folder_size(tmp_path / "missing") == 0
 
 
 def test_recordings_model_empty_folder(tmp_path: Path):
     model = RecordingsModel(tmp_path / "missing")
-    assert model.rowCount() == 0 and model.default_row() == -1
+    # Only the header of the default folder, which is created when it is missing.
+    assert model.rowCount() == 1 and model.default_row() == -1
+    assert (tmp_path / "missing" / "default").is_dir()
 
 
 # Editor window -----------------------------------------------------------------
@@ -426,14 +456,14 @@ def editor(qtbot, folder: Path):
 
 def test_window_loads_newest_recording_and_workers(editor, qtbot):
     assert editor.windowTitle() == "Video Story Editor"
-    assert editor.list_view.currentIndex().row() == 0
+    assert editor.list_view.currentIndex().row() == 1  # row 0: the default folder's header
     assert editor.model.duration_ms == DURATION_MS
     assert editor.model.screens == ["screen1", "screen2"]
     assert editor.model.selected_screen == "screen1"
     assert (editor.model.in_ms, editor.model.out_ms) == (0, DURATION_MS)
-    assert editor.preview.time_label.text() == "00:00:00.000 / 00:00:02.500"
+    assert editor.preview.time_label.text() == "00:00:00.00 / 00:00:02.50"
     assert NEWEST in editor.status_label.text() and "320x200" in editor.status_label.text()
-    assert editor.in_edit.text() == "00:00:00.000" and editor.out_edit.text() == "00:00:02.500"
+    assert editor.in_edit.text() == "00:00:00.00" and editor.out_edit.text() == "00:00:02.50"
 
     qtbot.waitUntil(lambda: editor.timeline.waveform.peaks is not None, timeout=10_000)
     assert editor.timeline.waveform.peaks.shape[0] == DURATION_MS // 20
@@ -450,11 +480,16 @@ def test_window_session_argument_selects_that_recording(qtbot, folder: Path):
     qtbot.addWidget(window)
     window.show()
     _wait_loaded(qtbot, window, OLDER)
-    assert window.list_view.currentIndex().row() == 1
-    window.list_view.setCurrentIndex(window.recordings.index(0))
+    assert window.list_view.currentIndex().row() == 2
+    window.list_view.setCurrentIndex(window.recordings.index(1))
     _wait_loaded(qtbot, window, NEWEST)
     window.refresh_recordings()
     assert window.recording.session_id == NEWEST
+
+
+def test_audio_track_is_as_tall_as_the_screen_tracks(editor):
+    heights = {rect.height() for _screen, rect in editor.timeline.track_rects()}
+    assert heights == {editor.timeline.audio_rect().height()}
 
 
 def test_track_click_selects_screen_and_preview(editor, qtbot):
@@ -480,21 +515,21 @@ def test_io_keys_time_editors_and_reset_crop(editor, qtbot):
     editor.model.set_playhead(700)
     qtbot.keyClick(editor.timeline, Qt.Key_I)
     assert editor.model.in_ms == 700
-    assert editor.in_edit.text() == "00:00:00.700"
+    assert editor.in_edit.text() == "00:00:00.70"
     editor.model.set_playhead(2200)
     qtbot.keyClick(editor.timeline, Qt.Key_O)
     assert editor.model.out_ms == 2200
-    assert editor.out_edit.text() == "00:00:02.200"
-    assert "length 00:00:01.500" in editor.crop_label.text()
+    assert editor.out_edit.text() == "00:00:02.20"
+    assert "length 00:00:01.50" in editor.crop_label.text()
     # Typing into the In editor and pressing Return commits (clamped to keep one second).
     editor.in_edit.selectAll()
     qtbot.keyClicks(editor.in_edit, "00:00:01.900")
     qtbot.keyClick(editor.in_edit, Qt.Key_Return)
     assert editor.model.in_ms == 1200
-    assert editor.in_edit.text() == "00:00:01.200"
+    assert editor.in_edit.text() == "00:00:01.20"
     editor.reset_crop_button.click()
     assert (editor.model.in_ms, editor.model.out_ms) == (0, DURATION_MS)
-    assert editor.in_edit.text() == "00:00:00.000"
+    assert editor.in_edit.text() == "00:00:00.00"
     # Home/End and the step keys move the playhead.
     editor.model.set_in(1000)
     editor._crop_updated()
@@ -515,189 +550,43 @@ def test_time_edit_commits_on_return_and_focus_out_and_reverts_partial_text(edit
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:01.900")
     qtbot.keyClick(edit, Qt.Key_Return)
-    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.200"
+    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.20"
     # A partial entry does not survive Enter: it reverts to the last value.
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:0")
     assert edit.text() == "00:00:0"
     qtbot.keyClick(edit, Qt.Key_Enter)
-    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.200"
+    assert editor.model.in_ms == 1200 and edit.text() == "00:00:01.20"
     # HH:MM:SS without milliseconds is accepted; focus-out commits it.
     edit.selectAll()
     qtbot.keyClicks(edit, "00:00:00")
     QApplication.sendEvent(edit, QFocusEvent(QEvent.Type.FocusOut))
-    assert editor.model.in_ms == 0 and edit.text() == "00:00:00.000"
+    assert editor.model.in_ms == 0 and edit.text() == "00:00:00.00"
     # Letters are refused by the validator, so the text cannot become garbage.
     edit.selectAll()
     qtbot.keyClicks(edit, "garbage")
-    assert edit.text() == "00:00:00.000"
+    assert edit.text() == "00:00:00.00"
     # The Out editor: partial text plus focus-out reverts too.
     out = editor.out_edit
     out.selectAll()
     qtbot.keyClicks(out, "00:00:1")
     QApplication.sendEvent(out, QFocusEvent(QEvent.Type.FocusOut))
-    assert editor.model.out_ms == 2200 and out.text() == "00:00:02.200"
-    assert "length 00:00:02.200" in editor.crop_label.text()
+    assert editor.model.out_ms == 2200 and out.text() == "00:00:02.20"
+    assert "length 00:00:02.20" in editor.crop_label.text()
 
 
 def test_subtitle_label_follows_playhead(editor):
     editor.model.set_playhead(500)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == "hello world"
-    assert editor.preview.time_label.text().startswith("00:00:00.500 /")
+    assert editor.preview.time_label.text().startswith("00:00:00.50 /")
     editor.model.set_playhead(1200)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == ""
     editor.model.set_playhead(1800)
     editor._sync_playhead()
     assert editor.preview.subtitle_label.text() == "second line"
-    editor.preview.subtitles_check.setChecked(False)
-    assert editor.preview.subtitle_label.text() == ""
-    editor.preview.subtitles_check.setChecked(True)
-    assert editor.preview.subtitle_label.text() == "second line"
-
-
-def test_render_passes_selection_and_crop(editor, qtbot, monkeypatch, tmp_path: Path):
-    output = tmp_path / "exports" / "clip.mp4"
-    output.parent.mkdir()
-    calls: dict[str, object] = {}
-    boxes: list[tuple[str, str]] = []
-
-    def fake_export(request, config, progress=None, cancel=None):
-        calls["request"] = request
-        calls["config"] = config
-        progress(0.5, "halfway")
-        assert cancel() is False
-        return ExportResult(
-            output=request.output,
-            srt=request.output.with_suffix(".srt"),
-            screen_id=request.screen_id,
-            start_ms=request.start_ms,
-            end_ms=request.end_ms,
-            duration_ms=request.end_ms - request.start_ms,
-            width=160,
-            height=100,
-            fps=24,
-            frames_used=3,
-            ffmpeg="ffmpeg",
-        )
-
-    editor._export_fn = fake_export
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(output), "MP4"))
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "information",
-        staticmethod(lambda parent, title, text, *a, **k: boxes.append((title, text))),
-    )
-    editor.select_screen("screen2")
-    editor.model.set_in(700)
-    editor.model.set_out(2200)
-    editor._crop_updated()
-
-    result = editor.render()
-    request = calls["request"]
-    assert isinstance(request, ExportRequest)
-    assert request.paths.session_id == NEWEST
-    assert request.output == output
-    assert request.screen_id == "screen2"
-    assert (request.start_ms, request.end_ms) == (700, 2200)
-    assert request.draw_cursor is True and request.write_srt is True
-    assert calls["config"] is editor.config
-    assert result is editor.last_export_result and result.duration_ms == 1500
-    assert boxes and boxes[0][0] == "Render finished"
-    assert str(output) in boxes[0][1] and str(output.with_suffix(".srt")) in boxes[0][1]
-    assert editor.render_button.isEnabled() and editor.isVisible()
-
-
-def test_render_default_path_and_cancelled_dialog(editor, monkeypatch):
-    seen: list[str] = []
-
-    def fake_dialog(parent, title, suggested, filt):
-        seen.append(suggested)
-        assert filt == "MP4 video (*.mp4)"
-        return ("", "")
-
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
-    assert editor.render() is None
-    assert seen == [str(editor.config.recording_folder / f"{NEWEST}_screen1.mp4")]
-
-
-def test_render_error_is_reported(editor, monkeypatch, tmp_path: Path):
-    errors: list[str] = []
-
-    def failing_export(request, config, progress=None, cancel=None):
-        raise ExportError("FFMPEG_FAILED", "ffmpeg exploded")
-
-    editor._export_fn = failing_export
-    monkeypatch.setattr(
-        QFileDialog,
-        "getSaveFileName",
-        staticmethod(lambda *a, **k: (str(tmp_path / "x"), "")),
-    )
-    monkeypatch.setattr(
-        QMessageBox, "critical", staticmethod(lambda p, t, text, *a, **k: errors.append(text))
-    )
-    assert editor.render() is None
-    assert errors and "ffmpeg exploded" in errors[0] and "FFMPEG_FAILED" in errors[0]
-
-
-def test_render_cancel_shows_message_after_worker_ends(editor, monkeypatch, tmp_path: Path):
-    boxes: list[tuple[str, str]] = []
-    seen: dict[str, object] = {}
-    finished = threading.Event()
-
-    def slow_export(request, config, progress=None, cancel=None):
-        try:
-            deadline = time.perf_counter() + 10  # never hang the suite
-            while not cancel():
-                if time.perf_counter() > deadline:
-                    raise ExportError("TIMEOUT", "cancel never arrived")
-                progress(0.1, "working")
-                time.sleep(0.01)
-            time.sleep(0.25)  # ffmpeg takes a moment to wind down after Cancel
-            raise ExportError("CANCELLED", "export cancelled")
-        finally:
-            finished.set()
-
-    editor._export_fn = slow_export
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(tmp_path / "c.mp4"), ""))
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "information",
-        staticmethod(lambda parent, title, text, *a, **k: boxes.append((title, text))),
-    )
-    monkeypatch.setattr(
-        QMessageBox, "critical", staticmethod(lambda p, t, text, *a, **k: boxes.append((t, text)))
-    )
-
-    def press_cancel() -> None:
-        dialog = editor.findChild(RenderProgressDialog)
-        seen["dialog_visible"] = dialog is not None and dialog.isVisible()
-        if dialog is None:
-            return
-        dialog.cancel_button.click()
-        seen["button_enabled_after"] = dialog.cancel_button.isEnabled()
-        seen["label_after"] = dialog.message_label.text()
-
-        def later() -> None:
-            seen["visible_later"] = dialog.isVisible()
-            seen["worker_done_later"] = finished.is_set()
-
-        QTimer.singleShot(80, later)
-
-    QTimer.singleShot(150, press_cancel)
-    assert editor.render() is None
-    assert finished.is_set()
-    assert seen["dialog_visible"] is True
-    assert seen["button_enabled_after"] is False and seen["label_after"] == "Cancelling"
-    # The dialog stayed open until the worker ended (which it had not yet 80 ms later).
-    assert seen["visible_later"] is True and seen["worker_done_later"] is False
-    assert boxes == [("Render cancelled", "The export was cancelled.")]
-    assert editor.last_export_result is None and editor.render_button.isEnabled()
+    assert not hasattr(editor.preview, "subtitles_check")  # subtitles are always shown
 
 
 def test_player_fallback_clock_when_sounddevice_missing(editor, qtbot, no_sd):
@@ -724,10 +613,14 @@ def test_player_fallback_clock_when_sounddevice_missing(editor, qtbot, no_sd):
 
     editor.model.set_playhead(1950)
     editor.toggle_play()
+    assert editor.model.play_marker_ms == 1950  # the white arrow: where Play was pressed
     qtbot.waitUntil(lambda: not editor.player.playing, timeout=5000)  # stops at Out
     assert editor.model.playhead_ms == 2000
     editor.stop_playback()
-    assert editor.model.playhead_ms == 1000
+    assert editor.model.playhead_ms == 1950  # Stop returns to where Play was pressed
+    editor.model.set_play_marker(None)
+    editor.stop_playback()
+    assert editor.model.playhead_ms == 1000  # without a marker Stop goes to In
 
 
 def test_player_uses_audio_stream_when_available(editor, qtbot, fake_sd):
@@ -753,6 +646,7 @@ def test_pause_aborts_the_stream_instead_of_draining_it(editor, qtbot, fake_sd):
     paused_at = editor.model.playhead_ms
     editor.toggle_play()  # resumes exactly where it paused
     assert editor.model.playhead_ms == paused_at and len(FakeStream.instances) == 2
+    assert editor.model.play_marker_ms == 0  # a resume keeps the marker of the first Play
     editor.stop_playback()
     assert editor.model.playhead_ms == 0
 
@@ -858,7 +752,7 @@ def test_playhead_drag_while_playing_scrubs_and_resumes_once(editor, qtbot, no_s
         _mouse_move(view, QPoint(x0 + dx, y))
         assert editor.model.playhead_ms == view._time(x0 + dx)
         assert editor.preview.time_label.text().startswith(
-            f"{format_timestamp(editor.model.playhead_ms)} /"
+            f"{format_crop_time(editor.model.playhead_ms)} /"
         )
     assert len(plays) == 1 and not editor.player.playing
     qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(x0 + 20, y))
@@ -898,7 +792,7 @@ def test_crop_handle_press_keeps_grab_offset_and_playhead_wins(qtbot, tmp_path: 
     assert model.in_ms == 60_000  # pressing does not move the crop
     _mouse_move(view, QPoint(press_x + 10, y))
     assert model.in_ms == pytest.approx(60_000 + 10 * ms_per_px, abs=1)
-    assert window.in_edit.text() == format_timestamp(model.in_ms)
+    assert window.in_edit.text() == format_crop_time(model.in_ms)
     qtbot.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(press_x + 10, y))
     assert view._drag is None
     # The playhead sitting on the In handle can still be scrubbed.
@@ -1051,6 +945,5 @@ def test_empty_recording_folder(qtbot, tmp_path: Path):
     window.show()
     assert window.recording is None
     assert window.status_label.text() == "No recording selected"
-    assert window.render() is None  # nothing to export; the window stays open
     window.toggle_play()
     assert not window.player.playing

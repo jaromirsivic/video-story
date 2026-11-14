@@ -37,7 +37,7 @@ def folder(tmp_path: Path) -> Path:
 
 
 def _crop_file(folder: Path, session_id: str = NEWEST) -> Path:
-    return SessionPaths(folder, session_id).crop_path(folder / session_id)
+    return SessionPaths(folder, session_id).crop_path(folder / "default" / session_id)
 
 
 def _read_crop_json(folder: Path, session_id: str = NEWEST) -> dict:
@@ -71,29 +71,35 @@ def _open(qtbot, folder: Path, **kwargs) -> EditorWindow:
 # Process button -------------------------------------------------------------------
 
 
-def test_process_button_is_green_enabled_and_next_to_render(qtbot, folder: Path):
+def test_process_button_is_green_enabled_next_to_instructions(qtbot, folder: Path):
     window = _open(qtbot, folder)
     button = window.process_button
     assert button.text() == "Process" and button.isEnabled()
     assert "agent" in button.toolTip() and "cropped range" in button.toolTip()
-    assert button.minimumSize() == window.render_button.minimumSize()
+    assert button.minimumSize() == window.instructions_button.minimumSize()
     assert button.font().bold() and button.font().pointSizeF() == pytest.approx(
-        window.render_button.font().pointSizeF()
+        window.instructions_button.font().pointSizeF()
     )
     assert "#1e9e3e" in button.styleSheet() and "color: white" in button.styleSheet()
     image = button.grab().toImage()
     centre = image.pixelColor(image.width() // 2, image.height() // 4)  # away from the text
     assert centre.green() > centre.red() + 60 and centre.green() > centre.blue() + 60
     assert QKeySequence("Ctrl+Return") in window.process_action.shortcuts()
-    assert window.render_button.parentWidget() is button.parentWidget()
-    assert window.render_button.geometry().right() < button.geometry().left()
+    assert window.instructions_button.parentWidget() is button.parentWidget()
+    # Order: Auto process | Process | Instructions, at the right edge (no Render).
+    assert window.auto_process_checkbox.geometry().right() < button.geometry().left()
+    assert button.geometry().right() < window.instructions_button.geometry().left()
+    # Smaller than the old 180x44 buttons, both the same size.
+    assert button.minimumSize().height() < 44 and button.minimumSize().width() < 180
+    assert window.instructions_button.minimumSize() == button.minimumSize()
 
     window.list_view.clearSelection()
     window._set_recording(None)
     assert not button.isEnabled()
+    assert not window.instructions_button.isEnabled()
 
 
-def test_process_without_sessions_only_stores_crop_and_shows_feedback(qtbot, folder: Path):
+def test_process_without_sessions_stores_crop_shows_feedback_and_closes(qtbot, folder: Path):
     window = _open(qtbot, folder)
     sent: list[tuple[str, Crop]] = []
     window.processed.connect(lambda sid, crop: sent.append((sid, crop)))
@@ -110,11 +116,10 @@ def test_process_without_sessions_only_stores_crop_and_shows_feedback(qtbot, fol
     assert sent == [(NEWEST, Crop(500, 2000))]
     assert window.process_button.text() == "Sent to agent"
     assert not window.process_button.isEnabled()
-    assert window.isVisible()
     assert "Sent to agent" in window.statusBar().currentMessage()
     assert NEWEST in window.statusBar().currentMessage()
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    assert window.process_button.isEnabled()
+    # The work continues in the agent: the editor closes by itself.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
 
 
 def test_shortcut_cannot_bypass_the_sent_to_agent_feedback(qtbot, folder: Path):
@@ -131,10 +136,9 @@ def test_shortcut_cannot_bypass_the_sent_to_agent_feedback(qtbot, folder: Path):
     assert window.process() is None  # a direct call during the feedback is ignored too
     assert sent == [NEWEST]
     assert es.read_editor_event(editor_session)["updated_at"] == stamp
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    assert window.process_action.isEnabled()
-    qtbot.keyClick(window.timeline, Qt.Key_Return, Qt.KeyboardModifier.ControlModifier)
-    assert sent == [NEWEST, NEWEST]
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+    assert sent == [NEWEST]
+    assert es.read_editor_event(editor_session)["event"] == "process"
 
 
 def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, monkeypatch):
@@ -150,27 +154,92 @@ def test_process_and_render_commit_a_typed_in_value_first(qtbot, folder: Path, m
     assert window.model.in_ms == 700
     event = es.read_editor_event(editor_session)
     assert event["event"] == "process" and event["crop"]["start_ms"] == 700
-    qtbot.waitUntil(lambda: window.process_button.text() == "Process", timeout=5000)
-    # A value typed into Out and Process called by the button / direct call: committed.
-    window.out_edit.setFocus()
-    window.out_edit.selectAll()
-    qtbot.keyClicks(window.out_edit, "00:00:02.000")
-    assert window.model.out_ms == DURATION_MS
-    assert window.process() == Crop(700, 2000)
-    assert es.read_editor_event(editor_session)["crop"] == {"start_ms": 700, "end_ms": 2000}
-    # Render too: the request carries the committed In.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+    editor_session = es.new_editor_session(cfg)
+    window = _open(qtbot, folder, editor_session=editor_session)
+    assert window.model.in_ms == 700  # restored from crop.json
+    # Render: the request carries the committed In.
     window.in_edit.setFocus()
     window.in_edit.selectAll()
     qtbot.keyClicks(window.in_edit, "00:00:00.900")
     seen: list[tuple[int, int]] = []
 
-    def cancelled_dialog(parent, suggested):
+    def cancelled_dialog(item, default_screen):
         seen.append((window.model.in_ms, window.model.out_ms))
         return None
 
-    monkeypatch.setattr(window_mod, "ask_output_path", cancelled_dialog)
-    assert window.render() is None
-    assert seen == [(900, 2000)]
+    monkeypatch.setattr(window, "_ask_render", cancelled_dialog)
+    item = window.recordings.item(window.recordings.row_of(NEWEST))
+    assert window.render_video(item) is False
+    assert seen == [(900, DURATION_MS)]
+    # A value typed into Out and Process called by a direct call: committed.
+    window.out_edit.setFocus()
+    window.out_edit.selectAll()
+    qtbot.keyClicks(window.out_edit, "00:00:02.000")
+    assert window.model.out_ms == DURATION_MS
+    assert window.process() == Crop(900, 2000)
+    assert es.read_editor_event(editor_session)["crop"] == {"start_ms": 900, "end_ms": 2000}
+
+
+def _show_older(qtbot, window: EditorWindow, monkeypatch, answer: bool) -> list[str]:
+    """Select the older recording (not the green one) and answer the confirmation with
+    ``answer``; returns the list the confirmation calls are counted in."""
+    window.list_view.setCurrentIndex(window.recordings.index(2))
+    _wait_loaded(qtbot, window, OLDER)
+    assert window.fresh_recording == NEWEST
+    asked: list[str] = []
+
+    def confirm() -> bool:
+        asked.append(window.recording.session_id)
+        return answer
+
+    monkeypatch.setattr(window, "_confirm_process_not_latest", confirm)
+    return asked
+
+
+def test_process_on_the_latest_recording_does_not_ask(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    asked: list[bool] = []
+    monkeypatch.setattr(window, "_confirm_process_not_latest", lambda: asked.append(True))
+    assert window.fresh_recording == NEWEST
+    window.process_button.click()
+    assert asked == [] and window.process_button.text() == "Sent to agent"
+
+
+def test_process_on_an_older_recording_asks_and_no_keeps_the_window(
+    qtbot, folder: Path, monkeypatch
+):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=False)
+    window.process_button.click()
+    assert asked == [OLDER] and sent == []
+    assert window.process_button.text() == "Process" and window.isVisible()
+    assert not _crop_file(folder, OLDER).exists()
+    # Ctrl+Enter asks as well.
+    qtbot.keyClick(window.timeline, Qt.Key_Return, Qt.KeyboardModifier.ControlModifier)
+    assert asked == [OLDER, OLDER] and sent == []
+
+
+def test_process_on_an_older_recording_yes_sends_it(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=True)
+    window.process_button.click()
+    assert asked == [OLDER] and sent == [OLDER]
+    assert window.process_button.text() == "Sent to agent"
+
+
+def test_auto_process_on_an_older_recording_does_not_ask(qtbot, folder: Path, monkeypatch):
+    window = _open(qtbot, folder)
+    sent: list[str] = []
+    window.processed.connect(lambda sid, _crop: sent.append(sid))
+    asked = _show_older(qtbot, window, monkeypatch, answer=False)
+    assert window.process(auto=True) is not None
+    assert asked == [] and sent == [OLDER]
 
 
 def test_process_failure_keeps_the_recording_session_and_the_button(
@@ -183,7 +252,7 @@ def test_process_failure_keeps_the_recording_session_and_the_button(
     sent: list[str] = []
     window.processed.connect(lambda sid, _crop: sent.append(sid))
 
-    def failing_finish(paths, crop, shown_session_id=None):
+    def failing_finish(paths, crop, shown_session_id=None, instructions=None):
         raise RuntimeError("state.json is locked")
 
     monkeypatch.setattr(window_mod, "finish_recording_session", failing_finish)
@@ -269,18 +338,18 @@ def test_crop_restored_on_reload_and_clamped(qtbot, folder: Path):
     write_crop(_crop_file(folder, OLDER), Crop(-5, 99_999))
     window = _open(qtbot, folder)
     assert (window.model.in_ms, window.model.out_ms) == (600, 2100)
-    assert window.in_edit.text() == "00:00:00.600" and window.out_edit.text() == "00:00:02.100"
-    assert "length 00:00:01.500" in window.crop_label.text()
+    assert window.in_edit.text() == "00:00:00.60" and window.out_edit.text() == "00:00:02.10"
+    assert "length 00:00:01.50" in window.crop_label.text()
     stamp = _read_crop_json(folder)["updated_at"]
     # Switching recordings restores the other crop (clamped) without writing anything.
-    window.list_view.setCurrentIndex(window.recordings.index(1))
+    window.list_view.setCurrentIndex(window.recordings.index(2))
     _wait_loaded(qtbot, window, OLDER)
     assert (window.model.in_ms, window.model.out_ms) == (0, DURATION_MS)
     assert _read_crop_json(folder)["updated_at"] == stamp
     window.model.set_playhead(900)
     qtbot.keyClick(window.timeline, Qt.Key_I)
     assert _read_crop_json(folder, OLDER)["start_ms"] == 900
-    window.list_view.setCurrentIndex(window.recordings.index(0))
+    window.list_view.setCurrentIndex(window.recordings.index(1))
     _wait_loaded(qtbot, window, NEWEST)
     assert (window.model.in_ms, window.model.out_ms) == (600, 2100)
     window.close()
@@ -299,7 +368,7 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     window = _open(qtbot, folder, editor_session=editor_session, recording_session=paths.session_id)
     adopted = read_state(paths.state_path)
     assert adopted.status is Status.EDITING and adopted.pid == os.getpid()
-    assert f"waiting for Process (recording {NEWEST})" in window.status_label.text()
+    assert "waiting for Process" not in window.status_label.text()  # not in the status bar
     assert es.read_editor_event(editor_session)["event"] == "open"
 
     window.model.set_in(500)
@@ -317,24 +386,26 @@ def test_process_writes_editor_event_and_finishes_recording_session(qtbot, folde
     assert state.recording_dir == str(paths.final_dir)
     assert _read_crop_json(folder)["start_ms"] == 500
     assert window.recording_session is None and window.editor_event_sent
-    assert "sent to agent" in window.status_label.text()
-    assert window.isVisible()
 
-    # Closing afterwards neither rewrites the event nor touches the finished session.
-    window.close()
+    # The window closes by itself; closing neither rewrites the event nor touches the
+    # finished session.
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
     assert es.read_editor_event(editor_session)["event"] == "process"
     assert read_state(paths.state_path).status is Status.PROCESSED
 
 
-def test_process_on_another_recording_still_finishes_the_recording_session(qtbot, folder: Path):
+def test_process_on_another_recording_still_finishes_the_recording_session(
+    qtbot, folder: Path, monkeypatch
+):
     cfg = Config(recording_folder=folder)
     editor_session = es.new_editor_session(cfg)
     paths = _editing_session(folder, NEWEST)
     window = _open(qtbot, folder, editor_session=editor_session, recording_session=NEWEST)
-    window.list_view.setCurrentIndex(window.recordings.index(1))
+    window.list_view.setCurrentIndex(window.recordings.index(2))
     _wait_loaded(qtbot, window, OLDER)
     window.model.set_in(1000)
     window._crop_updated()
+    monkeypatch.setattr(window, "_confirm_process_not_latest", lambda: True)
     window.process_button.click()
     event = es.read_editor_event(editor_session)
     assert event["session_id"] == OLDER and event["crop"]["start_ms"] == 1000
@@ -397,13 +468,12 @@ def test_attach_request_selects_recording_adopts_sessions_and_raises(
     handled = window.check_attach_requests()
     assert [(r.editor_session, r.session_id) for r in handled] == [(second, third)]
     _wait_loaded(qtbot, window, third)
-    assert window.list_view.currentIndex().row() == 0
+    assert window.list_view.currentIndex().row() == 1
     assert window.editor_session == second and not window.editor_event_sent
     assert window.recording_session == third
     assert read_state(paths.state_path).pid == os.getpid()
     assert raised == ["raise_", "activateWindow"]
     assert window.isMaximized() and not window.isMinimized()  # not dropped to normal
-    assert f"waiting for Process (recording {third})" in window.status_label.text()
     # The previous editor session was told the editor moved on; its folder is empty.
     assert es.read_editor_event(first)["event"] == "closed"
     assert not list(es.requests_dir(cfg).glob("*.json"))
@@ -430,7 +500,7 @@ def test_attach_timer_serves_requests_on_its_own(qtbot, folder: Path):
     es.write_attach_request(cfg, session, OLDER)
     qtbot.waitUntil(lambda: window.editor_session == session, timeout=5000)
     _wait_loaded(qtbot, window, OLDER)
-    assert "waiting for Process" in window.status_label.text()
+    assert not window.editor_event_sent  # waits for Process (no longer in the status bar)
 
 
 def test_attach_un_minimizes_without_touching_a_normal_window(qtbot, folder: Path):

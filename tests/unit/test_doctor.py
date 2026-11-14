@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from video_story.capture import computer_audio
 from video_story.capture.audio_recorder import AudioDevice, AudioError
 from video_story.core.config import Config
 from video_story.core.screens import RawScreen
@@ -57,6 +58,11 @@ def healthy(tmp_path: Path, monkeypatch) -> tuple[Config, FakePlatform]:
     monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: tmp_path / "ffmpeg")
     monkeypatch.setattr(doctor, "ffmpeg_version", lambda path: "7.1")
     monkeypatch.setattr(doctor, "config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr(
+        computer_audio,
+        "computer_audio_support",
+        lambda: computer_audio.ComputerAudioSupport(True, "", "Speakers"),
+    )
     cfg = Config(recording_folder=tmp_path / "rec", whisper_model_path=model)
     return cfg, platform
 
@@ -75,9 +81,13 @@ def test_doctor_all_green(healthy, tmp_path: Path):
         "platform",
         "screens",
         "audio",
+        "computer_audio",
+        "mouse",
+        "state",
         "ffmpeg",
         "model",
         "backend",
+        "live_transcription",
         "recording_folder",
         "config",
     }
@@ -85,6 +95,8 @@ def test_doctor_all_green(healthy, tmp_path: Path):
     assert set(checks["python"]) == {"name", "ok", "detail", "hint"}
     assert "screen1 1920x1080 (primary)" in checks["screens"]["detail"] and platform.prepared
     assert "USB Mic" in checks["audio"]["detail"]
+    assert checks["computer_audio"]["detail"] == "recorded from Speakers (loopback)"
+    assert checks["live_transcription"]["detail"].startswith("light: ")
     assert checks["ffmpeg"]["detail"].startswith("ffmpeg 7.1")
     assert "SHA-256 verified" in checks["model"]["detail"]
     assert report["ffmpeg"] == str(tmp_path / "ffmpeg")
@@ -202,3 +214,134 @@ def test_doctor_unwritable_recording_folder(healthy, tmp_path: Path):
     blocker.write_text("x", encoding="utf-8")
     check = _by_name(doctor.run_doctor(cfg.with_values(recording_folder=str(blocker))))
     assert check["recording_folder"]["ok"] is False and check["recording_folder"]["hint"]
+
+
+def test_doctor_reports_the_state_folder(healthy, tmp_path: Path, monkeypatch):
+    cfg, _ = healthy
+    state = tmp_path / "state"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    report = doctor.run_doctor(cfg)
+    check = _by_name(report)["state"]
+    assert check["ok"] and check["detail"] == f"{state} (VIDEO_STORY_HOME is set), not created yet"
+    assert report["state_root"] == str(state)
+    assert report["state_reason"] == "VIDEO_STORY_HOME is set"
+    assert not state.exists(), "a plain doctor creates nothing"
+    check = _by_name(doctor.run_doctor(cfg, fix=True))["state"]
+    assert check["ok"] and check["detail"].endswith("is writable") and state.is_dir()
+
+
+def test_doctor_model_lookup_and_download_target(healthy, tmp_path: Path, monkeypatch):
+    """The model in the state root, else in the code root; downloads go to the state."""
+    cfg, _ = healthy
+    cfg = cfg.with_values(whisper_model_path=None)
+    state, code = tmp_path / "state", tmp_path / "code"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(code))
+    bundled = code / "models" / "ggml-large-v3-turbo-q5_0.bin"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"model-bytes")
+    report = doctor.run_doctor(cfg)
+    assert report["model"] == str(bundled)
+    assert _by_name(report)["model"]["detail"].endswith("(code folder)")
+
+    bundled.write_bytes(b"corrupt")  # a broken bundled copy: setup downloads a good one
+    downloads: list[Path] = []
+
+    def fake_download(url, dest, *, expected_sha256=None, **kwargs):
+        downloads.append(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"model-bytes")
+
+    monkeypatch.setattr(doctor, "download_file", fake_download)
+    report = doctor.run_doctor(cfg, download_model=True)
+    target = state / "models" / "ggml-large-v3-turbo-q5_0.bin"
+    assert downloads == [target] and report["model"] == str(target)
+    assert _by_name(report)["model"]["detail"].endswith("(state folder)")
+    assert bundled.read_bytes() == b"corrupt", "the code root is never written"
+
+    target.unlink()
+    bundled.unlink()
+    detail = _by_name(doctor.run_doctor(cfg))["model"]["detail"]
+    assert detail == f"model not found: {target} (nor {bundled})"
+
+
+def test_doctor_unwritable_state_folder_blocks_downloads(healthy, tmp_path: Path, monkeypatch):
+    cfg, _ = healthy
+    cfg = cfg.with_values(whisper_model_path=None)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(blocker / "state"))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
+    monkeypatch.setattr(doctor, "find_ffmpeg", lambda config: None)
+    calls: list[str] = []
+    monkeypatch.setattr(doctor, "download_file", lambda *a, **k: calls.append("model"))
+    monkeypatch.setattr(doctor, "ensure_ffmpeg", lambda *a, **k: calls.append("ffmpeg"))
+    report = doctor.run_doctor(cfg, fix=True, download_model=True)
+    check = _by_name(report)["state"]
+    assert check["ok"] is False and str(blocker / "state") in check["detail"]
+    assert "VIDEO_STORY_HOME" in check["hint"]
+    assert calls == [], "nothing is downloaded anywhere else"
+    assert report["ok"] is False
+
+
+def test_mouse_is_optional_and_never_fails_the_doctor():
+    class NoMouse:
+        name = "fake-os"
+
+        def mouse_source(self):
+            return None
+
+    class Broken:
+        name = "windows-ll-hook"
+
+        def probe(self):
+            return "mouse hook not installed: blocked"
+
+    class Works(Broken):
+        def probe(self):
+            return None
+
+    class WithMouse:
+        name = "fake-os"
+
+        def __init__(self, source):
+            self.source = source
+
+        def mouse_source(self):
+            return self.source
+
+    off = doctor.check_mouse(Config(mouse_actions=False), NoMouse())
+    assert off.ok and "switched off" in off.detail
+    assert "not available on fake-os" in doctor.check_mouse(Config(), NoMouse()).detail
+    broken = doctor.check_mouse(Config(), WithMouse(Broken()))
+    assert broken.ok and "blocked" in broken.detail
+    detail = doctor.check_mouse(Config(), WithMouse(Works())).detail
+    assert detail == "recorded (windows-ll-hook); elements not recorded on this platform yet"
+
+    class Inspector:
+        name = "windows-uia"
+
+        def prepare(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Full(WithMouse):
+        def element_inspector(self):
+            return Inspector()
+
+    full = doctor.check_mouse(Config(), Full(Works())).detail
+    assert full == "recorded (windows-ll-hook); elements recorded (windows-uia)"
+    assert doctor.check_mouse(Config(), None).ok
+
+
+def test_computer_audio_is_optional_and_never_fails_the_doctor(monkeypatch):
+    monkeypatch.setattr(
+        computer_audio,
+        "computer_audio_support",
+        lambda: computer_audio.ComputerAudioSupport(False, "no audio output device"),
+    )
+    check = doctor.check_computer_audio(Config())
+    assert check.ok and "no audio output device" in check.detail
+    assert "switched off" in doctor.check_computer_audio(Config(computer_audio=False)).detail

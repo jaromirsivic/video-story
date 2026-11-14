@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from video_story import __version__
+from video_story.core.fileio import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,15 @@ def file_digest(path: Path, algorithm: str = "sha256") -> str:
         for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_digests(path: Path) -> dict[str, str]:
+    hashes = {name: hashlib.new(name) for name in ("sha256", "sha1", "md5")}
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(CHUNK_SIZE), b""):
+            for digest in hashes.values():
+                digest.update(chunk)
+    return {name: digest.hexdigest() for name, digest in hashes.items()}
 
 
 def _check(expected: str | None, actual: str, algorithm: str, url: str) -> None:
@@ -139,10 +150,12 @@ def download_file(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    metadata = part.with_suffix(part.suffix + ".json")
+    identity = {"url": url, "sha256": expected_sha256, "sha1": expected_sha1, "md5": expected_md5}
     last_error: Exception | None = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            size, digests = _stream_to_file(url, part, progress, timeout, headers)
+            size, digests = _stream_to_file(url, part, progress, timeout, headers, identity)
         except Exception as exc:
             last_error = exc
             if attempt < attempts and _retryable(exc):
@@ -150,8 +163,7 @@ def download_file(
                 log.warning("Download of %s failed (%s); retrying in %.0fs", url, exc, delay)
                 time.sleep(delay)
                 continue
-            if part.exists():
-                part.unlink(missing_ok=True)
+            # Keep the partial file and its source identity for a later process.
             raise DownloadError(f"cannot download {url}: {exc}") from exc
         try:
             _check(expected_sha256, digests["sha256"], "sha256", url)
@@ -159,8 +171,10 @@ def download_file(
             _check(expected_md5, digests["md5"], "md5", url)
         except ChecksumMismatch:
             part.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
             raise
         os.replace(part, dest)
+        metadata.unlink(missing_ok=True)
         log.info("Downloaded %s (%d bytes) to %s", url, size, dest)
         return DownloadResult(
             url=url,
@@ -180,33 +194,87 @@ def _stream_to_file(
     progress: ProgressCallback | None,
     timeout: float,
     headers: dict[str, str] | None,
+    identity: dict[str, Any],
+    fresh: bool = False,
 ) -> tuple[int, dict[str, str]]:
-    sha256 = hashlib.sha256()
-    sha1 = hashlib.sha1()
-    md5 = hashlib.md5()
-    downloaded = 0
-    with urllib.request.urlopen(_request(url, headers), timeout=timeout) as response:
+    metadata = part.with_suffix(part.suffix + ".json")
+    try:
+        previous = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    etag = previous.get("etag")
+    strong_etag = etag if etag and not etag.startswith("W/") else None
+    verified_source = strong_etag or any(identity.get(k) for k in ("sha256", "sha1", "md5"))
+    offset = (
+        part.stat().st_size
+        if not fresh and part.is_file() and previous.get("identity") == identity and verified_source
+        else 0
+    )
+    request_headers = {**(headers or {}), "Accept-Encoding": "identity"}
+    if offset:
+        request_headers["Range"] = f"bytes={offset}-"
+        if strong_etag:
+            request_headers["If-Range"] = strong_etag
+    try:
+        response = urllib.request.urlopen(_request(url, request_headers), timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 416 and offset:
+            # A complete partial is accepted only with an expected checksum and length.
+            if previous.get("total") == offset and any(
+                identity.get(k) for k in ("sha256", "sha1", "md5")
+            ):
+                return offset, _file_digests(part)
+            return _stream_to_file(url, part, progress, timeout, headers, identity, fresh=True)
+        raise
+    with response:
+        status = getattr(response, "status", 200)
+        if status == 206:
+            match = re.fullmatch(
+                r"bytes (\d+)-(\d+)/(\d+|\*)", response.headers.get("Content-Range", "")
+            )
+            if (
+                not match
+                or int(match[1]) != offset
+                or int(match[2]) < offset
+                or (
+                    offset
+                    and strong_etag
+                    and response.headers.get("ETag", strong_etag) != strong_etag
+                )
+            ):
+                if fresh:
+                    raise DownloadError("invalid Content-Range on a fresh download")
+                return _stream_to_file(url, part, progress, timeout, headers, identity, fresh=True)
+            total = int(match[3]) if match[3] != "*" else None
+        else:
+            offset = 0  # Range ignored / representation changed: replace, never append.
+            total = None
         length = response.headers.get("Content-Length")
-        total = int(length) if length and length.isdigit() else None
-        with part.open("wb") as out:
+        if total is None and length and length.isdigit():
+            total = offset + int(length)
+        downloaded = offset
+        with part.open("ab" if offset else "wb") as out:
+            atomic_write_text(
+                metadata,
+                json.dumps(
+                    {
+                        "identity": identity,
+                        "etag": response.headers.get("ETag"),
+                        "total": total,
+                    }
+                ),
+            )
             while True:
                 chunk = response.read(CHUNK_SIZE)
                 if not chunk:
                     break
                 out.write(chunk)
-                sha256.update(chunk)
-                sha1.update(chunk)
-                md5.update(chunk)
                 downloaded += len(chunk)
                 if progress is not None:
                     progress(downloaded, total)
     if total is not None and downloaded != total:
         raise DownloadError(f"incomplete download of {url}: {downloaded} of {total} bytes")
-    return downloaded, {
-        "sha256": sha256.hexdigest(),
-        "sha1": sha1.hexdigest(),
-        "md5": md5.hexdigest(),
-    }
+    return downloaded, _file_digests(part)
 
 
 __all__ = [

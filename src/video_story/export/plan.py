@@ -106,12 +106,12 @@ def concat_list_text(frames_dir: Path, planned: list[PlannedFrame]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def sidecar_cursor_reader(frames_dir: Path) -> CursorReader:
+def sidecar_cursor_reader(info_dir: Path) -> CursorReader:
     """Reader of the cursor stored in a frame's sidecar JSON (``None`` when absent)."""
 
     def read(frame: PlannedFrame) -> CursorPosition | None:
         try:
-            data = json.loads((frames_dir / frame.sidecar).read_text(encoding="utf-8"))
+            data = json.loads((info_dir / frame.sidecar).read_text(encoding="utf-8"))
             return cursor_from_json(data.get("cursor"))
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None

@@ -157,7 +157,18 @@ def test_describe_reports_crop_and_transcript_in_range(tmp_path: Path):
     cropped = describe_recording(paths)
     assert cropped["crop"] == {"start_ms": 1500, "end_ms": 4000}
     assert cropped["transcript_in_range"] == "[00:00:02.000 --> 00:00:03.000] second\n"
-    assert "first" in cropped["transcript"]  # the full transcript is still there
+    assert cropped["transcript_in_range_inline"] is True
+    assert (cropped["transcript_in_range_lines"], cropped["transcript_in_range_chars"]) == (1, 39)
+    # The whole transcript is not repeated: describe names its files instead.
+    assert "transcript" not in cropped
+    assert Path(cropped["transcript_txt"]).read_text(encoding="utf-8").count("\n") == 3
+
+    # A transcript longer than the limit is left out with a note (the size stays bounded).
+    long = describe_recording(paths, inline_chars=38)
+    assert "transcript_in_range" not in long and long["transcript_in_range_inline"] is False
+    assert "transcript_txt" in long["transcript_in_range_note"]
+    assert "timeline" in long["transcript_in_range_note"]
+    assert "transcript_in_range" not in describe_recording(paths, inline_chars=0)
 
 
 # Review fixes: liveness, stale requests, guards ------------------------------------
@@ -200,7 +211,8 @@ def test_finish_recording_session_requires_editing_state(tmp_path: Path):
     assert read_state(paths.state_path).status is Status.CANCELLED  # a final state stays final
 
 
-def test_session_status_turns_a_dead_editor_into_processed_whole_range(tmp_path: Path):
+def test_session_status_turns_a_dead_editor_into_cancelled(tmp_path: Path):
+    """Nobody pressed Process: a crashed editor means the same as a closed one."""
     from video_story.host.runner import active_session, session_status
 
     cfg = Config(recording_folder=tmp_path)
@@ -224,9 +236,10 @@ def test_session_status_turns_a_dead_editor_into_processed_whole_range(tmp_path:
     state.pid = 2**22 + 12345
     write_state(paths.state_path, state)
     data = session_status(paths)
-    assert data["status"] == "processed" and data["final"] is True
-    assert data["crop"] == {"start_ms": 0, "end_ms": 44075}
-    assert data["processed_via"] == "stop_dialog" and "editor" in data["message"]
+    assert data["status"] == "cancelled" and data["final"] is True
+    assert data["crop"] is None  # nothing is handed to the agent
+    assert "without Process" in data["message"] and "nothing should be done" in data["message"]
+    assert data["recording_dir"] == str(paths.final_dir)  # the recording is kept
 
 
 def test_crop_with_unknown_duration():

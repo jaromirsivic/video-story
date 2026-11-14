@@ -1,6 +1,8 @@
 # Edit Video Story – implementační plán (jednoduchý editor nahrávek)
 
-Stav: návrh k odsouhlasení (7. 11. 2026). Otevřené otázky jsou v kapitole 12; implementace začne po jejich zodpovězení. Navazuje na `implementation-plan.md` (nahrávání) a používá stejný stack: Python 3.12 + uv, PySide6, FFmpeg, `sounddevice`.
+> **Historický záznam návrhu.** Platné chování editoru popisuje [video-story-spec.md](video-story-spec.md) (kap. 8 a 9); tento plán zachycuje, jak návrh vznikal, a tam, kde se liší, neplatí. Liší se zejména: editor přepisuje na pozadí a umí přepis opakovat, Process editor zavírá, Auto process je při otevření vždy odškrtnutý, po zavření ani pádu editoru se agentovi nic nepředává a agent po otevření editoru čeká na Process (`wait --editor`).
+
+Stav: implementováno (kapitoly 13 a 14); všechny návrhy z kapitoly 12 byly odsouhlaseny. Navazuje na `implementation-plan.md` (nahrávání) a používá stejný stack: Python 3.12 + uv, PySide6, FFmpeg, `sounddevice`.
 
 ## 1. Cíl a rozsah
 

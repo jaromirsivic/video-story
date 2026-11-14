@@ -136,11 +136,15 @@ def test_find_ffmpeg_precedence(tmp_path: Path, monkeypatch):
     on_path = tmp_path / "path" / exe
     on_path.parent.mkdir()
     on_path.write_bytes(b"")
-    root = tmp_path / "root"
-    bundled = ff.bundled_ffmpeg_path(root)
-    bundled.parent.mkdir(parents=True)
-    bundled.write_bytes(b"")
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(root))
+    state, code = tmp_path / "state", tmp_path / "code"
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(state))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(code))
+    downloaded = ff.bundled_ffmpeg_path(state)
+    bundled = ff.bundled_ffmpeg_path(code)
+    for copy in (downloaded, bundled):
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(b"")
+    assert ff.bundled_ffmpeg_path() == downloaded, "the state root is the default"
 
     monkeypatch.setattr(ff.shutil, "which", lambda name: str(on_path))
     assert ff.find_ffmpeg(Config(ffmpeg_path=configured)) == configured
@@ -148,22 +152,35 @@ def test_find_ffmpeg_precedence(tmp_path: Path, monkeypatch):
     # Missing configured path falls through to PATH.
     assert ff.find_ffmpeg(Config(ffmpeg_path=tmp_path / "nope")) == on_path
     assert ff.find_ffmpeg(Config()) == on_path
+    assert ff.ffmpeg_origin(Config(), on_path) == "PATH"
+    assert ff.ffmpeg_origin(Config(ffmpeg_path=configured.parent), configured) == "ffmpeg_path"
 
+    # Without PATH: the state root first, then a copy bundled with the code.
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
+    assert ff.find_ffmpeg(Config()) == downloaded
+    assert ff.ffmpeg_origin(Config(), downloaded) == "state folder"
+    downloaded.unlink()
     assert ff.find_ffmpeg(Config()) == bundled
+    assert ff.ffmpeg_origin(Config(), bundled) == "code folder"
     bundled.unlink()
     assert ff.find_ffmpeg(Config()) is None
 
 
 def test_ensure_ffmpeg_raises_without_download(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path))
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
-    with pytest.raises(ff.FfmpegNotFound, match="setup"):
+    with pytest.raises(ff.FfmpegNotFound, match="setup") as raised:
         ff.ensure_ffmpeg(Config())
+    # The message names both folders that were searched.
+    assert str(tmp_path / "state") in str(raised.value)
+    assert str(tmp_path / "code") in str(raised.value)
 
 
 def test_ensure_ffmpeg_downloads_into_bundled_dir(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path))
+    """Downloads go to the state root, never next to the code."""
+    monkeypatch.setenv("VIDEO_STORY_HOME", str(tmp_path))
+    monkeypatch.setenv("VIDEO_STORY_ROOT", str(tmp_path / "code"))
     monkeypatch.setattr(ff.shutil, "which", lambda name: None)
     target: list[Path] = []
 
@@ -278,6 +295,7 @@ def test_download_ffmpeg_writes_provenance(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(ff, "download_file", fake_download)
     monkeypatch.setattr(ff, "ffmpeg_version", lambda path: "8.1-test")
+    monkeypatch.setattr(ff, "ffmpeg_usable", lambda path: True)
     target = tmp_path / "bundle"
     path = ff.download_ffmpeg(target)
     assert path == target / exe and path.read_bytes() == b"FFMPEG"
@@ -306,6 +324,7 @@ def test_download_ffmpeg_falls_back_to_next_source(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(ff, "download_file", fake_download)
     monkeypatch.setattr(ff, "ffmpeg_version", lambda path: "1")
+    monkeypatch.setattr(ff, "ffmpeg_usable", lambda path: True)
     assert ff.download_ffmpeg(tmp_path / "b") == tmp_path / "b" / exe
 
 
@@ -480,7 +499,11 @@ def test_pywhispercpp_backend_lazy_load_and_units(tmp_path: Path, monkeypatch):
     backend = wb.PyWhisperCppBackend(model_path)
     assert FakeModel.instances == [], "model is loaded lazily"
     progress: list[float] = []
-    t = backend.transcribe(wav, language="auto", threads=2, progress=progress.append)
+    streamed: list[Segment] = []
+    t = backend.transcribe(
+        wav, language="auto", threads=2, progress=progress.append, on_segment=streamed.append
+    )
+    assert streamed == [Segment(0, 1500, "Hello"), Segment(1500, 3000, "world")]
     t2 = backend.transcribe(wav, language="en", threads=2)
     assert len(FakeModel.instances) == 1, "model loaded once per backend"
     model = FakeModel.instances[0]
@@ -540,11 +563,14 @@ class FakeBackend:
         self.language = language
         self.calls: list[dict] = []
 
-    def transcribe(self, wav16k, *, language, threads, progress=None):
+    def transcribe(self, wav16k, *, language, threads, progress=None, on_segment=None):
         self.calls.append({"wav": wav16k, "language": language, "threads": threads})
         assert wav16k.exists()
         if progress:
             progress(0.5)
+            if on_segment:
+                on_segment(Segment(61_500, 63_000, "  hello   there "))
+            progress(0.75)
             progress(1.0)
         return Transcript(language=self.language, segments=list(self.segments))
 
@@ -579,14 +605,15 @@ def test_transcribe_recording_writes_files_and_progress(session):
         {"wav": paths.audio_16k_path(paths.work_dir), "language": "auto", "threads": 2}
     ]
     assert not paths.audio_16k_path(paths.work_dir).exists(), "audio16k.wav is removed"
-    assert result.transcript.segments == [Segment(0, 1200, "first"), Segment(1500, 1500, "second")]
+    # The end of a segment never lies past the end of the audio (1 s here).
+    assert result.transcript.segments == [Segment(0, 1000, "first"), Segment(1500, 1500, "second")]
     assert result.transcript.language == "cs" and result.audio_duration_ms == 1000
     assert result.info.language == "cs" and result.info.segments == 2
     assert result.info.model == "ggml-small" and result.info.backend == "fake"
     assert result.info.duration_s is not None and result.info.duration_s >= 0
     txt = paths.transcript_txt_path(paths.work_dir).read_text(encoding="utf-8")
     assert txt.splitlines() == [
-        "[00:00:00.000 --> 00:00:01.200] first",
+        "[00:00:00.000 --> 00:00:01.000] first",
         "[00:00:01.500 --> 00:00:01.500] second",
     ]
     stored = read_transcript(paths.transcript_json_path(paths.work_dir))
@@ -594,16 +621,20 @@ def test_transcribe_recording_writes_files_and_progress(session):
     assert stored.model == "ggml-small" and stored.backend == "fake"
     fractions = [f for f, _ in events]
     assert fractions == sorted(fractions) and fractions[0] == 0.0 and fractions[-1] == 1.0
-    assert [m for _, m in events][:2] == ["Preparing audio", "Transcribing audio"]
-    assert "Writing transcript" in {m for _, m in events}
-    mid = [f for f, m in events if m == "Transcribing audio"]
-    assert all(0.05 <= f <= 0.98 for f in mid)
+    messages = [m for _, m in events]
+    t = pipeline.TRANSCRIBING_MESSAGE
+    assert messages[:3] == ["Preparing audio", t, t]
+    # After whisper produced a segment: its start time and text on a second line.
+    assert pipeline.TRANSCRIBING_MESSAGE + "\n00:01:01  hello there" in messages
+    assert "Writing transcript" in set(messages)
+    mid = [f for f, m in events if m.startswith(pipeline.TRANSCRIBING_MESSAGE)]
+    assert len(mid) == 4 and all(0.05 <= f <= 0.98 for f in mid)
 
 
 def test_transcribe_recording_uses_base_dir(session, tmp_path: Path):
     paths, cfg = session
     final = tmp_path / "final"
-    final.mkdir()
+    paths.audio_dir(final).mkdir(parents=True)
     shutil.copy(paths.audio_path(paths.work_dir), paths.audio_path(final))
     result = pipeline.transcribe_recording(paths, cfg, base_dir=final, backend=FakeBackend())
     assert paths.transcript_json_path(final).exists()

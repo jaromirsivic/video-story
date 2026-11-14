@@ -1,9 +1,10 @@
 """End-to-end: Stop -> Video Editor hands the session to a real editor process (Windows).
 
-The control window runs in this process (like ``test_ui_e2e``), transcribes for real
-and launches the editor in a detached process. Closing that window without Process
-must cancel the session. Requires a screen, a microphone, the whisper model and
-``VIDEO_STORY_INTEGRATION=1``; the window is closed through ``WM_CLOSE`` (Windows only).
+The control window runs in this process (like ``test_ui_e2e``), saves the recording
+without transcribing it and launches the editor in a detached process, which starts the
+background transcription. Closing that window without Process must cancel the session.
+Requires a screen, a microphone, the whisper model and ``VIDEO_STORY_INTEGRATION=1``;
+the window is closed through ``WM_CLOSE`` (Windows only).
 """
 
 from __future__ import annotations
@@ -93,7 +94,9 @@ def test_video_editor_choice_then_close_cancels(qapp_real, tmp_path: Path, monke
     state = read_state(paths.state_path)
     assert state.status is Status.EDITING and not state.status.final
     assert state.pid > 0 and state.recording_dir == str(paths.final_dir)
-    assert paths.transcript_txt_path(paths.final_dir).exists()
+    assert paths.manifest_path(paths.final_dir).exists()
+    # The transcription happens in the editor, not before it opens.
+    assert not paths.transcript_txt_path(paths.final_dir).exists()
 
     editor_sessions = sorted((tmp_path / ".work").glob("editor-*.json"))
     assert len(editor_sessions) == 1

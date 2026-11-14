@@ -284,6 +284,33 @@ def test_filter_graph_and_command(tmp_path: Path):
     assert ffmpeg_export._parse_progress_line("out_time_us=1500000\n") == 1500
     assert ffmpeg_export._parse_progress_line("out_time_ms=N/A") is None
     assert ffmpeg_export._parse_progress_line("progress=end") is None
+    assert ffmpeg_export._parse_progress_frames("frame=144\n") == 144
+    assert ffmpeg_export._parse_progress_frames("frame=N/A") is None
+    assert ffmpeg_export._parse_progress_frames("drop_frames=3") is None
+
+
+def test_probe_command_and_minimum_frames(tmp_path: Path):
+    cmd = ffmpeg_export.probe_command(Path("ffmpeg"), tmp_path / "o.mp4")
+    assert cmd[0] == "ffmpeg" and cmd[cmd.index("-i") + 1] == str(tmp_path / "o.mp4")
+    assert cmd[cmd.index("-map") + 1] == "0:v:0"  # the video stream only, not the audio
+    assert cmd[cmd.index("-c") + 1] == "copy" and cmd[-3:] == ["-f", "null", "-"]
+    assert cmd[cmd.index("-progress") + 1] == "pipe:1"
+    # 24 fps; up to VERIFY_TOLERANCE_FRAMES (3) may be missing, never all of them.
+    assert ffmpeg_export.minimum_frames(6000) == 141
+    assert ffmpeg_export.minimum_frames(1000) == 21
+    assert ffmpeg_export.minimum_frames(1010) == 22  # 24.24 frames round up to 25
+    assert ffmpeg_export.minimum_frames(100) == 1 and ffmpeg_export.minimum_frames(0) == 1
+
+
+def test_frames_with_picture_leaves_out_empty_and_missing_files(tmp_path: Path):
+    (tmp_path / FRAMES[0].filename).write_bytes(b"picture")
+    (tmp_path / FRAMES[1].filename).write_bytes(b"")  # the recorder died while writing
+    (tmp_path / FRAMES[3].filename).write_bytes(b"picture")  # FRAMES[2] is not there
+    usable, empty = ffmpeg_export.frames_with_picture(tmp_path, FRAMES)
+    assert usable == [FRAMES[0], FRAMES[3]] and empty == [FRAMES[1], FRAMES[2]]
+    # The plan of what is left shows the frame before each gap longer.
+    planned = plan.plan_frames(usable, 0, 2000)
+    assert _shown(planned) == [(0, 0, 1500), (1500, 1500, 500)]
 
 
 def test_normalise_output_and_partial_name(tmp_path: Path):

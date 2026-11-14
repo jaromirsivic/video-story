@@ -29,6 +29,8 @@ from typing import Any
 
 from video_story.core.config import Config
 from video_story.core.crop import Crop, read_crop
+from video_story.core.fileio import atomic_write_text, read_json_with_retry
+from video_story.core.instructions import normalize_instructions, read_instructions
 from video_story.core.session import (
     WORK_DIR_NAME,
     SessionPaths,
@@ -37,6 +39,7 @@ from video_story.core.session import (
     read_state,
     write_state,
 )
+from video_story.host.waiting import timeout_seconds
 from video_story.platform.process import pid_alive
 
 log = logging.getLogger(__name__)
@@ -65,12 +68,17 @@ def write_editor_event(
     session_id: str | None = None,
     crop: Crop | None = None,
     pid: int | None = None,
+    instructions: str | None = None,
 ) -> None:
-    """Record ``open``, ``process`` or ``closed`` (atomic rewrite of the whole file)."""
+    """Record ``open``, ``process`` or ``closed`` (atomic rewrite of the whole file).
+
+    ``instructions`` are the user's master instructions for the whole recording
+    (``""`` when none); they travel with the ``process`` event.
+    """
     data: dict[str, Any] = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = read_json_with_retry(path)
         except (OSError, ValueError):
             data = {}
     data["event"] = event
@@ -81,13 +89,15 @@ def write_editor_event(
         data["crop"] = crop.to_dict()
     if pid is not None:
         data["pid"] = pid
+    if instructions is not None:
+        data["instructions"] = normalize_instructions(instructions)
     _write(path, data)
 
 
 def read_editor_event(path: Path) -> dict[str, Any]:
     """The current event; a dead editor (``pid`` recorded, process gone) counts as closed."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_with_retry(path)
     except FileNotFoundError:
         return {"event": "closed", "message": "editor session file is gone"}
     except (OSError, ValueError):
@@ -102,15 +112,21 @@ def read_editor_event(path: Path) -> dict[str, Any]:
 def wait_for_editor(path: Path, timeout_s: float) -> dict[str, Any]:
     """Block until the editor reports ``process`` or ``closed``, or the timeout elapses.
 
-    Result: ``{"event": "process", "session_id", "crop"}``, ``{"event": "closed"}`` or
-    ``{"event": "open", "timed_out": true}``.
+    Result: ``{"event": "process", "session_id", "crop", "instructions"}``,
+    ``{"event": "closed"}`` or ``{"event": "open", "timed_out": true}``.
     """
-    deadline = time.monotonic() + max(0.0, timeout_s)
+    deadline = time.monotonic() + timeout_seconds(timeout_s)
     while True:
         data = read_editor_event(path)
         event = data.get("event", "open")
         if event in ("process", "closed"):
-            result = {k: data[k] for k in ("event", "session_id", "crop", "message") if k in data}
+            from video_story.host.startup import cleanup_completed, editor_request
+
+            cleanup_completed(editor_request(path))
+            keys = ("event", "session_id", "crop", "instructions", "message")
+            result = {k: data[k] for k in keys if k in data}
+            if event == "process":
+                result.setdefault("instructions", "")
             result["editor_session"] = str(path)
             result["timed_out"] = False
             return result
@@ -121,7 +137,7 @@ def wait_for_editor(path: Path, timeout_s: float) -> dict[str, Any]:
                 "timed_out": True,
                 "hint": "call `wait --editor` again until the event is process or closed",
             }
-        time.sleep(POLL_INTERVAL_S)
+        time.sleep(min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
 # Attach requests to a running editor --------------------------------------------
@@ -173,7 +189,7 @@ def take_attach_requests(config: Config) -> list[AttachRequest]:
         if entry.suffix != ".json":
             continue
         try:
-            data = json.loads(entry.read_text(encoding="utf-8"))
+            data = read_json_with_retry(entry, attempts=4)
             request = AttachRequest(
                 entry,
                 data.get("session_id"),
@@ -210,14 +226,36 @@ def adopt_recording_session(paths: SessionPaths) -> None:
     write_state(paths.state_path, state)
 
 
+def update_recording_session_progress(paths: SessionPaths, fraction: float, message: str) -> None:
+    """The editor reports how far its background transcription got (``editing`` only).
+
+    Advisory for the agent polling ``wait``: a session that is no longer ``editing``
+    (or whose state file cannot be read) is left alone.
+    """
+    try:
+        state = read_state(paths.state_path)
+    except RuntimeError:
+        return
+    if state.status is not Status.EDITING:
+        return
+    state.progress = max(0.0, min(1.0, fraction))
+    state.message = message
+    write_state(paths.state_path, state)
+
+
 def finish_recording_session(
-    paths: SessionPaths, crop: Crop, shown_session_id: str | None = None
+    paths: SessionPaths,
+    crop: Crop,
+    shown_session_id: str | None = None,
+    instructions: str | None = None,
 ) -> None:
-    """The user pressed Process: the recording session becomes ``processed`` with the crop.
+    """The user pressed Process: the recording session becomes ``processed`` with the crop
+    and the master ``instructions`` (``""`` when the user typed none).
 
     ``shown_session_id`` is the recording displayed when Process was pressed. When it is
-    another recording, ``crop`` belongs to that one; the recording session then takes
-    the crop stored in its own ``crop.json`` (the whole recording when none).
+    another recording, ``crop`` and ``instructions`` belong to that one; the recording
+    session then takes the crop stored in its own ``crop.json`` (the whole recording when
+    none) and its own ``instructions.txt``. ``instructions`` ``None`` also reads the file.
     """
     state = read_state(paths.state_path)
     if state.status is not Status.EDITING:
@@ -231,17 +269,25 @@ def finish_recording_session(
     note = ""
     if shown_session_id is not None and shown_session_id != paths.session_id:
         crop = read_crop(paths.crop_path(final), state.recorded_duration_ms or 0)
+        instructions = None
         note = f" Process was pressed while {shown_session_id} was shown."
+    if instructions is None:
+        instructions = read_instructions(paths.instructions_path(final))
+    instructions = normalize_instructions(instructions)
+    if instructions:
+        note += " Read `instructions` first: they apply to the whole recording."
     state.status = Status.PROCESSED
     state.error_code = None
     state.progress = 1.0
     state.crop = crop.to_dict()
+    state.instructions = instructions
     state.processed_via = "editor"
     state.recording_dir = str(final)
     state.manifest = str(paths.manifest_path(final))
     state.transcript_txt = str(paths.transcript_txt_path(final))
     state.transcript_json = str(paths.transcript_json_path(final))
     state.frames_dir = str(paths.frames_dir(final))
+    state.frames_info_dir = str(paths.frames_info_dir(final))
     state.message = (
         f"Recording processed; act on {crop.start_ms}-{crop.end_ms} ms (crop from the editor)."
         + note
@@ -267,10 +313,7 @@ def cancel_recording_session(paths: SessionPaths) -> None:
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 
 __all__ = [
@@ -283,6 +326,7 @@ __all__ = [
     "new_editor_session",
     "read_editor_event",
     "take_attach_requests",
+    "update_recording_session_progress",
     "wait_for_editor",
     "write_attach_request",
     "write_editor_event",

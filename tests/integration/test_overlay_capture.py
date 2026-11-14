@@ -14,7 +14,7 @@ import sys
 from collections.abc import Iterator
 
 import pytest
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QScreen
 from PySide6.QtWidgets import QApplication
 
@@ -152,3 +152,110 @@ def _assert_window_receives_input(window, screen: Screen, dpr: float) -> None:
             f"{screen.id}: window under ({point.x}, {point.y}) is {root!r}, "
             f"expected overlay {int(window.winId())}"
         )
+
+
+def test_sketch_canvas_is_white_in_captured_frames(overlay: DrawingOverlay, qtbot) -> None:
+    """Sketch: every screen is captured as a white canvas with the shapes on top."""
+    overlay.show()
+    qtbot.wait(200)
+    red = QColor("#FF0000")
+    for index in range(len(overlay.windows)):
+        overlay.add_shape(
+            Shape(
+                Tool.BRUSH, red, [QPointF(STROKE_X0, STROKE_Y), QPointF(STROKE_X1, STROKE_Y)], index
+            )
+        )
+    overlay.set_sketch(True)
+    assert overlay.background() == "sketch"
+    qtbot.wait(300)
+
+    platform = get_platform()
+    screens = assign_screen_ids(platform.list_screens())
+    checked = 0
+    with ScreenGrabber() as grabber:
+        for screen in screens:
+            qscreen = _match_qscreen(screen)
+            if qscreen is None:
+                continue
+            dpr = qscreen.devicePixelRatio()
+            image = frame_to_image(grabber.grab(screen)).convert("RGB")
+
+            def px(lx: float, ly: float, image=image, dpr=dpr) -> tuple[int, int, int]:
+                return image.getpixel((round(lx * dpr), round(ly * dpr)))
+
+            # Away from the stroke, the toolbar (top left) and the windows kept above.
+            for x in _samples_x(STROKE_X0, STROKE_X1):
+                assert px(x, STROKE_Y + 120) == (255, 255, 255), f"{screen.id} at x={x}"
+                assert _is_red(px(x, STROKE_Y)), f"{screen.id}: stroke at x={x}"
+            checked += 1
+    assert checked >= 1, "no screen could be matched between Qt and the platform layer"
+    overlay.set_sketch(False)
+    assert len(overlay.shapes()) == len(overlay.windows)  # switching removed nothing
+
+
+def test_line_being_drawn_is_captured_on_every_screen_it_crosses(
+    overlay: DrawingOverlay, qtbot
+) -> None:
+    """Connected lines wait without a button: the line is on screen (and in the frames)
+    on every screen it crosses, and is split at the edges once finished."""
+    overlay.show()
+    qtbot.wait(200)
+    windows = overlay.windows
+    first = windows[0]
+    start = QPointF(first.mapToGlobal(QPointF(STROKE_X0, STROKE_Y)))
+    if len(windows) > 1:
+        end = QPointF(windows[1].geometry().center())  # into the second screen
+    else:
+        end = QPointF(first.mapToGlobal(QPointF(STROKE_X1, STROKE_Y)))
+    overlay._begin_span(first, Tool.LINE, Qt.MouseButton.LeftButton, start)
+    overlay._move_span(end)
+    overlay._span.button = Qt.MouseButton.NoButton  # waiting, as after a Shift release
+    qtbot.wait(300)
+
+    def red_samples() -> dict[int, list[bool]]:
+        """Per screen index: is the line red at points along it in the captured image."""
+        seen: dict[int, list[bool]] = {}
+        screens = assign_screen_ids(get_platform().list_screens())
+        with ScreenGrabber() as grabber:
+            for screen in screens:
+                qscreen = _match_qscreen(screen)
+                if qscreen is None:
+                    continue
+                pairs = zip(windows, QGuiApplication.screens(), strict=False)
+                window = next((w for w, s in pairs if s is qscreen), None)
+                if window is None:
+                    continue
+                image = frame_to_image(grabber.grab(screen)).convert("RGB")
+                dpr = qscreen.devicePixelRatio()
+                # Qt maps global points through the screen they are on (native pixels), so
+                # the line is straight in each window's own coordinates: sample it there.
+                a = QPointF(window.mapFromGlobal(start))
+                b = QPointF(window.mapFromGlobal(end))
+                for step in range(1, 80):
+                    local = a + (b - a) * (step / 80)
+                    if (
+                        4 <= local.x() <= window.width() - 4
+                        and 4 <= local.y() <= window.height() - 4
+                    ):
+                        pixel = image.getpixel((round(local.x() * dpr), round(local.y() * dpr)))
+                        seen.setdefault(window.screen_index, []).append(_is_red(pixel))
+        return seen
+
+    def mostly_red(seen: dict[int, list[bool]]) -> bool:
+        # Allow a few samples hidden by windows kept above the overlay.
+        return all(sum(hits) >= 0.8 * len(hits) for hits in seen.values())
+
+    seen = red_samples()
+    for _attempt in range(5):  # a screen may repaint a little later than the other
+        if mostly_red(seen):
+            break
+        qtbot.wait(200)
+        seen = red_samples()
+    assert seen, "no screen could be matched between Qt and the platform layer"
+    assert mostly_red(seen), {index: f"{sum(h)}/{len(h)} red" for index, h in seen.items()}
+
+    overlay._finish_span()
+    pieces = overlay.shapes()
+    assert {s.screen_index for s in pieces} == set(seen)
+    if len(pieces) > 1:
+        assert len({s.group for s in pieces}) == 1 and pieces[0].group is not None

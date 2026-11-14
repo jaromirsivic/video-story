@@ -20,7 +20,8 @@ def pid_alive(pid: int) -> bool:
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            return False
+            # Access denied is not evidence that a GUI in another permission context died.
+            return kernel32.GetLastError() == 5
         try:
             code = ctypes.c_ulong()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
@@ -42,6 +43,18 @@ def gui_python() -> str:
     exe = Path(sys.executable)
     if sys.platform.startswith("win") and exe.name.lower() == "python.exe":
         candidate = exe.with_name("pythonw.exe")
+        if candidate.exists():
+            return str(candidate)
+    return str(exe)
+
+
+def console_python() -> str:
+    """Interpreter for a worker whose stdout is read through a pipe: ``python.exe``
+    rather than ``pythonw.exe`` on Windows (the parent, a GUI process, creates it
+    without a console window)."""
+    exe = Path(sys.executable)
+    if sys.platform.startswith("win") and exe.name.lower() == "pythonw.exe":
+        candidate = exe.with_name("python.exe")
         if candidate.exists():
             return str(candidate)
     return str(exe)
@@ -72,4 +85,81 @@ def spawn_detached(args: list[str], log_path: Path, cwd: Path | None = None) -> 
     return proc.pid
 
 
-__all__ = ["gui_python", "pid_alive", "spawn_detached"]
+def lower_own_priority(mode: str) -> str:
+    """Lower the scheduling priority of this process for a background job.
+
+    ``light``: the lowest class the OS offers for work nobody waits for - Windows
+    background mode (idle CPU priority plus low I/O and memory priority), Linux
+    ``SCHED_IDLE``, macOS ``PRIO_DARWIN_BG``. ``faster``: only slightly below normal.
+    Returns what was set (``below_normal`` when ``light`` could not be had); failures
+    are swallowed, the job then runs at the priority it was given.
+    """
+    try:
+        if sys.platform.startswith("win"):
+            return _lower_windows(mode)
+        if sys.platform == "darwin":
+            return _lower_macos(mode)
+        return _lower_linux(mode)
+    except Exception:  # noqa: BLE001 - a priority is a wish, never a reason to fail
+        return "unchanged"
+
+
+def _lower_windows(mode: str) -> str:
+    import ctypes
+
+    PROCESS_MODE_BACKGROUND_BEGIN = 0x00100000
+    BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    process = kernel32.GetCurrentProcess()
+    if mode == "light" and kernel32.SetPriorityClass(process, PROCESS_MODE_BACKGROUND_BEGIN):
+        return "background"
+    if kernel32.SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS):
+        return "below_normal"
+    return "unchanged"
+
+
+def _lower_linux(mode: str) -> str:
+    if mode == "light" and hasattr(os, "SCHED_IDLE"):
+        try:
+            os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))  # type: ignore[attr-defined]
+        except OSError:
+            pass
+        else:
+            _linux_idle_io()
+            return "background"
+    os.nice(10)
+    return "below_normal"
+
+
+def _linux_idle_io() -> None:
+    """I/O scheduling class idle (``ioprio_set``), best effort."""
+    import ctypes
+    import platform
+
+    numbers = {"x86_64": 251, "aarch64": 30, "arm64": 30}
+    number = numbers.get(platform.machine().lower())
+    if number is None:
+        return
+    IOPRIO_WHO_PROCESS = 1
+    IOPRIO_CLASS_IDLE = 3
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall(number, IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_IDLE << 13)
+
+
+def _lower_macos(mode: str) -> str:
+    if mode == "light":
+        import ctypes
+        import ctypes.util
+
+        PRIO_DARWIN_PROCESS = 4
+        PRIO_DARWIN_BG = 0x1000
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        if libc.setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG) == 0:
+            return "background"
+    os.nice(10)
+    return "below_normal"
+
+
+__all__ = ["console_python", "gui_python", "lower_own_priority", "pid_alive", "spawn_detached"]

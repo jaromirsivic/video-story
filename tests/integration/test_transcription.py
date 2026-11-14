@@ -6,6 +6,7 @@ any attempt to download something fails loudly.
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -23,7 +24,8 @@ pytestmark = pytest.mark.integration
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "czech.wav"
 EXPECTED_WORDS = ["dobrý den", "přepis", "schůzk", "úkol"]
-WHISPER_CLI = Path(r"D:\git\convert_video_to_text\bin\whisper\whisper-cli.exe")
+# Optional second backend: point VIDEO_STORY_WHISPER_CLI at a whisper-cli executable.
+WHISPER_CLI = Path(os.environ.get("VIDEO_STORY_WHISPER_CLI", "whisper-cli-not-configured"))
 
 
 @pytest.fixture(autouse=True)

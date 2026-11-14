@@ -3,24 +3,36 @@
 The video is a slideshow of the screen's frames fed through the concat demuxer, turned
 into constant 24 fps, with the cursor pointer drawn by an ``overlay`` filter whose
 ``x``/``y`` expressions follow the recorded cursor per frame (see
-:func:`video_story.export.plan.cursor_expressions`). Audio is the recording's WAV
-cropped to the range and padded to the exact video length. Progress comes from
+:func:`video_story.export.plan.cursor_expressions`). Audio is the mix of the tracks
+switched on in the editor (the microphone and the computer's sound, see
+:mod:`video_story.core.audio_mix`; no audio when both are off) cropped to the range and
+padded to the exact video length. Progress comes from
 ``-progress pipe:1``; a cancel check is polled while ffmpeg runs.
+
+ffmpeg's exit code does not say that the whole video was written: when a frame cannot be
+opened during the encode, ffmpeg takes it for the end of the input, cuts the video
+there, pads the audio to the full length and exits with 0. So the written file is
+checked before it gets the output name (:func:`verify_video`): its video stream must
+hold as many frames as the range needs.
 """
 
 from __future__ import annotations
 
 import collections
 import logging
+import math
 import os
 import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
+from video_story.core.audio_mix import selected_sources
 from video_story.core.config import EXPORT_FPS, Config
 from video_story.core.manifest import read_manifest
+from video_story.core.naming import FrameName
 from video_story.core.screens import find_screen
 from video_story.core.transcript import read_transcript
 from video_story.host.runner import FrameIndex
@@ -53,20 +65,35 @@ PARTIAL_INFIX = ".part"
 # Longer filter graphs (cursor tracks of long recordings) go through a script file so
 # the command line stays well below the Windows limit of 32 767 characters.
 FILTER_INLINE_MAX_CHARS = 12_000
+# How many frames the written video stream may lack (see :func:`verify_video`): the last
+# output frame depends on rounding, the others are spare. 3 frames are 125 ms at 24 fps.
+VERIFY_TOLERANCE_FRAMES = 3
+# ffmpeg (7.x) logs this when reading an input fails, then goes on as if the input had
+# ended and still exits with 0. Other versions word it differently; the frame count of
+# the written file is what catches those.
+INPUT_ERROR_MARKER = "Error during demuxing"
 
 
 def _even(value: int) -> int:
     return max(2, value - value % 2)
 
 
-def filter_graph(cursor: tuple[str, str] | None) -> str:
+def filter_graph(cursor: tuple[str, str] | None, audio_inputs: int = 0) -> str:
     """The ``-filter_complex`` graph: input 0 is the frame slideshow, input 1 (only with
-    a cursor) the pointer PNG. Output is constant ``EXPORT_FPS`` with even dimensions."""
+    a cursor) the pointer PNG. Output is constant ``EXPORT_FPS`` with even dimensions.
+
+    With more than one audio input (they follow the video inputs) the graph also adds
+    them together into ``[aout]``, padded with silence like a single track."""
     graph = f"[0:v]fps={EXPORT_FPS},scale=trunc(iw/2)*2:trunc(ih/2)*2"
     if cursor is not None:
         x_expr, y_expr = cursor
         graph += f"[v0];[v0][1:v]overlay=x='{x_expr}':y='{y_expr}':eval=frame:format=auto"
-    return graph + ",format=yuv420p[vout]"
+    graph += ",format=yuv420p[vout]"
+    if audio_inputs > 1:
+        first = 2 if cursor is not None else 1
+        inputs = "".join(f"[{first + i}:a]" for i in range(audio_inputs))
+        graph += f";{inputs}amix=inputs={audio_inputs}:duration=longest:normalize=0,apad[aout]"
+    return graph
 
 
 def build_command(
@@ -75,7 +102,7 @@ def build_command(
     output: Path,
     duration_ms: int,
     start_ms: int,
-    audio: Path | None,
+    audio: Path | Sequence[Path] | None,
     draw_cursor: bool,
     graph: str,
     graph_file: str | None = None,
@@ -83,7 +110,9 @@ def build_command(
     """The ffmpeg argv; ``frames.txt``, ``cursor.png`` and the filter script are relative
     to the working directory the process is started in (the temporary directory).
     ``output`` is the file ffmpeg writes (the partial file); the container is forced
-    with ``-f mp4`` so its name does not matter."""
+    with ``-f mp4`` so its name does not matter. Several ``audio`` tracks must be
+    mixed by ``graph`` (see :func:`filter_graph`)."""
+    audios = [] if audio is None else [audio] if isinstance(audio, Path) else list(audio)
     cmd = [
         str(ffmpeg),
         "-nostdin",
@@ -103,21 +132,21 @@ def build_command(
     ]
     if draw_cursor:
         cmd += ["-i", CURSOR_PNG_NAME]
-    if audio is not None:
+    for track in audios:
         cmd += [
             "-ss",
             f"{start_ms / 1000:.3f}",
             "-t",
             f"{duration_ms / 1000:.3f}",
             "-i",
-            str(audio),
+            str(track),
         ]
     if graph_file is not None:
         cmd += ["-filter_complex_script", graph_file]
     else:
         cmd += ["-filter_complex", graph]
     cmd += ["-map", "[vout]"]
-    if audio is not None:
+    if len(audios) == 1:
         audio_index = 2 if draw_cursor else 1
         cmd += [
             "-map",
@@ -129,6 +158,8 @@ def build_command(
             "-af",
             "apad",
         ]
+    elif audios:
+        cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", f"{config.export_audio_bitrate_k}k"]
     cmd += [
         "-c:v",
         "libx264",
@@ -169,8 +200,24 @@ def _parse_progress_line(line: str) -> int | None:
         return None
 
 
+def _parse_progress_frames(line: str) -> int | None:
+    """Number of video frames written so far from one ``-progress`` line, or ``None``."""
+    key, sep, value = line.strip().partition("=")
+    if not sep or key != "frame":
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return None
+
+
 class _FfmpegRun:
-    """A running ffmpeg process with its progress and stderr tail read by threads."""
+    """A running ffmpeg process with its progress and stderr tail read by threads.
+
+    After the process ended: ``returncode``, ``frames`` (video frames written, ``None``
+    when ffmpeg reported none) and ``input_error`` (what ffmpeg logged when it could not
+    read an input to its end, see :data:`INPUT_ERROR_MARKER`).
+    """
 
     def __init__(self, cmd: list[str], cwd: Path) -> None:
         try:
@@ -185,6 +232,9 @@ class _FfmpegRun:
         except OSError as exc:
             raise ExportError("FFMPEG_FAILED", f"cannot start ffmpeg {cmd[0]}: {exc}") from exc
         self.out_time_ms = 0
+        self.frames: int | None = None
+        self.returncode: int | None = None
+        self.input_error: str | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
         self._threads = [
             threading.Thread(target=self._read_progress, daemon=True),
@@ -196,16 +246,27 @@ class _FfmpegRun:
     def _read_progress(self) -> None:
         assert self.proc.stdout is not None
         for raw in self.proc.stdout:
-            value = _parse_progress_line(raw.decode("utf-8", "replace"))
+            line = raw.decode("utf-8", "replace")
+            value = _parse_progress_line(line)
             if value is not None:
                 self.out_time_ms = value
+                continue
+            frames = _parse_progress_frames(line)
+            if frames is not None:
+                self.frames = frames
 
     def _read_stderr(self) -> None:
         assert self.proc.stderr is not None
+        previous = ""
         for raw in self.proc.stderr:
             line = raw.decode("utf-8", "replace").rstrip()
-            if line:
-                self.stderr_tail.append(line)
+            if not line:
+                continue
+            if self.input_error is None and INPUT_ERROR_MARKER in line:
+                # The line before names the file that could not be opened.
+                self.input_error = f"{previous}\n{line}".strip()
+            previous = line
+            self.stderr_tail.append(line)
 
     def wait(self, timeout: float) -> int | None:
         try:
@@ -255,8 +316,10 @@ def _run_ffmpeg(
     duration_ms: int,
     progress: ProgressCallback | None,
     cancel: CancelCheck | None,
-) -> None:
-    """Run ffmpeg to completion; the caller owns (and removes) the partial output."""
+) -> _FfmpegRun:
+    """Run ffmpeg to completion; the caller owns (and removes) the partial output.
+
+    Returns the finished run (exit code 0) for what ffmpeg reported about it."""
     run = _FfmpegRun(cmd, cwd)
     reported = -1
     try:
@@ -276,9 +339,109 @@ def _run_ffmpeg(
         run.join()
         raise
     run.join()
+    run.returncode = code
     if code != 0:
         tail = "\n".join(run.stderr_tail)
         raise ExportError("FFMPEG_FAILED", f"ffmpeg exited with code {code}:\n{tail}")
+    return run
+
+
+def probe_command(ffmpeg: Path, video: Path) -> list[str]:
+    """The ffmpeg argv that reads the first video stream of ``video`` to the end without
+    decoding it (stream copy into the null muxer); ``-progress`` then reports the number
+    of frames. It needs no ``ffprobe``, which a custom ``ffmpeg_path`` may not have."""
+    return [
+        str(ffmpeg),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-i",
+        str(video),
+        "-map",
+        "0:v:0",
+        "-c",
+        "copy",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def minimum_frames(duration_ms: int) -> int:
+    """The fewest frames a complete video of ``duration_ms`` has at ``EXPORT_FPS``."""
+    expected = math.ceil(max(0, duration_ms) * EXPORT_FPS / 1000)
+    return max(1, expected - VERIFY_TOLERANCE_FRAMES)
+
+
+def _verify_video(
+    ffmpeg: Path, video: Path, duration_ms: int, cancel: CancelCheck | None = None
+) -> int:
+    """:func:`verify_video` with a known ffmpeg executable."""
+    try:
+        run = _run_ffmpeg(probe_command(ffmpeg, video), video.parent, 0, None, cancel)
+    except ExportError as exc:
+        if exc.code == "CANCELLED":
+            raise
+        raise ExportError("OUTPUT_UNVERIFIED", f"cannot read {video} back: {exc}") from exc
+    if run.frames is None or run.input_error is not None:
+        detail = "\n".join(run.stderr_tail) or "ffmpeg reported no video frames"
+        raise ExportError("OUTPUT_UNVERIFIED", f"cannot count the frames of {video}: {detail}")
+    needed = minimum_frames(duration_ms)
+    if run.frames < needed:
+        raise ExportError(
+            "OUTPUT_TRUNCATED",
+            f"the video is cut short: it holds {run.frames} frames "
+            f"({run.frames / EXPORT_FPS:.1f} s) instead of {duration_ms / 1000:.1f} s "
+            f"(at least {needed} frames); ffmpeg stopped before the end of the frames, "
+            "most likely because it could not read one of them",
+        )
+    return run.frames
+
+
+def verify_video(
+    video: Path, duration_ms: int, config: Config, cancel: CancelCheck | None = None
+) -> int:
+    """Check that the video stream of the MP4 ``video`` covers ``duration_ms``.
+
+    The frames of the video stream are counted by ffmpeg itself (:func:`probe_command`)
+    and compared with ``duration_ms`` at the constant ``EXPORT_FPS``; up to
+    ``VERIFY_TOLERANCE_FRAMES`` may be missing. Neither ffmpeg's exit code nor the
+    duration of the container can tell: a video cut short by an unreadable frame comes
+    with exit code 0 and with audio of the full length. Returns the number of frames.
+
+    Raises ``ExportError``: ``OUTPUT_TRUNCATED`` when frames are missing,
+    ``OUTPUT_UNVERIFIED`` when the file cannot be read back (no video stream, damaged),
+    ``FFMPEG_MISSING`` without ffmpeg, ``CANCELLED`` when ``cancel`` said so.
+    """
+    try:
+        ffmpeg = ensure_ffmpeg(config)
+    except FfmpegNotFound as exc:
+        raise ExportError("FFMPEG_MISSING", str(exc)) from exc
+    return _verify_video(ffmpeg, video, duration_ms, cancel)
+
+
+def frames_with_picture(
+    frames_dir: Path, names: Sequence[FrameName]
+) -> tuple[list[FrameName], list[FrameName]]:
+    """Split ``names`` into the frames whose file holds data and those without a picture
+    (the file is missing or has zero bytes: the recorder was killed while writing it, the
+    disk was full). A frame that cannot be examined stays among the first: whether
+    ffmpeg can read it shows during the encode and in :func:`verify_video`."""
+    usable: list[FrameName] = []
+    empty: list[FrameName] = []
+    for name in names:
+        try:
+            has_picture = (frames_dir / name.filename).stat().st_size > 0
+        except FileNotFoundError:
+            has_picture = False
+        except OSError:
+            has_picture = True
+        (usable if has_picture else empty).append(name)
+    return usable, empty
 
 
 def _output_error(action: str, path: Path, exc: OSError) -> ExportError:
@@ -302,6 +465,9 @@ def export_recording(
     The output name is normalised with :func:`normalise_output` (``.mp4`` appended when
     missing). ffmpeg writes a ``<stem>.part.mp4`` sibling that replaces the output only
     on success; on cancel, failure or any exception only that partial file is removed.
+    Success includes the check of the written video (:func:`verify_video`): a video
+    that ffmpeg cut short because it could not read a frame raises ``OUTPUT_TRUNCATED``.
+    Frames without a picture (zero bytes) are left out, the frame before stays longer.
     When no SRT is written, a stale ``.srt`` next to the output from an earlier export
     is removed. File-system failures raise ``ExportError`` with code ``OUTPUT_ERROR``.
     """
@@ -330,7 +496,8 @@ def export_recording(
     frames_dir = paths.frames_dir(base)
     if not frames_dir.is_dir():
         raise ExportError("NO_FRAMES", f"no frames directory in {base}")
-    names = FrameIndex(frames_dir).by_screen.get(screen.id, [])
+    index = FrameIndex.of(paths, base)
+    names = [n for n in index.by_screen.get(screen.id, []) if not n.is_sidecar]
     if not names:
         raise ExportError("NO_FRAMES", f"no frames of {screen.id} in {frames_dir}")
 
@@ -341,11 +508,23 @@ def export_recording(
     end_ms = total_ms if request.end_ms is None else min(int(request.end_ms), total_ms)
     if start_ms < 0:
         raise ExportError("INVALID_RANGE", "start must not be negative")
+    # ffmpeg would take a frame it cannot open for the end of the video.
+    names, empty = frames_with_picture(frames_dir, names)
+    if empty:
+        log.warning(
+            "%d frame(s) of %s have no picture (zero bytes or missing) and are left out, "
+            "the frame before each stays longer: %s%s",
+            len(empty),
+            screen.id,
+            ", ".join(n.filename for n in empty[:5]),
+            ", ..." if len(empty) > 5 else "",
+        )
+    if not names:
+        raise ExportError("NO_FRAMES", f"every frame of {screen.id} in {frames_dir} is empty")
     planned: list[PlannedFrame] = plan_frames(names, start_ms, end_ms)
     duration_ms = end_ms - start_ms
 
-    audio = paths.audio_path(base)
-    audio_input = audio if audio.is_file() else None
+    audio_inputs = selected_sources(paths, base)
     output = normalise_output(request.output)
     partial = partial_output(output)
     try:
@@ -360,7 +539,7 @@ def export_recording(
         start_ms,
         end_ms,
         len(planned),
-        "with" if audio_input else "without",
+        f"{len(audio_inputs)} track(s) of" if audio_inputs else "without",
         output,
     )
 
@@ -373,10 +552,10 @@ def export_recording(
         if request.draw_cursor:
             write_cursor_png(work / CURSOR_PNG_NAME)
             keyframes = cursor_keyframes(
-                planned, sidecar_cursor_reader(frames_dir), screen.id, CURSOR_HOTSPOT
+                planned, sidecar_cursor_reader(index.info_dir), screen.id, CURSOR_HOTSPOT
             )
             cursor = cursor_expressions(keyframes)
-        graph = filter_graph(cursor)
+        graph = filter_graph(cursor, len(audio_inputs))
         graph_file: str | None = None
         if len(graph) > FILTER_INLINE_MAX_CHARS:
             graph_file = FILTER_SCRIPT_NAME
@@ -387,7 +566,7 @@ def export_recording(
             partial,
             duration_ms,
             start_ms,
-            audio_input,
+            audio_inputs or None,
             request.draw_cursor,
             graph,
             graph_file,
@@ -398,9 +577,19 @@ def export_recording(
         if progress is not None:
             progress(0.0, "starting ffmpeg")
         try:
-            _run_ffmpeg(cmd, work, duration_ms, progress, cancel)
+            run = _run_ffmpeg(cmd, work, duration_ms, progress, cancel)
+            if run.input_error is not None:
+                raise ExportError(
+                    "OUTPUT_TRUNCATED",
+                    "ffmpeg could not read an input to its end, the video would be cut "
+                    f"short:\n{run.input_error}",
+                )
             if not partial.is_file():
                 raise ExportError("FFMPEG_FAILED", f"ffmpeg produced no output at {partial}")
+            if progress is not None:
+                progress(1.0, "checking the video")
+            frames_written = _verify_video(ffmpeg, partial, duration_ms, cancel)
+            log.info("video checked: %d frames for %d ms", frames_written, duration_ms)
             try:
                 os.replace(partial, output)
             except OSError as exc:
@@ -456,6 +645,10 @@ __all__ = [
     "build_command",
     "export_recording",
     "filter_graph",
+    "frames_with_picture",
+    "minimum_frames",
     "normalise_output",
     "partial_output",
+    "probe_command",
+    "verify_video",
 ]

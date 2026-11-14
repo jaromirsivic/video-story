@@ -19,12 +19,17 @@ from video_story import __version__
 from video_story.core.config import (
     Config,
     ConfigError,
+    StateFolderError,
+    config_location,
     config_path,
     load_config,
     save_config,
     update_config,
 )
 from video_story.core.session import SessionPaths, new_session_id
+from video_story.host.agent_output import DEFAULT_INLINE_CHARS
+from video_story.host.errors import HostError
+from video_story.host.waiting import DEFAULT_WAIT_S
 
 log = logging.getLogger("video_story")
 
@@ -32,6 +37,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_UNSUPPORTED = 3
+EXIT_SETUP_NEEDED = 4  # `setup --check`: the model or FFmpeg is missing (JSON on stdout)
+EXIT_CODE_KEY = "_exit_code"  # a command result may carry a non-zero exit code
 
 
 class CliError(Exception):
@@ -100,7 +107,7 @@ def _session_paths(args: argparse.Namespace, cfg: Config) -> SessionPaths:
 def cmd_config(args: argparse.Namespace) -> dict[str, Any]:
     path = _config_file(args) or config_path()
     if args.action == "path":
-        return {"path": str(path), "exists": path.exists()}
+        return config_location(_config_file(args), "--config")
     if args.action == "get":
         cfg = load_config(path)
         data = cfg.to_json_dict()
@@ -165,10 +172,30 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
     return run_doctor(_load(args), fix=args.fix)
 
 
-def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
-    from video_story.host.doctor import run_doctor
+def setup_status(cfg: Config) -> dict[str, Any]:
+    """``setup --check``: is anything missing that ``setup`` downloads? Fast: the model
+    is only looked for (not verified) and nothing is created."""
+    from video_story.host.readiness import check_readiness
 
-    return run_doctor(_load(args), fix=True, download_model=True)
+    result = check_readiness(cfg)
+    result[EXIT_CODE_KEY] = EXIT_OK if result["ok"] else EXIT_SETUP_NEEDED
+    return result
+
+
+def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
+    if args.check:
+        return setup_status(_load(args))
+    from video_story.host.setup import install_components
+
+    result = install_components(_load(args), _config_file(args))
+    if not result["ok"]:
+        raise HostError(
+            "SETUP_FAILED",
+            "Some components could not be installed.",
+            4,
+            **{k: v for k, v in result.items() if k not in ("ok", "code")},
+        )
+    return result
 
 
 def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
@@ -186,7 +213,9 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
         raise CliError(exc.code, str(exc)) from exc
     result = info.to_dict()
     if args.detach:
-        result["next"] = f"video-story wait --session {info.session_id} --timeout 240"
+        result["next"] = (
+            f"video-story wait --session {info.session_id} --timeout {DEFAULT_WAIT_S:g}"
+        )
         return result
     paths = SessionPaths(cfg.recording_folder, info.session_id)
     result.update(wait_for_session(paths, timeout_s=args.timeout if args.timeout else 10**9))
@@ -231,25 +260,27 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_sessions(args: argparse.Namespace) -> dict[str, Any]:
+    """Recent sessions, one compact entry each (``status --session`` has the full state)."""
     from video_story.core.session import list_sessions
-    from video_story.host.runner import session_status
+    from video_story.host.runner import session_summary
 
     cfg = _load(args)
-    items = []
-    for paths in list_sessions(cfg.recording_folder)[: args.limit]:
-        try:
-            status = session_status(paths)
-        except Exception as exc:
-            status = {"session_id": paths.session_id, "status": "unknown", "message": str(exc)}
-        items.append(status)
-    return {"recording_folder": str(cfg.recording_folder), "sessions": items}
+    found = list_sessions(cfg.recording_folder)
+    shown = found[: max(0, args.limit)]
+    return {
+        "recording_folder": str(cfg.recording_folder),
+        "total": len(found),
+        "truncated": len(shown) < len(found),
+        "note": "Newest first, compact; `status --session <id>` returns the full state.",
+        "sessions": [session_summary(paths) for paths in shown],
+    }
 
 
 def cmd_describe(args: argparse.Namespace) -> dict[str, Any]:
     from video_story.host.runner import describe_recording
 
     cfg = _load(args)
-    return describe_recording(_session_paths(args, cfg))
+    return describe_recording(_session_paths(args, cfg), inline_chars=args.inline_chars)
 
 
 def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
@@ -258,9 +289,115 @@ def cmd_frames(args: argparse.Namespace) -> dict[str, Any]:
     cfg = _load(args)
     paths = _session_paths(args, cfg)
     try:
-        return frames_at(paths, args.at, screen=args.screen, window_ms=args.window)
+        return frames_at(
+            paths,
+            args.at,
+            screen=args.screen,
+            window_ms=args.window,
+            include_drawings=not args.no_drawings,
+        )
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
+
+
+def cmd_timeline(args: argparse.Namespace) -> dict[str, Any]:
+    """Speech and screen events of the cropped range as one compact text timeline.
+
+    The text goes to a file (``timeline_file``: plain text, one event per line) and is
+    repeated in the JSON only when it is short: stdout stays small however long the
+    recording is.
+    """
+    from video_story.host.agent_output import (
+        TIMELINE_FILE_NAME,
+        deliver_lines,
+        output_target,
+        split_lines,
+    )
+    from video_story.host.events import build_timeline
+    from video_story.host.runner import SessionError
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    start_ms, end_ms = args.start_ms, args.end_ms
+    if args.all:
+        start_ms, end_ms = 0, 10**12
+    try:
+        result = build_timeline(paths, start_ms, end_ms, mouse=args.mouse)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    text = result.pop("timeline")
+    target = output_target(args.out, paths.agent_dir() / TIMELINE_FILE_NAME)
+    done = deliver_lines(
+        split_lines(text), target, args.inline_chars, "timeline", "plain text, one event per line"
+    )
+    result["timeline_file"] = str(done.file) if done.file is not None else None
+    result["timeline_lines"] = done.lines
+    result["timeline_chars"] = done.chars
+    result["timeline_inline"] = done.inline
+    if done.note:
+        result["timeline_note"] = done.note
+    if done.inline:
+        result["timeline"] = text
+    return result
+
+
+def cmd_mouse(args: argparse.Namespace) -> dict[str, Any]:
+    """Every detail of the mouse actions: paths, bounds, ancestors, the whole content.
+
+    ``--at``: the one action, inline. Without it the actions and rest points of the
+    range go to a file (``mouse_file``: JSON Lines in time order) and are repeated in
+    the JSON only when they are short.
+    """
+    from video_story.host.agent_output import MOUSE_DETAIL_FILE_NAME, deliver_lines, output_target
+    from video_story.host.events import build_mouse_detail, mouse_record_lines, mouse_records
+    from video_story.host.mouse_timeline import DETAIL_PATH_POINTS
+    from video_story.host.runner import SessionError
+
+    cfg = _load(args)
+    paths = _session_paths(args, cfg)
+    start_ms, end_ms = args.start_ms, args.end_ms
+    if args.all:
+        start_ms, end_ms = 0, 10**12
+    one = args.at is not None
+    try:
+        result = build_mouse_detail(
+            paths, start_ms, end_ms, args.at, max_path_points=DETAIL_PATH_POINTS if one else None
+        )
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    if one or not result.get("recorded"):
+        return result
+    actions, rest_points = result.pop("actions"), result.pop("rest_points")
+    lines = mouse_record_lines(mouse_records({"actions": actions, "rest_points": rest_points}))
+    target = output_target(args.out, paths.agent_dir() / MOUSE_DETAIL_FILE_NAME)
+    done = deliver_lines(
+        lines,
+        target,
+        args.inline_chars,
+        "mouse",
+        'JSON Lines in time order, one action or rest point (kind "rest") per line, '
+        'each starting with its kind and time "t"',
+    )
+    result["action_count"] = len(actions)
+    result["rest_point_count"] = len(rest_points)
+    result["mouse_file"] = str(done.file) if done.file is not None else None
+    result["mouse_lines"] = done.lines
+    result["mouse_chars"] = done.chars
+    result["mouse_inline"] = done.inline
+    if done.note:
+        result["mouse_note"] = done.note
+    if done.inline:
+        result["actions"] = actions
+        result["rest_points"] = rest_points
+    return result
+
+
+def _require_audio(paths: Any, base: Path) -> None:
+    """A recording without any audio track (microphone or computer) cannot be transcribed."""
+    from video_story.core.audio_mix import has_audio
+
+    if not has_audio(paths, base):
+        raise CliError("NO_AUDIO", f"no audio file {paths.audio_path(base)}")
 
 
 def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
@@ -276,8 +413,7 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
     except SessionError as exc:
         raise CliError(exc.code, str(exc)) from exc
     base = paths.current_dir
-    if not paths.audio_path(base).exists():
-        raise CliError("NO_AUDIO", f"no audio.wav in {base}")
+    _require_audio(paths, base)
 
     def progress(fraction: float, text: str) -> None:
         log.info("%3d%% %s", int(fraction * 100), text)
@@ -297,6 +433,182 @@ def cmd_transcribe(args: argparse.Namespace) -> dict[str, Any]:
         "language": result.transcript.language,
         "segments": len(result.transcript.segments),
         "seconds": round(time.monotonic() - started, 1),
+    }
+
+
+def cmd_transcribe_stream(args: argparse.Namespace) -> dict[str, Any]:
+    """Transcribe from ``--from-ms`` on, one JSON event per line (the editor's worker).
+
+    Nothing is written to the recording: the editor that started this process stores
+    the segments. The last line is the ``done`` event (``ok`` true); a failure is the
+    usual error object on stderr with a non-zero exit code.
+    """
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.pipeline import resume_context, stream_transcription
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    base = paths.current_dir
+    _require_audio(paths, base)
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    start_ms = max(0, args.from_ms)
+    language, prompt = resume_context(paths, base, start_ms)
+    return stream_transcription(
+        paths,
+        cfg,
+        base_dir=base,
+        start_ms=start_ms,
+        emit=emit_event,
+        language=language,
+        initial_prompt=prompt,
+    )
+
+
+def cmd_transcribe_live(args: argparse.Namespace) -> dict[str, Any]:
+    """Transcribe the growing audio of a recording in progress (the window's worker).
+
+    One JSON event per line on stdout (see :mod:`video_story.transcribe.live_worker`);
+    nothing is written to the recording. Ends when stdin closes or says ``stop``.
+    """
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.transcribe.live_worker import run_live_worker
+
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    return run_live_worker(
+        paths, cfg, args.mode, emit=emit_event, stdin=sys.stdin, threads=args.threads
+    )
+
+
+# The archive worker runs below normal priority ("faster" of ``lower_own_priority``),
+# not in the background mode of "light": on Windows a child process inherits the
+# below-normal priority class, while of the background mode it inherits only the low
+# I/O and memory priority - FFmpeg (x264, the heavy part) would run at normal CPU
+# priority (measured on Windows 11, 2026-11-13).
+ARCHIVE_PRIORITY_MODE = "faster"
+ARCHIVE_CANCELLED = "CANCELLED"  # the worker was stopped (the editor closed): no failure
+
+
+def cmd_archive_stream(args: argparse.Namespace) -> dict[str, Any]:
+    """Archive a saved recording, one JSON event per line (the editor's archive worker).
+
+    A recording whose transcript is not complete is transcribed first (the segments
+    are stored as they come, so a stopped run resumes where it ended). Events:
+    ``phase`` (``transcribing`` / ``archiving``), ``progress`` (``phase``, ``fraction``
+    0..1 of that phase) and the returned ``done`` (``status``, ``leftovers``). With
+    ``--stop-on-eof`` the run stops cleanly (FFmpeg cancelled, partial files removed)
+    once stdin is closed: the editor closes it when it quits.
+
+    Nobody waits for an archive, so the process lowers its own priority before it does
+    anything (:data:`ARCHIVE_PRIORITY_MODE`); the FFmpeg and whisper processes it
+    starts inherit that.
+
+    A run that ends with an error - in the transcription as much as in the archiving,
+    but not one that was stopped - is recorded in ``archive.json``: with nothing
+    deleted yet the recording is given back (status ``failed``, the attempt counted
+    once; see :func:`video_story.core.archive_state.record_archive_failure`).
+    """
+    import threading
+
+    from video_story.core.archive_state import record_archive_failure
+    from video_story.core.transcript import Segment, transcript_status
+    from video_story.editor.recording import LoadedRecording
+    from video_story.export.archive import ArchiveError, archive_recording
+    from video_story.host.runner import SessionError, resolve_session
+    from video_story.platform.process import lower_own_priority
+    from video_story.transcribe.pipeline import stream_transcription
+
+    log.info("archive worker priority: %s", lower_own_priority(ARCHIVE_PRIORITY_MODE))
+    cfg = _load(args)
+    try:
+        paths = resolve_session(cfg, args.directory)
+    except SessionError as exc:
+        raise CliError(exc.code, str(exc)) from exc
+    base = paths.final_dir
+    stop = threading.Event()
+
+    def emit_event(event: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    if args.stop_on_eof:
+
+        def watch_stdin() -> None:
+            try:
+                while sys.stdin.read(1):
+                    pass
+            except (OSError, ValueError):
+                pass
+            stop.set()
+
+        threading.Thread(target=watch_stdin, name="stdin-eof", daemon=True).start()
+
+    def transcribe() -> None:
+        _require_audio(paths, base)
+        emit_event({"event": "phase", "phase": "transcribing"})
+        recording = LoadedRecording.load(paths)
+
+        def on_transcription(event: dict[str, Any]) -> None:
+            kind = event.get("event")
+            if kind == "segment":
+                segment = Segment.from_dict(event)
+                recording.add_segments([segment], segment.end_ms)
+            elif kind == "progress":
+                total = max(1, recording.duration_ms)
+                reached = recording.transcribed_ms
+                fraction = max(float(event.get("fraction", 0.0)), reached / total)
+                emit_event(
+                    {"event": "progress", "phase": "transcribing", "fraction": min(1.0, fraction)}
+                )
+
+        done = stream_transcription(
+            paths, cfg, base_dir=base, start_ms=recording.transcribed_ms, emit=on_transcription
+        )
+        recording.finish_transcript(done.get("language"), done.get("model"), done.get("backend"))
+        if stop.is_set():
+            raise CliError(ARCHIVE_CANCELLED, "archiving was stopped")
+
+    def on_progress(fraction: float, _text: str) -> None:
+        emit_event({"event": "progress", "phase": "archiving", "fraction": round(fraction, 4)})
+
+    try:
+        if not transcript_status(paths.transcript_json_path(base)).complete:
+            transcribe()
+        emit_event({"event": "phase", "phase": "archiving"})
+        try:
+            state = archive_recording(paths, cfg, progress=on_progress, cancel=stop.is_set)
+        except ArchiveError as exc:
+            raise CliError(exc.code, str(exc)) from exc
+    except Exception as exc:
+        # Whatever went wrong (no audio, whisper, FFmpeg, a bug): unless the run was
+        # stopped, the recording must not stay locked in the archive queue.
+        if getattr(exc, "code", None) != ARCHIVE_CANCELLED and not stop.is_set():
+            reason = exc.message if isinstance(exc, CliError) else f"{type(exc).__name__}: {exc}"
+            try:
+                record_archive_failure(paths, reason)
+            except OSError as error:
+                log.warning("cannot record the failed archiving of %s: %s", paths.session_id, error)
+        raise
+    return {
+        "event": "done",
+        "recording_dir": str(base),
+        "status": str(state.status),
+        "leftovers": state.leftovers,
     }
 
 
@@ -363,6 +675,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     """Headless recording for development and integration tests (no window)."""
     from video_story.capture.recorder import Recorder
     from video_story.core.manifest import write_manifest
+    from video_story.host.live_transcription import LiveTranscriber, live_transcription_available
     from video_story.platform import get_platform
 
     cfg = _load(args)
@@ -370,6 +683,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         cfg = cfg.with_values(capture_interval_ms=args.interval)
     if args.folder:
         cfg = cfg.with_values(recording_folder=str(args.folder))
+    if args.live_transcription:
+        cfg = cfg.with_values(live_transcription=args.live_transcription)
     platform = get_platform()
     paths = SessionPaths(cfg.recording_folder, new_session_id(cfg.recording_folder))
     paths.create_work_dirs()
@@ -377,11 +692,23 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     try:
         recorder = Recorder(cfg, platform, paths, record_audio=not args.no_audio)
         recorder.start()
+        live = None
+        if not args.no_audio and live_transcription_available(cfg) is None:
+            live = LiveTranscriber(paths, cfg, config_file=_config_file(args))
+            if not live.start():
+                live = None
         deadline = time.monotonic() + args.seconds
+        next_tick = time.monotonic() + 1
         while time.monotonic() < deadline and recorder.running:
             time.sleep(0.05)
+            if live is not None and time.monotonic() >= next_tick:
+                next_tick += 1
+                live.observe_drops(recorder.dropped_ticks)
         summary = recorder.stop()
         manifest = summary.to_manifest(cfg, platform.name)
+        if live is not None:
+            live.stop()
+            manifest.live_transcription = live.info(summary.recorded_duration_ms)
         write_manifest(paths.manifest_path(paths.work_dir), manifest)
     finally:
         # The log file must be closed before the work directory is renamed (Windows).
@@ -398,6 +725,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "audio": summary.audio.__dict__ if summary.audio else None,
         "auto_stopped": summary.auto_stopped,
         "error": summary.error,
+        "failed_grabs": summary.failed_grabs,
+        "live_transcription": manifest.live_transcription,
     }
 
 
@@ -427,7 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Video Story: record narrated screen sessions for AI agents.",
     )
     parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING or ERROR")
-    parser.add_argument("--config", help="path to config.json (default: plugin directory)")
+    parser.add_argument(
+        "--config", help="path to config.json (default: the state folder, see `config path`)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("version", help="show the plugin version")
@@ -445,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--editor", help="editor session file from `edit --detach`: wait for Process / close"
     )
-    p.add_argument("--timeout", type=float, default=240.0, help="seconds (default 240)")
+    p.add_argument("--timeout", default=DEFAULT_WAIT_S, help="seconds (default 45, 0: status only)")
     p.set_defaults(func=cmd_wait)
 
     p = sub.add_parser("status", help="current state of a session")
@@ -456,8 +787,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_sessions)
 
-    p = sub.add_parser("describe", help="paths, manifest and transcript of a recording")
+    inline_help = (
+        "also return the text in the JSON when it has at most N characters "
+        f"(default {DEFAULT_INLINE_CHARS}; 0 = never)"
+    )
+
+    p = sub.add_parser("describe", help="paths, manifest and crop of a recording")
     p.add_argument("--session")
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
     p.set_defaults(func=cmd_describe)
 
     p = sub.add_parser("frames", help="frames matching a moment of the timeline")
@@ -469,11 +806,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="cursor (screen the cursor was on), all, or a screen id like screen2",
     )
     p.add_argument("--window", type=int, default=0, help="also list frames within +/- N ms")
+    p.add_argument(
+        "--no-drawings",
+        action="store_true",
+        help="leave out the drawings list of every frame (the timeline already has them)",
+    )
     p.set_defaults(func=cmd_frames)
+
+    p = sub.add_parser(
+        "timeline",
+        help="speech, drawings, clipboard, cursor, mouse and keypoints as one text timeline",
+    )
+    p.add_argument("--session")
+    p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
+    p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
+    p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.add_argument(
+        "--mouse",
+        choices=["auto", "full", "summary", "off"],
+        default="auto",
+        help="mouse lines: auto (all, scrolls merged when there are very many), full, "
+        "summary (scrolls merged per 10 s) or off",
+    )
+    p.add_argument(
+        "--out",
+        help="write the timeline text here instead of <recording_dir>/agent/timeline.txt",
+    )
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
+    p.set_defaults(func=cmd_timeline)
+
+    p = sub.add_parser(
+        "mouse", help="every detail of the mouse actions (elements, content, paths, bounds)"
+    )
+    p.add_argument("--session")
+    p.add_argument("--at", type=int, help="only the action at this time (a timeline line's ms)")
+    p.add_argument("--start-ms", type=int, help="start of the range (default: the crop start)")
+    p.add_argument("--end-ms", type=int, help="end of the range (default: the crop end)")
+    p.add_argument("--all", action="store_true", help="the whole recording, ignoring the crop")
+    p.add_argument(
+        "--out",
+        help="without --at: write the actions (JSON Lines) here instead of "
+        "<recording_dir>/agent/mouse.jsonl",
+    )
+    p.add_argument("--inline-chars", type=int, default=DEFAULT_INLINE_CHARS, help=inline_help)
+    p.set_defaults(func=cmd_mouse)
 
     p = sub.add_parser("transcribe", help="(re)transcribe an existing recording directory")
     p.add_argument("directory", help="session id or recording directory")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("transcribe-stream", help=argparse.SUPPRESS)  # internal: editor worker
+    p.add_argument("directory", help="session id or recording directory")
+    p.add_argument("--from-ms", type=int, default=0, help="resume at this time")
+    p.set_defaults(func=cmd_transcribe_stream)
+
+    p = sub.add_parser("transcribe-live", help=argparse.SUPPRESS)  # internal: window worker
+    p.add_argument("directory", help="session id or work directory of a recording")
+    p.add_argument("--mode", choices=["light", "faster"], default="light")
+    p.add_argument("--threads", type=int, default=None, help="whisper threads (default: mode)")
+    p.set_defaults(func=cmd_transcribe_live)
+
+    p = sub.add_parser("archive-stream", help=argparse.SUPPRESS)  # internal: editor worker
+    p.add_argument("directory", help="session id or recording directory")
+    p.add_argument("--stop-on-eof", action="store_true", help="stop once stdin is closed")
+    p.set_defaults(func=cmd_archive_stream)
 
     p = sub.add_parser("export", help="render a recording to MP4 (+ SRT) with ffmpeg")
     p.add_argument("--session", required=True, help="session id or recording directory")
@@ -509,6 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("setup", help="prepare the environment: FFmpeg and the whisper model")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help=f"only report what is missing; exit code {EXIT_SETUP_NEEDED} when setup is needed",
+    )
     p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("mcp", help="run the MCP server (stdio by default)")
@@ -527,32 +928,85 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--folder", type=Path, help="recording folder (overrides config)")
     p.add_argument("--no-audio", action="store_true")
     p.add_argument("--keep-work", action="store_true", help="leave the recording in .work/")
+    p.add_argument(
+        "--live-transcription",
+        choices=["off", "light", "faster"],
+        help="transcribe while recording (overrides config)",
+    )
     p.set_defaults(func=cmd_record)
 
     return parser
 
 
+def use_utf8_streams() -> None:
+    """Write stdout and stderr as UTF-8 whatever the console or pipe encoding is.
+
+    A piped stdout on Windows defaults to the ANSI code page (cp1250, cp1252, ...),
+    which cannot encode many characters found in window texts or transcripts (for
+    example U+FFFC), so ``emit`` crashed; the agents and the editor's workers read
+    the output as UTF-8 anyway. Lone surrogates are escaped instead of raising.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # replaced by a test harness or an embedding host
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):  # pragma: no cover - detached or closed stream
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    use_utf8_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
     setup_logging(args.log_level)
     try:
         result = args.func(args)
+    except HostError as exc:
+        sys.stderr.write(json.dumps(exc.to_dict(), ensure_ascii=False) + "\n")
+        return exc.exit_code
     except CliError as exc:
         emit_error(exc.code, exc.message)
         return exc.exit_code
     except ConfigError as exc:
         emit_error("CONFIG_INVALID", str(exc))
         return EXIT_USAGE
+    except StateFolderError as exc:
+        emit_error(exc.code, str(exc))
+        return EXIT_ERROR
     except KeyboardInterrupt:
         emit_error("INTERRUPTED", "interrupted")
         return 130
+    except ModuleNotFoundError as exc:
+        dependency = (exc.name or "").split(".")[0]
+        if dependency in {
+            "mcp",
+            "anyio",
+            "numpy",
+            "PySide6",
+            "PIL",
+            "mss",
+            "sounddevice",
+            "pywhispercpp",
+            "soundcard",
+            "comtypes",
+            "Xlib",
+        }:
+            emit_error("ENVIRONMENT_INVALID", f"Missing library {exc.name}. Run uv sync --locked.")
+            return 23
+        log.exception("internal import failed")
+        emit_error("INTERNAL_ERROR", str(exc))
+        return EXIT_ERROR
     except Exception as exc:  # last resort: still produce machine readable output
         log.exception("command failed")
         emit_error("INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
         return EXIT_ERROR
+    exit_code = result.pop(EXIT_CODE_KEY, EXIT_OK)
+    if args.command == "mcp":
+        return exit_code  # stdout belongs exclusively to the MCP protocol
     emit(result)
-    return EXIT_OK
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover

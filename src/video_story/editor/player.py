@@ -1,9 +1,10 @@
 """Playback clock driven by the audio output (sounddevice), with a wall-clock fallback.
 
-The WAV file is opened with :mod:`wave` and read block by block inside the PortAudio
-callback, so nothing is loaded into memory. The playhead position is the number of
-samples handed to the device (minus the reported output latency) added to the start
-position. Playback only runs inside ``[in_ms, out_ms)``.
+The audio (the mix of the switched-on tracks, a
+:class:`~video_story.core.audio_mix.MixReader`) is read block by block inside the
+PortAudio callback, so nothing is loaded into memory. The playhead position is the
+number of samples handed to the device (minus the reported output latency) added to the
+start position. Playback only runs inside ``[in_ms, out_ms)``.
 """
 
 from __future__ import annotations
@@ -11,11 +12,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import wave
 from typing import Any
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
+
+from video_story.core.audio_mix import MixReader
 
 from .recording import AudioFile
 
@@ -30,24 +32,6 @@ def _load_sounddevice() -> Any | None:
         log.warning("sounddevice unavailable: %s", exc)
         return None
     return sd
-
-
-def _to_int16(raw: bytes, sample_width: int, channels: int) -> np.ndarray:
-    """Interleaved PCM to mono int16 samples."""
-    if sample_width == 2:
-        data = np.frombuffer(raw, dtype="<i2")
-    elif sample_width == 1:
-        data = ((np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128) << 8).astype(np.int16)
-    elif sample_width == 4:
-        data = (np.frombuffer(raw, dtype="<i4") >> 16).astype(np.int16)
-    elif sample_width == 3:
-        b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
-        data = (b[:, 1].astype(np.int16) | (b[:, 2].astype(np.int16) << 8)).astype(np.int16)
-    else:
-        raise ValueError(f"unsupported sample width {sample_width}")
-    if channels > 1:
-        data = data[: len(data) // channels * channels].reshape(-1, channels)[:, 0]
-    return data
 
 
 class Player(QObject):
@@ -65,7 +49,7 @@ class Player(QObject):
         self._position_ms = 0  # position while paused / stopped
         self._start_ms = 0
         self._lock = threading.Lock()
-        self._wave: wave.Wave_read | None = None
+        self._wave: MixReader | None = None
         self._stream: Any | None = None
         self._sd: Any | None = None
         self._delivered = 0  # samples handed to the device since start
@@ -213,7 +197,7 @@ class Player(QObject):
         if sd is None:
             return False
         try:
-            wf = wave.open(str(audio.path), "rb")
+            wf = audio.open()
             wf.setpos(self._frame_of(start_ms))
             self._wave = wf
             self._end_frame = self._frame_of(self._out_ms)
@@ -247,9 +231,7 @@ class Player(QObject):
             remaining = max(0, self._end_frame - wf.tell())
             count = min(frames, remaining)
             if count > 0:
-                audio = self._audio
-                assert audio is not None
-                samples = _to_int16(wf.readframes(count), audio.sample_width, audio.channels)
+                samples = wf.read(count)
                 count = min(count, len(samples))
                 outdata[:count, 0] = samples[:count]
             if count < frames:

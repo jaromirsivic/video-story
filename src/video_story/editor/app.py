@@ -12,8 +12,12 @@ import os
 import sys
 from pathlib import Path
 
-from video_story.core.config import load_config
-from video_story.host.editor_launcher import check_editor_session, editor_lock_path
+from video_story.host import startup
+from video_story.host.editor_launcher import (
+    check_editor_session,
+    editor_lock_path,
+    recover_left_behind,
+)
 from video_story.host.editor_lock import EditorLock, lock_holder_pid
 from video_story.host.editor_session import write_editor_event
 from video_story.host.runner import SessionError
@@ -58,6 +62,20 @@ def run_editor(
     ``ALREADY_RUNNING`` (another editor holds the lock; its window is raised first),
     ``NO_RECORDINGS``, ``UNKNOWN_SESSION`` and ``INVALID_SESSION`` as for ``--detach``.
     """
+    request = startup.editor_request(editor_session) if editor_session is not None else None
+    if request is not None and not request.is_file():
+        request = None
+    config = startup.prepare(config_file, request, "edit")
+    try:
+        return _run_editor(
+            config, session_id, config_file, editor_session, recording_session, request
+        )
+    except Exception as exc:
+        startup.fail(request, exc)
+        raise
+
+
+def _run_editor(config, session_id, config_file, editor_session, recording_session, request):
     platform = get_platform()
     platform.prepare_process()  # DPI awareness must be set before Qt starts
 
@@ -65,10 +83,12 @@ def run_editor(
     from PySide6.QtWidgets import QApplication
 
     from video_story.editor.window import EditorWindow
+    from video_story.ui.icons import install_app_icon
 
-    config = load_config(config_file)
     config.recording_folder.mkdir(parents=True, exist_ok=True)
-    check_editor_session(config, session_id)
+    if request is None:
+        recover_left_behind(config)
+        check_editor_session(config, session_id)
     lock_path = editor_lock_path(config)
     lock = EditorLock(lock_path)
     if not lock.acquire():
@@ -83,6 +103,7 @@ def run_editor(
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Video Story Editor")
+    install_app_icon(app, "VideoStory.Editor")
     app.setOrganizationName("VideoStory")
     settings = QSettings("VideoStory", "Editor")
     try:
@@ -92,11 +113,14 @@ def run_editor(
             settings=settings,
             editor_session=editor_session,
             recording_session=recording_session,
+            config_file=config_file,
         )
         window.restore_settings()
+        startup.ensure_valid(request)
         window.show()
         window.raise_()
         window.activateWindow()
+        startup.watch_window(window, request, editor=True)
         log.info("editor shown (session %s)", session_id or "newest")
         return app.exec()
     finally:

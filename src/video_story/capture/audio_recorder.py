@@ -49,6 +49,7 @@ class AudioResult:
     channels: int
     frames_written: int
     dropped_blocks: int
+    error: str | None = None  # why writing stopped early (disk full, ...), else None
 
     @property
     def duration_ms(self) -> int:
@@ -151,14 +152,21 @@ class AudioRecorder:
         self._wave: wave.Wave_write | None = None
         self._frames_written = 0
         self._dropped_blocks = 0
+        self._write_error: str | None = None
         self._lock = threading.Lock()
+        # Pause: the blocks are dropped (the paused time is cut out of the recording).
+        # Mute: silence of the same length is written instead (the track stays aligned).
+        self.paused = False
+        self.muted = False
 
     # Callbacks run on the PortAudio thread: keep them tiny.
     def _callback(self, indata: np.ndarray, frames: int, _time: Any, status: Any) -> None:
         if status:
             log.debug("audio status: %s", status)
+        if self.paused:
+            return
         try:
-            self._queue.put_nowait(indata.copy())
+            self._queue.put_nowait(np.zeros_like(indata) if self.muted else indata.copy())
         except queue.Full:
             self._dropped_blocks += 1
 
@@ -168,11 +176,23 @@ class AudioRecorder:
             block = self._queue.get()
             if block is None:
                 break
+            if self._write_error is not None:
+                continue  # keep draining, so that stop() never blocks on a full queue
             if block.ndim == 2 and block.shape[1] > 1:
                 block = block.mean(axis=1).astype(np.int16)
-            self._wave.writeframes(block.tobytes())
+            try:
+                self._wave.writeframes(block.tobytes())
+            except Exception as exc:  # disk full, folder gone, WAV size limit
+                log.exception("audio write failed; the rest of the audio is lost")
+                self._write_error = f"audio write failed: {exc}"
+                continue
             with self._lock:
                 self._frames_written += len(block)
+
+    @property
+    def error(self) -> str | None:
+        """Why the audio stopped being written (``None`` while everything is fine)."""
+        return self._write_error
 
     def start(self) -> None:
         sd = _sd()
@@ -211,11 +231,18 @@ class AudioRecorder:
                 log.warning("audio stream close failed: %s", exc)
             self._stream = None
         if self._writer is not None:
-            self._queue.put(None)
+            try:
+                self._queue.put(None, timeout=10)
+            except queue.Full:  # the writer is gone; nothing is left to flush
+                log.warning("audio writer did not take the stop marker")
             self._writer.join(timeout=30)
             self._writer = None
         if self._wave is not None:
-            self._wave.close()
+            try:
+                self._wave.close()
+            except Exception as exc:  # the header of a file that could not be written
+                log.warning("audio file close failed: %s", exc)
+                self._write_error = self._write_error or f"audio close failed: {exc}"
             self._wave = None
         result = AudioResult(
             device=self.device.name,
@@ -223,6 +250,7 @@ class AudioRecorder:
             channels=self.channels,
             frames_written=self.frames_written,
             dropped_blocks=self._dropped_blocks,
+            error=self._write_error,
         )
         log.info(
             "Audio recording stopped: %d ms, %d dropped blocks",
